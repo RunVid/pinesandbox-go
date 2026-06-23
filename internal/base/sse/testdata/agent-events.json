@@ -1,0 +1,55 @@
+{
+  "stream": "agent_events",
+  "description": "GET /v1/sessions/{name}/agent/events. TODAY: `id:`+`data:` (type lives in the body; no `event:` line) \u2014 valid WHATWG, decodes cleanly. TARGET (Phase 1): adds an `event:` line mirroring body `type`. Additive for WHATWG framers; the dual-listen patch already handles EventSource.onmessage consumers.",
+  "vectors": [
+    {
+      "name": "today-happy",
+      "generation": "today",
+      "whatwg_valid": true,
+      "wire": "id: 1\ndata: {\"type\":\"status\",\"payload\":{\"state\":\"running\"}}\n\nid: 2\ndata: {\"type\":\"result\",\"payload\":{\"status\":\"ok\",\"terminal_reason\":\"completed\"},\"terminal\":true}\n\n",
+      "frames": [
+        {
+          "event": "message",
+          "data": "{\"type\":\"status\",\"payload\":{\"state\":\"running\"}}",
+          "id": "1"
+        },
+        {
+          "event": "message",
+          "data": "{\"type\":\"result\",\"payload\":{\"status\":\"ok\",\"terminal_reason\":\"completed\"},\"terminal\":true}",
+          "id": "2"
+        }
+      ]
+    },
+    {
+      "name": "target-happy",
+      "generation": "target",
+      "whatwg_valid": true,
+      "wire": "id: 1\nevent: status\ndata: {\"type\":\"status\",\"payload\":{\"state\":\"running\"}}\n\nid: 2\nevent: result\ndata: {\"type\":\"result\",\"payload\":{\"status\":\"ok\",\"terminal_reason\":\"completed\"},\"terminal\":true}\n\n",
+      "frames": [
+        {
+          "event": "status",
+          "data": "{\"type\":\"status\",\"payload\":{\"state\":\"running\"}}",
+          "id": "1"
+        },
+        {
+          "event": "result",
+          "data": "{\"type\":\"result\",\"payload\":{\"status\":\"ok\",\"terminal_reason\":\"completed\"},\"terminal\":true}",
+          "id": "2"
+        }
+      ]
+    },
+    {
+      "name": "target-keepalive",
+      "generation": "target",
+      "whatwg_valid": true,
+      "wire": ": ka\n\nid: 5\nevent: reasoning\ndata: {\"type\":\"reasoning\",\"payload\":null}\n\n",
+      "frames": [
+        {
+          "event": "reasoning",
+          "data": "{\"type\":\"reasoning\",\"payload\":null}",
+          "id": "5"
+        }
+      ]
+    }
+  ]
+}

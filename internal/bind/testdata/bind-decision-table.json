@@ -1,0 +1,54 @@
+{
+  "description": "The attach/bind retry classification (PERSISTENCE_BIND_CONTRACT §5.3; extracted from the Ruby reference implementation, computer.rb). Three classes: readiness (deadline-bound convergence on a fresh pod), race (attempt-bound re-mint after a pod-identity shift), terminal (typed error, no same-pod retry).",
+  "readiness_retry": {
+    "policy": {
+      "bound": "deadline (bind_ready_timeout), NOT attempt count",
+      "envelope": "REUSE the held envelope byte-for-byte (same jti + ciphertext) — a settled bind answers consistently; the per-pod bind guard serializes"
+    },
+    "signals": {
+      "http_plain": [
+        { "status": 404, "problem_type": null, "note": "ingress: no Ready pod backs this host yet" },
+        { "status": 503, "problem_type": null, "note": "ingress: backend not up. ONLY a plain 404/503 (no problem_type) is a readiness signal — a problem-typed 404/503 is a real answer" }
+      ],
+      "problem_types": ["/errors/bind-in-progress"],
+      "transport": ["timeout", "connection_refused", "tls_handshake"]
+    }
+  },
+  "race_retry": {
+    "policy": {
+      "bound": "max_bind_attempts",
+      "envelope": "RE-MINT from scratch: refetch bind-pubkey, mint fresh attach credentials, reseal (the held envelope targets the old pod identity)"
+    },
+    "problem_types": [
+      "/errors/stale-coord-boot-id",
+      "/errors/wrong-pod-uid",
+      "/errors/ephem-pub-mismatch"
+    ],
+    "notes": "ephem-pub-mismatch is defensive — coord does not currently emit it; an ephem-key mismatch surfaces as hpke-decrypt-failed (terminal).",
+    "conditional": [
+      {
+        "problem_type": "/errors/bind-restore-failed",
+        "when": "status >= 500 AND the message does NOT indicate an epoch conflict",
+        "note": "transient broker/restore pipeline failure; the epoch-conflict variant is terminal (another pod won the lease)"
+      }
+    ]
+  },
+  "terminal": [
+    { "problem_type": "/errors/bind-rejected", "error_class": "BindAuthError", "note": "bind_token verification failed" },
+    { "problem_type": "/errors/bind-not-configured", "error_class": "BindError", "note": "pod has no bind keypair" },
+    { "problem_type": "/errors/already-bound-different-cid", "error_class": "PodPoisonedError", "note": "single-use pod bound elsewhere — recycle, never same-pod replay" },
+    { "problem_type": "/errors/pod-tainted", "error_class": "PodPoisonedError", "note": "prior bind tainted this pod" },
+    { "problem_type": "/errors/bind-restore-failed", "when": "message indicates an epoch conflict", "error_class": "ComputerAlreadyAttachedError", "note": "another pod holds this Computer's epoch lease" },
+    { "problem_type": "/errors/bind-restore-failed", "when": "otherwise (status < 500)", "error_class": "BrokerUnreachableError" }
+  ],
+  "status_fallback": [
+    { "statuses": [401, 403], "error_class": "BindAuthError" },
+    { "statuses": [409], "error_class": "BindError" },
+    { "statuses": [503], "error_class": "BrokerUnreachableError" },
+    { "statuses": "other", "error_class": "BindError" }
+  ],
+  "recovery_invariants": [
+    "coord 401 on a previously-bound ct_ => RebindRequired; NEVER an implicit in-place rebind",
+    "ct_ renews by activity (sliding idle TTL); there is no refresh endpoint"
+  ]
+}

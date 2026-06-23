@@ -1,0 +1,301 @@
+{
+  "description": "Per-slug retryable judgment \u2014 the language-neutral mirror of coord's control.RetryableDefault (pkg/control/problem.go). retryable=true: retrying the same operation (after refreshing preconditions where applicable) is a sane automated response. Every problem carries this on the wire (0C); SDKs use this table only as the fallback for older servers. Heuristic for unknown slugs: 412 true; 501 false; >=500 true; else false.",
+  "entries": [
+    {
+      "type": "/errors/unauthorized",
+      "status": 401,
+      "retryable": false
+    },
+    {
+      "type": "/errors/forbidden",
+      "status": 403,
+      "retryable": false
+    },
+    {
+      "type": "/errors/precondition-required",
+      "status": 428,
+      "retryable": false
+    },
+    {
+      "type": "/errors/precondition-failed",
+      "status": 412,
+      "retryable": true
+    },
+    {
+      "type": "/errors/malformed-json",
+      "status": 400,
+      "retryable": false
+    },
+    {
+      "type": "/errors/malformed-request",
+      "status": 400,
+      "retryable": false
+    },
+    {
+      "type": "/errors/invalid-field",
+      "status": 400,
+      "retryable": false
+    },
+    {
+      "type": "/errors/invalid-filename",
+      "status": 400,
+      "retryable": false
+    },
+    {
+      "type": "/errors/empty-patch",
+      "status": 400,
+      "retryable": false
+    },
+    {
+      "type": "/errors/actor-type-required",
+      "status": 400,
+      "retryable": false
+    },
+    {
+      "type": "/errors/invalid-transition",
+      "status": 422,
+      "retryable": false
+    },
+    {
+      "type": "/errors/control-not-held",
+      "status": 409,
+      "retryable": false
+    },
+    {
+      "type": "/errors/session-not-found",
+      "status": 404,
+      "retryable": false
+    },
+    {
+      "type": "/errors/session-busy",
+      "status": 409,
+      "retryable": true
+    },
+    {
+      "type": "/errors/desktop-bind-failed",
+      "status": 502,
+      "retryable": true
+    },
+    {
+      "type": "/errors/handoff-not-found",
+      "status": 404,
+      "retryable": false
+    },
+    {
+      "type": "/errors/handoff-unavailable",
+      "status": 409,
+      "retryable": true
+    },
+    {
+      "type": "/errors/handoff-expired",
+      "status": 410,
+      "retryable": false
+    },
+    {
+      "type": "/errors/handoff-not-human",
+      "status": 409,
+      "retryable": false
+    },
+    {
+      "type": "/errors/handoff-persistence-failed",
+      "status": 500,
+      "retryable": true
+    },
+    {
+      "type": "/errors/no-desktop-stream",
+      "status": 409,
+      "retryable": false
+    },
+    {
+      "type": "/errors/desktop-unavailable",
+      "status": 503,
+      "retryable": false
+    },
+    {
+      "type": "/errors/skills-unavailable",
+      "status": 503,
+      "retryable": false
+    },
+    {
+      "type": "/errors/secret-in-skill",
+      "status": 422,
+      "retryable": false
+    },
+    {
+      "type": "/errors/skill-author-failed",
+      "status": 502,
+      "retryable": true
+    },
+    {
+      "type": "/errors/author-in-flight",
+      "status": 409,
+      "retryable": true
+    },
+    {
+      "type": "/errors/author-not-found",
+      "status": 404,
+      "retryable": false
+    },
+    {
+      "type": "/errors/action-not-implemented",
+      "status": 501,
+      "retryable": false
+    },
+    {
+      "type": "/errors/computer-use-failed",
+      "status": 502,
+      "retryable": true
+    },
+    {
+      "type": "/errors/artifact-error",
+      "status": 500,
+      "retryable": true
+    },
+    {
+      "type": "/errors/artifact-not-found",
+      "status": 404,
+      "retryable": false
+    },
+    {
+      "type": "/errors/artifact-too-large",
+      "status": 413,
+      "retryable": false
+    },
+    {
+      "type": "/errors/capture-failed",
+      "status": 500,
+      "retryable": true
+    },
+    {
+      "type": "/errors/capture-not-enabled",
+      "status": 503,
+      "retryable": false
+    },
+    {
+      "type": "/errors/internal",
+      "status": 500,
+      "retryable": true
+    },
+    {
+      "type": "/errors/no-active-task",
+      "status": 404,
+      "retryable": false
+    },
+    {
+      "type": "/errors/no-active-turn",
+      "status": 409,
+      "retryable": false
+    },
+    {
+      "type": "/errors/no-pending-request",
+      "status": 409,
+      "retryable": false
+    },
+    {
+      "type": "/errors/stale-turn",
+      "status": 409,
+      "retryable": false
+    },
+    {
+      "type": "/errors/task-control-failed",
+      "status": 500,
+      "retryable": true
+    },
+    {
+      "type": "/errors/task-not-found",
+      "status": 404,
+      "retryable": false
+    },
+    {
+      "type": "/errors/task-not-ready",
+      "status": 409,
+      "retryable": true
+    },
+    {
+      "type": "/errors/bind-not-configured",
+      "status": 503,
+      "retryable": false
+    },
+    {
+      "type": "/errors/wrong-pod-uid",
+      "status": 409,
+      "retryable": true
+    },
+    {
+      "type": "/errors/stale-coord-boot-id",
+      "status": 409,
+      "retryable": true
+    },
+    {
+      "type": "/errors/already-bound-different-cid",
+      "status": 409,
+      "retryable": false
+    },
+    {
+      "type": "/errors/bind-in-progress",
+      "status": 409,
+      "retryable": true
+    },
+    {
+      "type": "/errors/bind-rejected",
+      "status": 401,
+      "retryable": false
+    },
+    {
+      "type": "/errors/bind-restore-failed",
+      "status": 500,
+      "retryable": true,
+      "note": "epoch-conflict variant is terminal \u2014 the emit site overrides (Phase 1 follow-up); clients also see the bind decision table"
+    },
+    {
+      "type": "/errors/hpke-decrypt-failed",
+      "status": 400,
+      "retryable": false
+    },
+    {
+      "type": "/errors/not-bound",
+      "status": 409,
+      "retryable": false
+    },
+    {
+      "type": "/errors/pod-tainted",
+      "status": 409,
+      "retryable": false
+    },
+    {
+      "type": "/errors/grant-cid-mismatch",
+      "status": 403,
+      "retryable": false
+    },
+    {
+      "type": "/errors/grant-downgrade",
+      "status": 403,
+      "retryable": false
+    },
+    {
+      "type": "/errors/grant-expired",
+      "status": 401,
+      "retryable": true
+    },
+    {
+      "type": "/errors/grant-hash-mismatch",
+      "status": 403,
+      "retryable": false
+    },
+    {
+      "type": "/errors/grant-malformed",
+      "status": 400,
+      "retryable": false
+    },
+    {
+      "type": "/errors/grant-refresh-rejected",
+      "status": 403,
+      "retryable": false
+    },
+    {
+      "type": "/errors/grant-wrong-cid",
+      "status": 403,
+      "retryable": false
+    }
+  ]
+}

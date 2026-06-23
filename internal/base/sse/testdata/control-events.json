@@ -1,0 +1,37 @@
+{
+  "stream": "control_events",
+  "description": "GET /v1/sessions/{name}/control/events. `id:`+`event:`+`data:` \u2014 TODAY == TARGET at the framing level (the only Phase-1 change is the additive body `type`). The event name lives on the `event:` line; the body is a typeless object. This is why Ruby needs a parser that reads the event-line-as-type (the consolidation target).",
+  "vectors": [
+    {
+      "name": "happy",
+      "generation": "both",
+      "whatwg_valid": true,
+      "wire": "id: 7\nevent: controller_changed\ndata: {\"session_name\":\"alpha\",\"controller\":\"human\",\"epoch\":41,\"trigger\":\"pine_v2_click\"}\n\nid: 8\nevent: idle_changed\ndata: {\"session_name\":\"alpha\",\"epoch\":41,\"idle_paused\":false}\n\n",
+      "frames": [
+        {
+          "event": "controller_changed",
+          "data": "{\"session_name\":\"alpha\",\"controller\":\"human\",\"epoch\":41,\"trigger\":\"pine_v2_click\"}",
+          "id": "7"
+        },
+        {
+          "event": "idle_changed",
+          "data": "{\"session_name\":\"alpha\",\"epoch\":41,\"idle_paused\":false}",
+          "id": "8"
+        }
+      ]
+    },
+    {
+      "name": "handoff-failed",
+      "generation": "both",
+      "whatwg_valid": true,
+      "wire": "id: 14\nevent: handoff_failed\ndata: {\"session_name\":\"alpha\",\"handoff_id\":\"ho_001\",\"reason\":\"snapshot_timeout\",\"partial\":true}\n\n",
+      "frames": [
+        {
+          "event": "handoff_failed",
+          "data": "{\"session_name\":\"alpha\",\"handoff_id\":\"ho_001\",\"reason\":\"snapshot_timeout\",\"partial\":true}",
+          "id": "14"
+        }
+      ]
+    }
+  ]
+}

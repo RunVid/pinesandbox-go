@@ -1,0 +1,94 @@
+{
+  "description": "Endpoint -> host derivation vectors (the Zone facade). control_host = api.<zone>; data_host = <sandbox_id>.computer.<zone> (port-suffixed on non-secure local zones); secure unless localhost/*.localhost/lvh.me/*.lvh.me.",
+  "valid": [
+    {
+      "input": "https://staging.pinesandbox.io",
+      "control_host": "api.staging.pinesandbox.io",
+      "http_scheme": "https",
+      "data_hosts": {
+        "sbx-1": "sbx-1.computer.staging.pinesandbox.io"
+      }
+    },
+    {
+      "input": "staging.pinesandbox.io",
+      "control_host": "api.staging.pinesandbox.io",
+      "http_scheme": "https",
+      "data_hosts": {
+        "pc0abc": "pc0abc.computer.staging.pinesandbox.io"
+      }
+    },
+    {
+      "input": "https://staging.pinesandbox.io/app/login",
+      "control_host": "api.staging.pinesandbox.io",
+      "http_scheme": "https",
+      "data_hosts": {
+        "sbx-1": "sbx-1.computer.staging.pinesandbox.io"
+      },
+      "note": "URL paths are dropped"
+    },
+    {
+      "input": "pinesandbox.io",
+      "control_host": "api.pinesandbox.io",
+      "http_scheme": "https",
+      "data_hosts": {
+        "sbx-1": "sbx-1.computer.pinesandbox.io"
+      }
+    },
+    {
+      "input": "pine.localhost:18080",
+      "control_host": "api.pine.localhost",
+      "http_scheme": "http",
+      "data_hosts": {
+        "sbx-1": "sbx-1.computer.pine.localhost:18080"
+      },
+      "note": "non-secure *.localhost zone: data host carries the local gateway port; control host overridable via control_host:"
+    },
+    {
+      "input": "lvh.me:8080",
+      "control_host": "api.lvh.me",
+      "http_scheme": "http",
+      "data_hosts": {
+        "sbx-1": "sbx-1.computer.lvh.me:8080"
+      }
+    }
+  ],
+  "invalid_endpoints": [
+    {
+      "input": "",
+      "reason": "empty"
+    },
+    {
+      "input": "localhost",
+      "reason": "local zone requires a port"
+    },
+    {
+      "input": "api.staging.pinesandbox.io",
+      "reason": "control host is DERIVED — pass the base endpoint"
+    },
+    {
+      "input": "sbx-1.computer.staging.pinesandbox.io",
+      "reason": "Computer host is DERIVED — pass the base endpoint"
+    },
+    {
+      "input": "staging.pinesandbox.io:notaport",
+      "reason": "non-numeric port"
+    },
+    {
+      "input": "staging.pinesandbox.io:70000",
+      "reason": "port out of range"
+    },
+    {
+      "input": "localhost:18080",
+      "reason": "bare localhost has no dot (ZONE_RE requires one) — use a *.localhost subdomain. NOTE: zone.rb's secure? bare-localhost branch is therefore unreachable; doc/dead-code cleanup candidate (Phase 2)."
+    }
+  ],
+  "invalid_sandbox_ids": [
+    "",
+    "UPPER",
+    "has_underscore",
+    "-leading",
+    "trailing-",
+    "a--b",
+    "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  ]
+}

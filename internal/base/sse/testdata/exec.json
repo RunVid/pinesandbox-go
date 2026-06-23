@@ -1,0 +1,57 @@
+{
+  "stream": "exec",
+  "description": "POST /sessions/{name}/exec. TODAY: prefix-less `<json>\\n\\n` frames mislabeled text/event-stream \u2014 a WHATWG parser misreads the JSON's first `key:` as an (unknown, ignored) SSE field, recovering EMPTY data. TARGET (Phase 1, LIVE): coord re-frames each execd event as a real `data:` SSE frame (execd vocabulary: init/stdout/stderr/execution_complete/error; the event's own `type` stays the discriminator). The empty-data today-frames are the migration proof.",
+  "vectors": [
+    {
+      "name": "today-happy",
+      "generation": "today",
+      "whatwg_valid": false,
+      "note": "bare JSON; WHATWG recovers empty data (the lie). The Ruby EventStreamParser tolerates it via its bare-JSON fallback; a strict WHATWG parser cannot.",
+      "wire": "{\"type\":\"stdout\",\"text\":\"hi\"}\n\n{\"type\":\"execution_complete\",\"exit_code\":0}\n\n",
+      "frames": [
+        {
+          "event": "message",
+          "data": ""
+        },
+        {
+          "event": "message",
+          "data": ""
+        }
+      ]
+    },
+    {
+      "name": "target-happy",
+      "generation": "target",
+      "whatwg_valid": true,
+      "wire": "data: {\"type\":\"stdout\",\"text\":\"hi\"}\n\ndata: {\"type\":\"execution_complete\",\"exit_code\":0}\n\n",
+      "frames": [
+        {
+          "event": "message",
+          "data": "{\"type\":\"stdout\",\"text\":\"hi\"}"
+        },
+        {
+          "event": "message",
+          "data": "{\"type\":\"execution_complete\",\"exit_code\":0}"
+        }
+      ],
+      "note": "coord re-frames each execd event as a data: frame; execution_complete is execd's terminal event"
+    },
+    {
+      "name": "target-keepalive",
+      "generation": "target",
+      "whatwg_valid": true,
+      "note": "the `: ka` keep-alive comment between frames is dropped (no field).",
+      "wire": "data: {\"type\":\"stdout\",\"text\":\"a\"}\n\n: ka\n\ndata: {\"type\":\"execution_complete\",\"exit_code\":0}\n\n",
+      "frames": [
+        {
+          "event": "message",
+          "data": "{\"type\":\"stdout\",\"text\":\"a\"}"
+        },
+        {
+          "event": "message",
+          "data": "{\"type\":\"execution_complete\",\"exit_code\":0}"
+        }
+      ]
+    }
+  ]
+}
