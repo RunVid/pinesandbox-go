@@ -157,6 +157,8 @@ func (s *ControlTokenSource) postMint(ctx context.Context) (*transport.Response,
 	return s.client.Do(ctx, "POST", Path, transport.Request{
 		Accept:  "application/json",
 		Headers: map[string]string{"Authorization": "Bearer " + s.apiKey},
+		// minting a fresh control-token JWS is idempotent → retry on a transient fault.
+		RetryOnTransient: true,
 	})
 }
 

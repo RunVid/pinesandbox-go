@@ -65,11 +65,94 @@ func main() {
 	if _, err := sess.Agent().Run(ctx, "Find the cheapest flight SFO→JFK next Friday", pine.RunOptions{}); err != nil {
 		log.Fatal(err)
 	}
-	_, _ = sess.Agent().Events(ctx, "", func(data []byte) error {
-		log.Printf("agent event: %s", data)
-		return nil
-	})
+
+	// Events is a typed, resuming iterator (Go 1.23 range-over-func). The feed is
+	// continuous across turns; a dropped connection auto-resumes from the last event id.
+	for ev, err := range sess.Agent().Events(ctx, "") {
+		if err != nil {
+			log.Fatal(err) // terminal: auth, or the reconnect budget was exhausted
+		}
+		log.Printf("agent event: type=%s", ev.Type)
+		if ev.Terminal { // this turn ended
+			break
+		}
+	}
 }
+```
+
+## Driving the Computer with an agent
+
+A Computer is a real cloud browser + desktop + shell. There are **three ways** an
+agent (or a human) can drive it — pick per task; they share one Computer/Session.
+
+### 1. Delegate mode — Pine's resident agent drives
+
+You hand a goal; Pine's in-Computer agent runs the perceive→act loop, pauses to ask
+when it needs input, and reports a typed outcome. One persistent task per session;
+each `Run` is a turn (the thread is the memory — `Reset` clears it).
+
+```go
+ag := sess.Agent()
+if _, err := ag.Run(ctx, "Book the cheapest SFO→JFK flight next Friday", pine.RunOptions{}); err != nil {
+	return err // errors.Is(err, pine.ErrSessionBusy) ⇒ a turn is already running
+}
+for ev, err := range ag.Events(ctx, "") {
+	if err != nil {
+		return err
+	}
+	switch ev.Type {
+	case "needs_input": // the agent paused with a question (ev.Reason == "needs_input")
+		// read the question from ev.Payload, then answer to resume the turn:
+		_, _ = ag.Answer(ctx, requestID, "window seat", "")
+	case "result":
+		res, _ := ag.Result(ctx) // TerminalReason, Summary, Usage, Artifacts, Findings
+		log.Printf("done: %s — %s", res.TerminalReason, res.Summary)
+	}
+	if ev.Terminal {
+		break
+	}
+}
+```
+
+### 2. BYOA (bring your own agent) — your agent drives
+
+Your own model loop drives the Computer with two primitives: `Observe` (a snapshot
+of the active tab — screenshot + the coordinate metadata to map actions) and
+`ComputerUse` (one low-level action: click / type / scroll / navigate / key / …).
+You own the loop; Pine just executes perception and actions.
+
+```go
+drive := sess.Drive()
+for {
+	obs, err := drive.Observe(ctx) // obs.Screenshot (base64 PNG) + sizes for your model
+	if err != nil {
+		return err
+	}
+	action := yourModel.Next(obs) // YOUR agent decides the next step
+	if action.Done {
+		break
+	}
+	// params are action-specific, e.g. {"x": 480, "y": 220} or {"text": "hello"}.
+	if _, err := drive.ComputerUse(ctx, action.Verb, action.Params); err != nil {
+		return err
+	}
+}
+```
+
+Mix the two freely on the same session — e.g. delegate a sub-goal, then take over
+with your own `ComputerUse` calls, or vice-versa.
+
+### 3. Human handoff — the live desktop in a browser
+
+`Session.Delegate(ctx)` mints a browser-safe envelope (the Computer's host + a
+short-lived `dt_` desktop token, **nothing privileged**). Hand it to the browser
+and the web SDK (`@runvid/computer-web`) renders the live desktop for a human to
+watch or take control:
+
+```go
+env, _ := sess.Delegate(ctx)         // {ComputerHost (https URI), DesktopToken, …}
+json.NewEncoder(w).Encode(env)       // → your frontend
+// In the browser: connectionFromDelegation(env) → <pine-desktop url=… token=…/>
 ```
 
 ## Surface

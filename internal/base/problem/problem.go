@@ -59,6 +59,18 @@ func (e *APIError) Error() string {
 	return fmt.Sprintf("pinesandbox: %d: %s", e.Status, e.Detail)
 }
 
+// Is matches by RFC-9457 problem-type slug, so a caller can branch on a named sentinel
+// (a *APIError carrying just the slug) instead of comparing raw status ints:
+//
+//	if errors.Is(err, pinesandbox.ErrTaskNotReady) { /* poll again */ }
+//
+// The full wire detail stays reachable via errors.As(err, &apiErr). Stays domain-free: the
+// match is purely "same non-empty slug", so the named sentinels live in the SDK facade.
+func (e *APIError) Is(target error) bool {
+	t, ok := target.(*APIError)
+	return ok && t.ProblemType != "" && t.ProblemType == e.ProblemType
+}
+
 // wireProblem is the decoded body. Retryable is a pointer so an absent field (fall back
 // to the taxonomy) is distinguishable from an explicit false.
 type wireProblem struct {

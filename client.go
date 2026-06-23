@@ -148,6 +148,3 @@ func (c *Client) AdoptExisting(ctx context.Context, id string, key []byte, sandb
 	}
 	return comp, nil
 }
-
-// Zone returns the resolved zone (host derivation), for callers that need addressing.
-func (c *Client) Zone() *zone.Zone { return c.zone }

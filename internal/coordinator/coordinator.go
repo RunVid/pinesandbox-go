@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"time"
 
 	"go.pinesandbox.io/computer/internal/base/problem"
 	"go.pinesandbox.io/computer/internal/base/spec"
@@ -17,6 +18,10 @@ import (
 type Client struct {
 	raw  *transport.Client
 	spec spec.Negotiator
+	// Typed-event-iterator reconnect knobs (see stream.go). Defaults set in NewClient;
+	// tests in this package override them so a reconnect doesn't actually sleep.
+	streamBackoff func(attempt int) time.Duration
+	streamBudget  int
 }
 
 // NewClient builds a coordinator client over raw (pointed at the Computer's data host),
@@ -29,12 +34,18 @@ func NewClient(raw *transport.Client, specMajor int) *Client {
 			ResponseHeader: "X-Computer-Spec-Version",
 			SupportedMajor: specMajor,
 		},
+		streamBackoff: defaultStreamBackoff,
+		streamBudget:  defaultReconnectBudget,
 	}
 }
 
 // Host returns the data host this coordinator client targets (the public gateway host in
-// production) — for assembling a browser-safe DelegatedConnection.
+// production), scheme stripped.
 func (c *Client) Host() string { return c.raw.Host() }
+
+// BaseURL returns the data host origin (scheme://host) — the full URI the browser-safe
+// DelegatedConnection carries as computer_host (computer-api.yaml).
+func (c *Client) BaseURL() string { return c.raw.BaseURL() }
 
 // ---- bind (public, token-less) ----
 

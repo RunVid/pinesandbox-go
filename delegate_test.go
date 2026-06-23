@@ -50,8 +50,10 @@ func TestDelegateDesktop_CreatesAndDelegates(t *testing.T) {
 	if dc.SessionName != "main" || dc.DesktopToken != "dt_short" || dc.SpecVersion != SpecVersion {
 		t.Errorf("envelope = %+v", dc)
 	}
-	if !strings.HasPrefix(dc.ComputerHost, "127.0.0.1") {
-		t.Errorf("ComputerHost = %q, want the data host", dc.ComputerHost)
+	// computer_host is a FULL URI (scheme included) per computer-api.yaml — not a bare host —
+	// so the web SDK derives the desktop ws/wss scheme from it.
+	if !strings.HasPrefix(dc.ComputerHost, "http://127.0.0.1") {
+		t.Errorf("ComputerHost = %q, want the full http://… data-plane URI", dc.ComputerHost)
 	}
 
 	// The wire shape must NOT leak ct_/ps_ — only the dt_ + host + session name.

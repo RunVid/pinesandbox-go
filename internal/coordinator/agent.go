@@ -23,8 +23,8 @@ type AgentRunOptions struct {
 }
 
 // AgentRun starts a turn (delegate mode — one persistent Task per session). Returns the
-// raw agent-task body for the facade to type.
-func (c *Client) AgentRun(ctx context.Context, token, name, goal string, opts AgentRunOptions) (json.RawMessage, error) {
+// session's Task, `running` for the duration of this turn.
+func (c *Client) AgentRun(ctx context.Context, token, name, goal string, opts AgentRunOptions) (*AgentTask, error) {
 	body := map[string]any{"goal": goal}
 	if opts.Context != nil {
 		body["context"] = opts.Context
@@ -35,7 +35,7 @@ func (c *Client) AgentRun(ctx context.Context, token, name, goal string, opts Ag
 	if opts.Constraints != nil {
 		body["constraints"] = opts.Constraints
 	}
-	return c.postJSON(ctx, c.agentPath(name, "/run"), token, body)
+	return c.postAgentTask(ctx, c.agentPath(name, "/run"), token, body)
 }
 
 // AgentSteerOptions optionally pin the steer to a turn (concurrency guard).
@@ -44,8 +44,8 @@ type AgentSteerOptions struct {
 	TurnAttempt    *int   // omitted when nil
 }
 
-// AgentSteer injects guidance into the running turn.
-func (c *Client) AgentSteer(ctx context.Context, token, name, text string, opts AgentSteerOptions) (json.RawMessage, error) {
+// AgentSteer injects guidance into the running turn. Returns the updated Task.
+func (c *Client) AgentSteer(ctx context.Context, token, name, text string, opts AgentSteerOptions) (*AgentTask, error) {
 	body := map[string]any{"text": text}
 	if opts.ExpectedTurnID != "" {
 		body["expected_turn_id"] = opts.ExpectedTurnID
@@ -53,59 +53,78 @@ func (c *Client) AgentSteer(ctx context.Context, token, name, text string, opts 
 	if opts.TurnAttempt != nil {
 		body["turn_attempt"] = *opts.TurnAttempt
 	}
-	return c.postJSON(ctx, c.agentPath(name, "/steer"), token, body)
+	return c.postAgentTask(ctx, c.agentPath(name, "/steer"), token, body)
 }
 
 // AgentAnswer responds to an agent's clarifying question. expectedTurnID is optional ("").
-func (c *Client) AgentAnswer(ctx context.Context, token, name, requestID, answer, expectedTurnID string) (json.RawMessage, error) {
+// Returns the updated Task.
+func (c *Client) AgentAnswer(ctx context.Context, token, name, requestID, answer, expectedTurnID string) (*AgentTask, error) {
 	body := map[string]any{"request_id": requestID, "answer": answer}
 	if expectedTurnID != "" {
 		body["expected_turn_id"] = expectedTurnID
 	}
-	return c.postJSON(ctx, c.agentPath(name, "/answer"), token, body)
+	return c.postAgentTask(ctx, c.agentPath(name, "/answer"), token, body)
 }
 
-// AgentCancel cancels the running turn.
-func (c *Client) AgentCancel(ctx context.Context, token, name string) (json.RawMessage, error) {
-	return c.postJSON(ctx, c.agentPath(name, "/cancel"), token, map[string]any{})
+// AgentCancel cancels the running turn. Returns the updated Task.
+func (c *Client) AgentCancel(ctx context.Context, token, name string) (*AgentTask, error) {
+	return c.postAgentTask(ctx, c.agentPath(name, "/cancel"), token, map[string]any{})
 }
 
-// AgentReset clears the session's persistent agent thread (memory).
-func (c *Client) AgentReset(ctx context.Context, token, name string) (json.RawMessage, error) {
-	return c.postJSON(ctx, c.agentPath(name, "/reset"), token, map[string]any{})
+// AgentReset clears the session's persistent agent thread (memory). Returns the updated Task.
+func (c *Client) AgentReset(ctx context.Context, token, name string) (*AgentTask, error) {
+	return c.postAgentTask(ctx, c.agentPath(name, "/reset"), token, map[string]any{})
 }
 
-// AgentTask returns the current agent task/status.
-func (c *Client) AgentTask(ctx context.Context, token, name string) (json.RawMessage, error) {
-	return c.getJSON(ctx, c.agentPath(name, ""), token)
+// AgentTask returns the session's current Task (state/goal/usage/turn ids).
+func (c *Client) AgentTask(ctx context.Context, token, name string) (*AgentTask, error) {
+	raw, err := c.getJSON(ctx, c.agentPath(name, ""), token)
+	if err != nil {
+		return nil, err
+	}
+	return parseAgentTask(raw)
 }
 
 // AgentResult returns the latest finished turn's result.
-func (c *Client) AgentResult(ctx context.Context, token, name string) (json.RawMessage, error) {
-	return c.getJSON(ctx, c.agentPath(name, "/result"), token)
+func (c *Client) AgentResult(ctx context.Context, token, name string) (*AgentResult, error) {
+	raw, err := c.getJSON(ctx, c.agentPath(name, "/result"), token)
+	if err != nil {
+		return nil, err
+	}
+	return parseAgentResult(raw)
 }
 
-// AgentEvents streams the session's TaskEvent SSE feed, invoking fn with each event's raw
-// data JSON and tracking id: for resume. Returns the latest data-bearing event id (the
-// next reconnect cursor). fn returning a non-nil error stops the stream and is returned;
-// a non-2xx (problem+json, not a stream) is surfaced as *problem.APIError.
-func (c *Client) AgentEvents(ctx context.Context, token, name, lastEventID string, fn func(data []byte) error) (string, error) {
-	return c.streamJSONEvents(ctx, c.agentPath(name, "/events"), token, lastEventID, fn)
+// postAgentTask POSTs body and decodes the Task response shared by all agent mutations.
+func (c *Client) postAgentTask(ctx context.Context, path, token string, body any) (*AgentTask, error) {
+	raw, err := c.postJSON(ctx, path, token, body)
+	if err != nil {
+		return nil, err
+	}
+	return parseAgentTask(raw)
 }
+
+// AgentEvents is a typed, resuming iterator — see stream.go.
 
 // ---- drive track (BYOA primitives) ----
 
-// Observe captures the session's current perception.
-func (c *Client) Observe(ctx context.Context, token, name string) (json.RawMessage, error) {
-	return c.postJSON(ctx, "/v1/sessions/"+url.PathEscape(name)+"/observe", token, map[string]any{})
+// Observe captures the session's current perception (the ObservationSnapshot).
+func (c *Client) Observe(ctx context.Context, token, name string) (*Observation, error) {
+	raw, err := c.postJSON(ctx, "/v1/sessions/"+url.PathEscape(name)+"/observe", token, map[string]any{})
+	if err != nil {
+		return nil, err
+	}
+	return parseObservation(raw)
 }
 
-// ComputerUse issues one low-level action (the body is {action, ...params}).
+// ComputerUse issues one low-level action (the body is {action, ...params}). The action
+// verb always wins: a params key named "action" can't clobber it (params carry the action's
+// arguments — x/y/text/etc. — not the verb).
 func (c *Client) ComputerUse(ctx context.Context, token, name, action string, params map[string]any) (json.RawMessage, error) {
-	body := map[string]any{"action": action}
+	body := make(map[string]any, len(params)+1)
 	for k, v := range params {
 		body[k] = v
 	}
+	body["action"] = action
 	return c.postJSON(ctx, "/v1/sessions/"+url.PathEscape(name)+"/computer-use", token, body)
 }
 
@@ -172,7 +191,7 @@ func (c *Client) streamJSONEvents(ctx context.Context, path, token, lastEventID 
 	return latest, nil
 }
 
-// ErrStop, when returned from an AgentEvents callback, stops the stream; streamJSONEvents
+// ErrStop, when returned from an AuthorEvents callback, stops the stream; streamJSONEvents
 // returns it unchanged so the caller can distinguish a deliberate stop (errors.Is) from a
-// real failure.
+// real failure. (The agent/control feeds are iterators now — they stop on a range break.)
 var ErrStop = errors.New("pinesandbox: stream stopped by caller")

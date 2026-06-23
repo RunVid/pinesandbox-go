@@ -8,11 +8,14 @@ import (
 
 // DelegatedConnection is the browser-safe connection envelope — the ONLY thing a server
 // hands a browser to drive a Computer's desktop. It carries NO ct_/ps_/project-JWS: only the
-// data-plane host, the visible session's name, the pinned spec major, and a freshly-minted
+// data-plane base URL, the visible session's name, the pinned spec major, and a freshly-minted
 // short-lived (≈30s) dt_ desktop token (+ its expiry). The browser cannot mint a dt_ (that
 // needs the server-held ct_), so the integrator re-mints server-side and refreshes the
 // envelope before each (re)connect. MarshalJSON emits the web-SDK wire shape.
 type DelegatedConnection struct {
+	// ComputerHost is the Computer's full data-plane origin — https://<id>.computer.<zone>
+	// (a complete URI per computer-api.yaml, NOT a bare host), so the web SDK derives the
+	// desktop's ws/wss scheme from it instead of guessing.
 	ComputerHost          string
 	SessionName           string
 	SpecVersion           int
@@ -34,7 +37,7 @@ func (d DelegatedConnection) MarshalJSON() ([]byte, error) {
 }
 
 // Delegate builds the browser-safe DelegatedConnection for this session: the data-plane
-// host, the session name, the pinned spec major, and a fresh dt_ (ct_-minted). The one call
+// base URL, the session name, the pinned spec major, and a fresh dt_ (ct_-minted). The one call
 // a server makes to hand a browser everything it needs — and nothing it shouldn't. Re-call
 // server-side to refresh the dt_ before each (re)connect.
 func (s *Session) Delegate(ctx context.Context) (*DelegatedConnection, error) {
@@ -43,7 +46,7 @@ func (s *Session) Delegate(ctx context.Context) (*DelegatedConnection, error) {
 		return nil, err
 	}
 	return &DelegatedConnection{
-		ComputerHost:          s.coord.Host(),
+		ComputerHost:          s.coord.BaseURL(),
 		SessionName:           s.name,
 		SpecVersion:           SpecVersion,
 		DesktopToken:          dt.Token,

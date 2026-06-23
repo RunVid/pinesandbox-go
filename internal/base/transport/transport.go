@@ -12,6 +12,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
+	"math/rand"
 	"net"
 	"net/http"
 	"strings"
@@ -32,11 +34,17 @@ const defaultTimeout = 30 * time.Second
 // healthy SSE stream, so this never affects one.
 const streamHeaderTimeout = 60 * time.Second
 
+// defaultMaxAttempts is the total send count for a retry-eligible request (1 try + 2
+// retries) on a transient transport fault. Matches the Ruby SDK's transient-retry budget.
+const defaultMaxAttempts = 3
+
 // Client issues unary requests against scheme://host.
 type Client struct {
-	base     string
-	hc       *http.Client
-	streamHC *http.Client
+	base        string
+	hc          *http.Client
+	streamHC    *http.Client
+	maxAttempts int
+	backoff     func(attempt int) time.Duration
 }
 
 // Option configures a Client.
@@ -46,9 +54,31 @@ type Option func(*Client)
 // streaming client reuses its Transport but drops the total timeout.
 func WithHTTPClient(hc *http.Client) Option { return func(c *Client) { c.hc = hc } }
 
+// WithRetry overrides the transient-retry budget + backoff (tests inject a zero backoff so
+// they don't actually sleep). attempts < 1 disables retry.
+func WithRetry(attempts int, backoff func(attempt int) time.Duration) Option {
+	return func(c *Client) { c.maxAttempts = attempts; c.backoff = backoff }
+}
+
+// defaultBackoff is bounded exponential with small jitter, capped at 2s (mirrors the Ruby
+// SDK's transient_backoff: 0.2·2^(n-1) + jitter, cap 2s).
+func defaultBackoff(attempt int) time.Duration {
+	base := 0.2 * math.Pow(2, float64(attempt-1))
+	d := base + rand.Float64()*0.1
+	if d > 2.0 {
+		d = 2.0
+	}
+	return time.Duration(d * float64(time.Second))
+}
+
 // New builds a Client for scheme://host (host may include a local-dev port).
 func New(scheme, host string, opts ...Option) *Client {
-	c := &Client{base: scheme + "://" + host, hc: &http.Client{Timeout: defaultTimeout}}
+	c := &Client{
+		base:        scheme + "://" + host,
+		hc:          &http.Client{Timeout: defaultTimeout},
+		maxAttempts: defaultMaxAttempts,
+		backoff:     defaultBackoff,
+	}
 	for _, o := range opts {
 		o(c)
 	}
@@ -75,13 +105,19 @@ func streamTransport(base http.RoundTripper) http.RoundTripper {
 }
 
 // Host returns the host[:port] this client targets (the scheme stripped) — the public
-// gateway host in production. Used to build the browser-safe DelegatedConnection.
+// gateway host in production.
 func (c *Client) Host() string {
 	if i := strings.Index(c.base, "://"); i >= 0 {
 		return c.base[i+3:]
 	}
 	return c.base
 }
+
+// BaseURL returns the full scheme://host[:port] origin this client targets — the public
+// gateway origin in production. Used to build the browser-safe DelegatedConnection, whose
+// computer_host is a full URI per computer-api.yaml (so the web SDK derives the desktop's
+// ws/wss scheme from it rather than guessing).
+func (c *Client) BaseURL() string { return c.base }
 
 // Request is one unary call. Token "" omits X-Pine-Auth (bind-pubkey/health/metrics are
 // token-less). Headers carries extras (Idempotency-Key, If-Match, …).
@@ -91,6 +127,12 @@ type Request struct {
 	ContentType string
 	Body        []byte
 	Headers     map[string]string
+	// RetryOnTransient opts a NON-idempotent method (POST/PATCH) into the bounded
+	// transient-fault retry. Idempotent methods (GET/DELETE/HEAD) retry automatically;
+	// set this only for a POST/PATCH the caller knows is safe to replay — an idempotent
+	// mint/register, or a create carrying a stable Idempotency-Key the server dedupes.
+	// A keyless create must NOT set it (a reset may have applied → double-provision).
+	RetryOnTransient bool
 }
 
 // Response is a 2xx result; Headers exposes ETag/X-Request-Id to callers.
@@ -106,6 +148,27 @@ type Response struct {
 // mapping use Do; callers with a different error contract (the control plane's {code,message})
 // inspect the raw Response themselves.
 func (c *Client) DoRaw(ctx context.Context, method, path string, r Request) (*Response, error) {
+	attempts := 1
+	if c.maxAttempts > 1 && (idempotentMethod(method) || r.RetryOnTransient) {
+		attempts = c.maxAttempts
+	}
+	for attempt := 1; ; attempt++ {
+		resp, err := c.doOnce(ctx, method, path, r)
+		if err == nil || !isTransientFault(err) || attempt >= attempts {
+			return resp, err
+		}
+		// Transient transport fault on a retry-eligible request: back off, then retry.
+		// A ctx cancellation during the wait ends it, returning the transient fault.
+		select {
+		case <-time.After(c.backoff(attempt)):
+		case <-ctx.Done():
+			return nil, err
+		}
+	}
+}
+
+// doOnce is a single send: build, execute, read the full body, normalize a fault.
+func (c *Client) doOnce(ctx context.Context, method, path string, r Request) (*Response, error) {
 	req, err := c.newRequest(ctx, method, path, r)
 	if err != nil {
 		return nil, err
@@ -120,6 +183,24 @@ func (c *Client) DoRaw(ctx context.Context, method, path string, r Request) (*Re
 		return nil, normalizeFault(method, path, err)
 	}
 	return &Response{Status: resp.StatusCode, Body: b, Headers: resp.Header}, nil
+}
+
+// idempotentMethod reports whether a method is safe to replay unconditionally.
+func idempotentMethod(method string) bool {
+	switch method {
+	case http.MethodGet, http.MethodDelete, http.MethodHead:
+		return true
+	default:
+		return false
+	}
+}
+
+// isTransientFault reports whether err is a normalized transient transport fault
+// (connection reset/dial/EOF or a net timeout) — the only class worth retrying.
+func isTransientFault(err error) bool {
+	var ce *ConnectionError
+	var te *TimeoutError
+	return errors.As(err, &ce) || errors.As(err, &te)
 }
 
 // newRequest builds the *http.Request with the standard headers (Accept, X-Pine-Auth,

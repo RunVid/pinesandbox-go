@@ -3,6 +3,7 @@ package coordinator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"testing"
@@ -133,5 +134,28 @@ func TestSkills_AuthorEvents(t *testing.T) {
 	}
 	if n != 2 || last != "2" {
 		t.Errorf("events=%d cursor=%q, want 2/2", n, last)
+	}
+}
+
+// TestSkills_AuthorEvents_ErrStop: returning ErrStop from the callback halts the author
+// feed after the current event and surfaces ErrStop (the documented early-stop signal).
+func TestSkills_AuthorEvents_ErrStop(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "id: 1\ndata: {\"n\":1}\n\n")
+		_, _ = io.WriteString(w, "id: 2\ndata: {\"n\":2}\n\n")
+	})
+	n := 0
+	last, err := c.AuthorEvents(context.Background(), "ps_", "s", "au1", "", func([]byte) error {
+		n++
+		return ErrStop
+	})
+	if !errors.Is(err, ErrStop) {
+		t.Fatalf("err = %v, want ErrStop", err)
+	}
+	if n != 1 {
+		t.Errorf("callback ran %d times, want 1 (stopped after first)", n)
+	}
+	if last != "1" {
+		t.Errorf("cursor = %q, want 1", last)
 	}
 }

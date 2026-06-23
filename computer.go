@@ -79,14 +79,25 @@ type Computer struct {
 }
 
 func newComputer(id string, key []byte) *Computer {
-	return &Computer{id: id, key: key, priorKeys: map[int][]byte{}}
+	// Copy the caller's key — it's a durable secret; the Computer owns its own
+	// copy so a caller mutating their slice can't corrupt the bound state key.
+	return &Computer{id: id, key: cloneKey(key), priorKeys: map[int][]byte{}}
+}
+
+// cloneKey returns a defensive copy of a state-key slice (nil-safe).
+func cloneKey(k []byte) []byte {
+	if k == nil {
+		return nil
+	}
+	return append([]byte(nil), k...)
 }
 
 // ID is the Computer's stable id.
 func (c *Computer) ID() string { return c.id }
 
-// Key is the Computer's 32-byte state key (persist it to re-attach).
-func (c *Computer) Key() []byte { return c.key }
+// Key is the Computer's 32-byte state key (persist it to re-attach). Returns a
+// copy — mutating it does not affect the Computer's bound key.
+func (c *Computer) Key() []byte { return cloneKey(c.key) }
 
 // SandboxID is the bound pod's sandbox id (empty if not attached).
 func (c *Computer) SandboxID() string {
@@ -132,7 +143,7 @@ func (c *Computer) AddPriorKey(version int, key []byte) error {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.priorKeys[version] = key
+	c.priorKeys[version] = cloneKey(key)
 	return nil
 }
 
@@ -172,7 +183,18 @@ func (c *Computer) Attach(ctx context.Context, conn *Connection, opts AttachOpti
 		timeout = defaultAttachTimeout
 	}
 
-	info, err := conn.controlPlane.Create(ctx, buildCreateBody(image, timeout, opts, pool), opts.IdempotencyKey)
+	// A stable Idempotency-Key makes the create POST safe to retry on a transient
+	// connection fault (the server dedupes the replay). Auto-fill one per attach when the
+	// caller didn't supply it — one key per attach call, so distinct attaches stay distinct.
+	idemKey := opts.IdempotencyKey
+	if idemKey == "" {
+		k, kerr := uuidV7()
+		if kerr != nil {
+			return kerr
+		}
+		idemKey = k
+	}
+	info, err := conn.controlPlane.Create(ctx, buildCreateBody(image, timeout, opts, pool), idemKey)
 	if err != nil {
 		return err
 	}
@@ -281,7 +303,7 @@ func (c *Computer) priorKeysCopy() map[int][]byte {
 	}
 	out := make(map[int][]byte, len(c.priorKeys))
 	for k, v := range c.priorKeys {
-		out[k] = v
+		out[k] = cloneKey(v)
 	}
 	return out
 }

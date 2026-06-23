@@ -88,6 +88,14 @@ func (c *Computer) wrapSession(coord *coordinator.Client, s *coordinator.Session
 	return &Session{parent: c, coord: coord, name: s.Name, token: s.Token, info: s}
 }
 
+// SessionInfo is the parsed session metadata (browser plane, timestamps, etc.). Re-exported
+// so the public Session.Info() return type is nameable without importing an internal package
+// (the name `Session` is the facade handle, so the metadata alias is `SessionInfo`).
+type SessionInfo = coordinator.Session
+
+// Browser is a session's browser-plane metadata (the SessionInfo.Browser field type).
+type Browser = coordinator.Browser
+
 // Session is the per-window slice of a Computer. It holds its ps_; agent mutations route
 // through the Computer's ct_ (one active driver — see FACADE invariants).
 type Session struct {
@@ -105,7 +113,7 @@ func (s *Session) Name() string { return s.name }
 func (s *Session) Token() string { return s.token }
 
 // Info exposes the parsed session metadata (browser plane, timestamps, etc.).
-func (s *Session) Info() *coordinator.Session { return s.info }
+func (s *Session) Info() *SessionInfo { return s.info }
 
 // Agent returns the delegate-mode agent driver (one persistent Task per session).
 func (s *Session) Agent() *AgentMode { return &AgentMode{s: s} }

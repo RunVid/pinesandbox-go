@@ -3,6 +3,7 @@ package pinesandbox
 import (
 	"context"
 	"encoding/json"
+	"iter"
 
 	"go.pinesandbox.io/computer/internal/coordinator"
 )
@@ -13,22 +14,24 @@ type (
 	DesktopToken        = coordinator.DesktopToken
 	PatchControlOptions = coordinator.PatchControlOptions
 	PatchTabOptions     = coordinator.PatchTabOptions
+	Tab                 = coordinator.Tab
+	ControlEvent        = coordinator.ControlEvent
 )
 
 // ---- tabs (ps_) ----
 
-// ListTabs returns the session's tabs (raw array).
-func (s *Session) ListTabs(ctx context.Context) (json.RawMessage, error) {
+// ListTabs returns the session's tabs.
+func (s *Session) ListTabs(ctx context.Context) ([]Tab, error) {
 	return s.coord.ListTabs(ctx, s.token, s.name)
 }
 
-// CreateTab opens a tab at url (raw tab).
-func (s *Session) CreateTab(ctx context.Context, url, label string) (json.RawMessage, error) {
+// CreateTab opens a tab at url and returns it.
+func (s *Session) CreateTab(ctx context.Context, url, label string) (*Tab, error) {
 	return s.coord.CreateTab(ctx, s.token, s.name, url, label)
 }
 
-// PatchTab updates a tab (raw tab).
-func (s *Session) PatchTab(ctx context.Context, targetID string, opts PatchTabOptions) (json.RawMessage, error) {
+// PatchTab updates a tab and returns it.
+func (s *Session) PatchTab(ctx context.Context, targetID string, opts PatchTabOptions) (*Tab, error) {
 	return s.coord.PatchTab(ctx, s.token, s.name, targetID, opts)
 }
 
@@ -80,8 +83,10 @@ func (s *Session) GetHandoff(ctx context.Context, handoffID string) (json.RawMes
 	return s.coord.GetHandoff(ctx, s.token, s.name, handoffID)
 }
 
-// ControlEvents streams the session's control event feed; fn receives each event's raw data
-// JSON. Returns the resume cursor; fn returning ErrStop stops cleanly.
-func (s *Session) ControlEvents(ctx context.Context, lastEventID string, fn func(data []byte) error) (string, error) {
-	return s.coord.ControlEvents(ctx, s.token, s.name, lastEventID, fn)
+// ControlEvents streams the session's control-plane event feed (controller_changed /
+// idle_changed / handoff_*) as a typed, resuming iterator — same shape as AgentMode.Events.
+// Each ControlEvent's Type is the discriminator; Data holds the raw per-type payload. Pass
+// lastEventID to resume (""=from now); break to stop; cancel ctx to end cleanly.
+func (s *Session) ControlEvents(ctx context.Context, lastEventID string) iter.Seq2[ControlEvent, error] {
+	return s.coord.ControlEvents(ctx, s.token, s.name, lastEventID)
 }

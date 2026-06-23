@@ -9,18 +9,26 @@ import (
 
 // ---- tabs ----
 
-// ListTabs returns the session's tabs (raw "tabs" array).
-func (c *Client) ListTabs(ctx context.Context, token, name string) (json.RawMessage, error) {
-	return c.envelopeField(ctx, "GET", "/sessions/"+url.PathEscape(name)+"/tabs", token, nil, "tabs")
+// ListTabs returns the session's tabs.
+func (c *Client) ListTabs(ctx context.Context, token, name string) ([]Tab, error) {
+	raw, err := c.envelopeField(ctx, "GET", "/sessions/"+url.PathEscape(name)+"/tabs", token, nil, "tabs")
+	if err != nil {
+		return nil, err
+	}
+	return parseTabs(raw)
 }
 
-// CreateTab opens a tab at url (raw "tab").
-func (c *Client) CreateTab(ctx context.Context, token, name, tabURL, label string) (json.RawMessage, error) {
+// CreateTab opens a tab at url and returns it.
+func (c *Client) CreateTab(ctx context.Context, token, name, tabURL, label string) (*Tab, error) {
 	body := map[string]any{"url": tabURL}
 	if label != "" {
 		body["label"] = label
 	}
-	return c.postEnvelopeField(ctx, "/sessions/"+url.PathEscape(name)+"/tabs", token, body, "tab")
+	raw, err := c.postEnvelopeField(ctx, "/sessions/"+url.PathEscape(name)+"/tabs", token, body, "tab")
+	if err != nil {
+		return nil, err
+	}
+	return parseTab(raw)
 }
 
 // PatchTabOptions are the tab fields to change (nil = leave unchanged).
@@ -29,8 +37,8 @@ type PatchTabOptions struct {
 	Label  *string
 }
 
-// PatchTab updates a tab (raw "tab").
-func (c *Client) PatchTab(ctx context.Context, token, name, targetID string, opts PatchTabOptions) (json.RawMessage, error) {
+// PatchTab updates a tab and returns it.
+func (c *Client) PatchTab(ctx context.Context, token, name, targetID string, opts PatchTabOptions) (*Tab, error) {
 	body := map[string]any{}
 	if opts.Active != nil {
 		body["active"] = *opts.Active
@@ -46,7 +54,11 @@ func (c *Client) PatchTab(ctx context.Context, token, name, targetID string, opt
 	if err != nil {
 		return nil, err
 	}
-	return extractField(resp.Body, "tab")
+	raw, err := extractField(resp.Body, "tab")
+	if err != nil {
+		return nil, err
+	}
+	return parseTab(raw)
 }
 
 // CloseTab closes a tab.
@@ -170,10 +182,7 @@ func (c *Client) GetHandoff(ctx context.Context, token, name, handoffID string) 
 	return json.RawMessage(resp.Body), nil
 }
 
-// ControlEvents streams the session's control event feed (same SSE wire as agent events).
-func (c *Client) ControlEvents(ctx context.Context, token, name, lastEventID string, fn func(data []byte) error) (string, error) {
-	return c.streamJSONEvents(ctx, "/v1/sessions/"+url.PathEscape(name)+"/control/events", token, lastEventID, fn)
-}
+// ControlEvents is a typed, resuming iterator — see stream.go.
 
 // ---- helpers ----
 

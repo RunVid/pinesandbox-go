@@ -167,6 +167,9 @@ func (s *AttachCredentialsSource) post(ctx context.Context, path string, body an
 		ContentType: "application/json",
 		Body:        b,
 		Headers:     map[string]string{"Authorization": "Bearer " + s.apiKey},
+		// register + credential/grant mints are idempotent → safe to retry on a
+		// transient connection fault (re-minting yields a fresh, harmless result).
+		RetryOnTransient: true,
 	})
 }
 

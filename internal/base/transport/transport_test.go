@@ -210,3 +210,115 @@ func TestDo_Timeout(t *testing.T) {
 		t.Fatalf("want *TimeoutError, got %T: %v", err, err)
 	}
 }
+
+// ---- transient-retry (Phase-C parity) ----
+
+// rtFunc adapts a function to an http.RoundTripper so a test can fail N sends then succeed.
+type rtFunc func(*http.Request) (*http.Response, error)
+
+func (f rtFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// retryClient runs rt with a zero backoff so the test never actually sleeps between retries.
+func retryClient(rt http.RoundTripper) *Client {
+	return New("http", "h",
+		WithHTTPClient(&http.Client{Transport: rt}),
+		WithRetry(3, func(int) time.Duration { return 0 }),
+	)
+}
+
+func okJSON(req *http.Request) *http.Response {
+	return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"ok":true}`)), Header: http.Header{}, Request: req}
+}
+
+// TestRetry_IdempotentGETRetries: a GET retries automatically on a transient fault.
+func TestRetry_IdempotentGETRetries(t *testing.T) {
+	var n int
+	c := retryClient(rtFunc(func(r *http.Request) (*http.Response, error) {
+		n++
+		if n == 1 {
+			return nil, io.ErrUnexpectedEOF // → *ConnectionError
+		}
+		return okJSON(r), nil
+	}))
+	resp, err := c.Do(context.Background(), "GET", "/x", Request{})
+	if err != nil || resp.Status != 200 {
+		t.Fatalf("GET should retry then succeed: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("sends = %d, want 2 (1 fault + 1 retry)", n)
+	}
+}
+
+// TestRetry_KeylessPOSTNotRetried: a POST without the opt-in is NOT retried (a reset may
+// have applied server-side — no double-effect).
+func TestRetry_KeylessPOSTNotRetried(t *testing.T) {
+	var n int
+	c := retryClient(rtFunc(func(*http.Request) (*http.Response, error) {
+		n++
+		return nil, io.ErrUnexpectedEOF
+	}))
+	_, err := c.Do(context.Background(), "POST", "/x", Request{})
+	var ce *ConnectionError
+	if !errors.As(err, &ce) {
+		t.Fatalf("want *ConnectionError, got %T", err)
+	}
+	if n != 1 {
+		t.Errorf("keyless POST sends = %d, want 1 (not retried)", n)
+	}
+}
+
+// TestRetry_OptInPOSTRetries: a POST that opts in (idempotent mint / keyed create) retries.
+func TestRetry_OptInPOSTRetries(t *testing.T) {
+	var n int
+	c := retryClient(rtFunc(func(r *http.Request) (*http.Response, error) {
+		n++
+		if n < 3 {
+			return nil, io.ErrUnexpectedEOF
+		}
+		return okJSON(r), nil
+	}))
+	resp, err := c.Do(context.Background(), "POST", "/x", Request{RetryOnTransient: true})
+	if err != nil || resp.Status != 200 {
+		t.Fatalf("opt-in POST should retry: %v", err)
+	}
+	if n != 3 {
+		t.Errorf("sends = %d, want 3", n)
+	}
+}
+
+// TestRetry_GivesUpAfterMax: a persistent transient fault exhausts the budget + surfaces.
+func TestRetry_GivesUpAfterMax(t *testing.T) {
+	var n int
+	c := retryClient(rtFunc(func(*http.Request) (*http.Response, error) {
+		n++
+		return nil, io.ErrUnexpectedEOF
+	}))
+	_, err := c.Do(context.Background(), "GET", "/x", Request{})
+	var ce *ConnectionError
+	if !errors.As(err, &ce) {
+		t.Fatalf("want *ConnectionError after giving up, got %T", err)
+	}
+	if n != 3 {
+		t.Errorf("sends = %d, want 3 (the max budget)", n)
+	}
+}
+
+// TestRetry_StatusErrorNotRetried: a non-2xx HTTP status is not a transport fault — it maps
+// to *APIError on the first try, never retried.
+func TestRetry_StatusErrorNotRetried(t *testing.T) {
+	var n int
+	c := retryClient(rtFunc(func(r *http.Request) (*http.Response, error) {
+		n++
+		resp := okJSON(r)
+		resp.StatusCode = 500
+		resp.Body = io.NopCloser(strings.NewReader(`{"type":"/e","status":500,"detail":"x"}`))
+		resp.Header.Set("Content-Type", "application/problem+json")
+		return resp, nil
+	}))
+	if _, err := c.Do(context.Background(), "GET", "/x", Request{}); err == nil {
+		t.Fatal("want an error for a 500")
+	}
+	if n != 1 {
+		t.Errorf("500 sends = %d, want 1 (a status is not a transport fault)", n)
+	}
+}

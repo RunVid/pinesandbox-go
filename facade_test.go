@@ -108,7 +108,7 @@ func TestAttachEndToEnd(t *testing.T) {
 			fmt.Fprintf(w, `{"session":{"name":"s1","token":%q}}`, ps)
 		case r.URL.Path == "/v1/sessions/s1/agent/run":
 			agentAuth = r.Header.Get("X-Pine-Auth")
-			fmt.Fprint(w, `{"turn_id":"t1","status":"running"}`)
+			fmt.Fprint(w, `{"task_id":"t1","session":"s1","state":"running","goal":"do it","created_at":"2026-01-02T03:04:05Z"}`)
 		case r.URL.Path == "/v1/sessions/s1/observe":
 			observeAuth = r.Header.Get("X-Pine-Auth")
 			fmt.Fprint(w, `{"tree":"..."}`)
@@ -145,8 +145,21 @@ func TestAttachEndToEnd(t *testing.T) {
 	if sess.Token() != ps {
 		t.Errorf("session token = %q, want %q", sess.Token(), ps)
 	}
-	if _, err := sess.Agent().Run(ctx, "do it", RunOptions{}); err != nil {
+	task, err := sess.Agent().Run(ctx, "do it", RunOptions{})
+	if err != nil {
 		t.Fatalf("agent.Run: %v", err)
+	}
+	// Assert the facade→coordinator typed parse end-to-end (not just err==nil): the
+	// run returns the typed Task, parsed from the wire, with the Raw escape hatch + a
+	// tolerantly-parsed timestamp.
+	if task.TaskID != "t1" || task.State != "running" || task.Goal != "do it" {
+		t.Errorf("agent.Run typed task = %+v, want task_id=t1 state=running goal=\"do it\"", task)
+	}
+	if task.CreatedAt == nil || task.CreatedAt.Year() != 2026 {
+		t.Errorf("agent.Run task.CreatedAt = %v, want parsed 2026 timestamp", task.CreatedAt)
+	}
+	if len(task.Raw) == 0 {
+		t.Error("agent.Run task.Raw escape hatch is empty")
 	}
 	if _, err := sess.Drive().Observe(ctx); err != nil {
 		t.Fatalf("drive.Observe: %v", err)

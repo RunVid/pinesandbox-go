@@ -3,13 +3,10 @@ package coordinator
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 	"testing"
-
-	"go.pinesandbox.io/computer/internal/base/problem"
 )
 
 func TestAgentRun_BodyAndPath(t *testing.T) {
@@ -18,11 +15,11 @@ func TestAgentRun_BodyAndPath(t *testing.T) {
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		path, auth = r.URL.Path, r.Header.Get("X-Pine-Auth")
 		_ = json.NewDecoder(r.Body).Decode(&body)
-		fmt.Fprint(w, `{"turn_id":"t1","status":"running"}`)
+		fmt.Fprint(w, `{"task_id":"t1","state":"running","session":"s","computer_id":"c"}`)
 	})
 
 	skills := []string{"book-flight"}
-	raw, err := c.AgentRun(context.Background(), "ct_a", "s", "buy milk", AgentRunOptions{Skills: skills, Context: "extra"})
+	task, err := c.AgentRun(context.Background(), "ct_a", "s", "buy milk", AgentRunOptions{Skills: skills, Context: "extra"})
 	if err != nil {
 		t.Fatalf("AgentRun: %v", err)
 	}
@@ -41,9 +38,11 @@ func TestAgentRun_BodyAndPath(t *testing.T) {
 	if s, _ := body["skills"].([]any); len(s) != 1 || s[0] != "book-flight" {
 		t.Errorf("skills = %v", body["skills"])
 	}
-	var got map[string]any
-	if err := json.Unmarshal(raw, &got); err != nil || got["turn_id"] != "t1" {
-		t.Errorf("raw body = %s (%v)", raw, err)
+	if task.TaskID != "t1" || task.State != "running" {
+		t.Errorf("parsed task = %+v, want task_id=t1 state=running", task)
+	}
+	if len(task.Raw) == 0 {
+		t.Error("task.Raw escape hatch should carry the full wire object")
 	}
 }
 
@@ -86,26 +85,90 @@ func TestAgentCancelResetTaskResult(t *testing.T) {
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/v1/sessions/s/agent/cancel" && r.Method == "POST":
-			fmt.Fprint(w, `{"cancelled":true}`)
+			fmt.Fprint(w, `{"task_id":"t1","state":"idle"}`)
 		case r.URL.Path == "/v1/sessions/s/agent/reset" && r.Method == "POST":
-			fmt.Fprint(w, `{"reset":true}`)
+			fmt.Fprint(w, `{"task_id":"t1","state":"idle"}`)
 		case r.URL.Path == "/v1/sessions/s/agent" && r.Method == "GET":
-			fmt.Fprint(w, `{"status":"idle"}`)
+			fmt.Fprint(w, `{"task_id":"t1","state":"running","goal":"buy milk"}`)
 		case r.URL.Path == "/v1/sessions/s/agent/result" && r.Method == "GET":
-			fmt.Fprint(w, `{"terminal_reason":"done"}`)
+			fmt.Fprint(w, `{"status":"ok","terminal_reason":"completed","summary":"done","artifacts":[],"findings":[],"usage":{"tokens":42,"cost":0,"compute_ms":10}}`)
 		default:
 			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 		}
 	})
-	for _, call := range []func() (json.RawMessage, error){
-		func() (json.RawMessage, error) { return c.AgentCancel(context.Background(), "ct_", "s") },
-		func() (json.RawMessage, error) { return c.AgentReset(context.Background(), "ct_", "s") },
-		func() (json.RawMessage, error) { return c.AgentTask(context.Background(), "ps_", "s") },
-		func() (json.RawMessage, error) { return c.AgentResult(context.Background(), "ps_", "s") },
-	} {
-		if _, err := call(); err != nil {
-			t.Errorf("call: %v", err)
-		}
+	// mutations + status return the typed Task; result returns the typed AgentResult.
+	if task, err := c.AgentCancel(context.Background(), "ct_", "s"); err != nil || task.State != "idle" {
+		t.Errorf("AgentCancel: %+v, %v", task, err)
+	}
+	if task, err := c.AgentReset(context.Background(), "ct_", "s"); err != nil || task.State != "idle" {
+		t.Errorf("AgentReset: %+v, %v", task, err)
+	}
+	if task, err := c.AgentTask(context.Background(), "ps_", "s"); err != nil || task.State != "running" || task.Goal != "buy milk" {
+		t.Errorf("AgentTask: %+v, %v", task, err)
+	}
+	res, err := c.AgentResult(context.Background(), "ps_", "s")
+	if err != nil {
+		t.Fatalf("AgentResult: %v", err)
+	}
+	if res.Status != "ok" || res.TerminalReason != "completed" || res.Usage.Tokens != 42 {
+		t.Errorf("AgentResult parsed = %+v, want status=ok terminal=completed tokens=42", res)
+	}
+}
+
+// TestAgentTask_TolerantTimestamps: an empty or non-RFC3339 timestamp must NOT fail the
+// parse — the SDK doesn't functionally need it, and a 200 never hard-failed under the old
+// raw return. Mirrors Session/parseTime tolerance (a bad timestamp → nil *time.Time).
+func TestAgentTask_TolerantTimestamps(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		// created_at empty, updated_at non-RFC3339 — both must be tolerated.
+		fmt.Fprint(w, `{"task_id":"t1","state":"idle","created_at":"","updated_at":"2026/01/02 03:04"}`)
+	})
+	task, err := c.AgentTask(context.Background(), "ps_", "s")
+	if err != nil {
+		t.Fatalf("AgentTask must not hard-fail on a bad/empty timestamp: %v", err)
+	}
+	if task.CreatedAt != nil || task.UpdatedAt != nil {
+		t.Errorf("bad/empty timestamps should parse to nil, got created=%v updated=%v", task.CreatedAt, task.UpdatedAt)
+	}
+	if task.State != "idle" {
+		t.Errorf("state = %q, want idle", task.State)
+	}
+}
+
+// TestAgentResult_TolerantArtifactTimestamp: a bad artifact modified_at must not drop the
+// whole terminal outcome (summary/findings/usage) over one cosmetic field.
+func TestAgentResult_TolerantArtifactTimestamp(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"status":"ok","terminal_reason":"completed","summary":"done","findings":[],"usage":{"tokens":1,"cost":0,"compute_ms":0},"artifacts":[{"root":"workdir","relative_path":"a.txt","content_type":"text/plain","size":3,"sha256":"x","modified_at":""}]}`)
+	})
+	res, err := c.AgentResult(context.Background(), "ps_", "s")
+	if err != nil {
+		t.Fatalf("AgentResult must not hard-fail on a bad artifact timestamp: %v", err)
+	}
+	if res.Status != "ok" || len(res.Artifacts) != 1 || res.Artifacts[0].RelativePath != "a.txt" {
+		t.Errorf("result = %+v, want status=ok + 1 artifact a.txt", res)
+	}
+	if res.Artifacts[0].ModifiedAt != nil {
+		t.Errorf("empty artifact modified_at should parse to nil, got %v", res.Artifacts[0].ModifiedAt)
+	}
+}
+
+// TestComputerUse_ActionWins: a params key named "action" must NOT clobber the action verb
+// (params carry the action's arguments, not the verb).
+func TestComputerUse_ActionWins(t *testing.T) {
+	var body map[string]any
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		fmt.Fprint(w, `{"ok":true}`)
+	})
+	if _, err := c.ComputerUse(context.Background(), "ps_", "s", "left_click", map[string]any{"action": "evil", "x": 1}); err != nil {
+		t.Fatalf("ComputerUse: %v", err)
+	}
+	if body["action"] != "left_click" {
+		t.Errorf("action = %v, want left_click (a params 'action' key must not clobber the verb)", body["action"])
+	}
+	if body["x"].(float64) != 1 {
+		t.Errorf("params should still merge: x = %v", body["x"])
 	}
 }
 
@@ -138,82 +201,4 @@ func TestDriveTrack(t *testing.T) {
 	}
 }
 
-// TestAgentEvents_StreamAndResume drives the real SSE path: multiple frames, id tracking,
-// the Last-Event-ID resume header, empty-data skip, and the returned cursor.
-func TestAgentEvents_StreamAndResume(t *testing.T) {
-	var gotLastEventID string
-	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Accept") != "text/event-stream" {
-			t.Errorf("Accept = %q", r.Header.Get("Accept"))
-		}
-		gotLastEventID = r.Header.Get("Last-Event-ID")
-		fl, _ := w.(http.Flusher)
-		// A comment-only frame (no data) is skipped; two data frames carry ids.
-		fmt.Fprint(w, ": keep-alive\n\n")
-		fmt.Fprint(w, "id: 1\ndata: {\"type\":\"started\"}\n\n")
-		fmt.Fprint(w, "id: 2\ndata: {\"type\":\"progress\"}\n\n")
-		if fl != nil {
-			fl.Flush()
-		}
-	})
-
-	var seen []string
-	last, err := c.AgentEvents(context.Background(), "ps_", "s", "0", func(data []byte) error {
-		var m map[string]any
-		if err := json.Unmarshal(data, &m); err != nil {
-			return err
-		}
-		seen = append(seen, m["type"].(string))
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("AgentEvents: %v", err)
-	}
-	if gotLastEventID != "0" {
-		t.Errorf("Last-Event-ID sent = %q, want 0", gotLastEventID)
-	}
-	if len(seen) != 2 || seen[0] != "started" || seen[1] != "progress" {
-		t.Errorf("events = %v, want [started progress]", seen)
-	}
-	if last != "2" {
-		t.Errorf("returned cursor = %q, want 2", last)
-	}
-}
-
-// TestAgentEvents_CallbackStop: returning ErrStop halts the stream and is returned.
-func TestAgentEvents_CallbackStop(t *testing.T) {
-	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, "id: 1\ndata: {\"n\":1}\n\n")
-		fmt.Fprint(w, "id: 2\ndata: {\"n\":2}\n\n")
-	})
-	n := 0
-	last, err := c.AgentEvents(context.Background(), "ps_", "s", "", func(data []byte) error {
-		n++
-		return ErrStop
-	})
-	if !errors.Is(err, ErrStop) {
-		t.Fatalf("err = %v, want ErrStop", err)
-	}
-	if n != 1 {
-		t.Errorf("callback ran %d times, want 1 (stopped after first)", n)
-	}
-	if last != "1" {
-		t.Errorf("cursor = %q, want 1", last)
-	}
-}
-
-// TestAgentEvents_Non2xxIsError: a non-2xx is a problem+json body, surfaced as APIError —
-// not a clean EOF.
-func TestAgentEvents_Non2xxIsError(t *testing.T) {
-	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/problem+json")
-		w.WriteHeader(404)
-		fmt.Fprint(w, `{"type":"/errors/session-not-found","status":404,"detail":"gone"}`)
-	})
-	var ae *problem.APIError
-	if _, err := c.AgentEvents(context.Background(), "ps_", "s", "", func([]byte) error { return nil }); !errors.As(err, &ae) {
-		t.Fatalf("err = %T (%v), want *problem.APIError", err, err)
-	} else if ae.Status != 404 {
-		t.Errorf("status = %d, want 404", ae.Status)
-	}
-}
+// The typed agent/control event-iterator tests live in stream_test.go.

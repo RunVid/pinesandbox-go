@@ -16,10 +16,29 @@ import (
 // internal packages. The aliases keep one source of truth per error (the layer that
 // raises it) while presenting a single flat surface.
 
+// Agent-lane control-flow sentinels: the coordinator statuses that carry control meaning,
+// as errors.Is-able values so callers branch on intent instead of raw status ints. Each is
+// a *APIError carrying just its problem-type slug; APIError.Is matches by slug, so
+// errors.Is(err, ErrTaskNotReady) is true for the live wire error AND errors.As(err,
+// &apiErr) still reaches its full detail (status, request id, retryable). Slugs are pinned
+// to the coordinator's error taxonomy (validated in errors_test.go).
+var (
+	// ErrTaskNotReady (409): a turn is in flight, the result isn't materialized — poll again.
+	ErrTaskNotReady = &problem.APIError{Status: 409, ProblemType: "/errors/task-not-ready"}
+	// ErrSessionBusy (409): the session already has an active task (one-active-per-session).
+	ErrSessionBusy = &problem.APIError{Status: 409, ProblemType: "/errors/session-busy"}
+	// ErrNoActiveTask (404): no task exists for this session yet (nothing to read/steer).
+	ErrNoActiveTask = &problem.APIError{Status: 404, ProblemType: "/errors/no-active-task"}
+	// ErrActionNotImplemented (501): the action isn't available here (e.g. no resident agent
+	// configured on this pool — agent.Run / delegate-mode turns).
+	ErrActionNotImplemented = &problem.APIError{Status: 501, ProblemType: "/errors/action-not-implemented"}
+)
+
 // Wire / transport / spec-version (coordinator + control-plane responses).
 type (
 	// APIError is the RFC-9457 wire error from the coordinator data plane. Callers read
-	// {Status, ProblemType, Detail, RequestID, Retryable} and switch on ProblemType.
+	// {Status, ProblemType, Detail, RequestID, Retryable}, errors.Is the control sentinels
+	// above, or switch on ProblemType.
 	APIError = problem.APIError
 	// TimeoutError is a normalized request timeout (net deadline, context, or 408/504).
 	TimeoutError = transport.TimeoutError

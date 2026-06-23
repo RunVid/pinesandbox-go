@@ -51,7 +51,9 @@ func (c *Client) Create(ctx context.Context, body any, idempotencyKey string) (*
 	if idempotencyKey != "" {
 		extra["Idempotency-Key"] = idempotencyKey
 	}
-	resp, err := c.do(ctx, "POST", "/sandboxes", b, extra)
+	// A keyed create is safe to retry on a transient fault (the server dedupes the
+	// replay); a keyless one is NOT (a reset may have applied → double-provision).
+	resp, err := c.do(ctx, "POST", "/sandboxes", b, extra, idempotencyKey != "")
 	if err != nil {
 		return nil, err
 	}
@@ -63,7 +65,7 @@ func (c *Client) Create(ctx context.Context, body any, idempotencyKey string) (*
 
 // Get fetches a sandbox by id.
 func (c *Client) Get(ctx context.Context, sandboxID string) (*SandboxInfo, error) {
-	resp, err := c.do(ctx, "GET", "/sandboxes/"+url.PathEscape(sandboxID), nil, nil)
+	resp, err := c.do(ctx, "GET", "/sandboxes/"+url.PathEscape(sandboxID), nil, nil, false)
 	if err != nil {
 		return nil, err
 	}
@@ -75,7 +77,7 @@ func (c *Client) Get(ctx context.Context, sandboxID string) (*SandboxInfo, error
 
 // Destroy deletes a sandbox. Idempotent: a 404 (already gone) is success.
 func (c *Client) Destroy(ctx context.Context, sandboxID string) error {
-	resp, err := c.do(ctx, "DELETE", "/sandboxes/"+url.PathEscape(sandboxID), nil, nil)
+	resp, err := c.do(ctx, "DELETE", "/sandboxes/"+url.PathEscape(sandboxID), nil, nil, false)
 	if err != nil {
 		return err
 	}
@@ -98,7 +100,7 @@ func (c *Client) Resume(ctx context.Context, sandboxID string) (bool, error) {
 }
 
 func (c *Client) transition(ctx context.Context, sandboxID, verb string) (bool, error) {
-	resp, err := c.do(ctx, "POST", "/sandboxes/"+url.PathEscape(sandboxID)+"/"+verb, nil, nil)
+	resp, err := c.do(ctx, "POST", "/sandboxes/"+url.PathEscape(sandboxID)+"/"+verb, nil, nil, false)
 	if err != nil {
 		return false, err
 	}
@@ -114,18 +116,18 @@ func (c *Client) transition(ctx context.Context, sandboxID, verb string) (bool, 
 // do sends the request with the project JWS; on a 401 it forces ONE token refresh and
 // retries once (a 401 means the request was rejected, not applied, so the retry is safe
 // even for create). The spec-version of every response is validated in send.
-func (c *Client) do(ctx context.Context, method, path string, body []byte, extra map[string]string) (*transport.Response, error) {
-	resp, err := c.send(ctx, method, path, body, extra, false)
+func (c *Client) do(ctx context.Context, method, path string, body []byte, extra map[string]string, retryOnTransient bool) (*transport.Response, error) {
+	resp, err := c.send(ctx, method, path, body, extra, false, retryOnTransient)
 	if err != nil {
 		return nil, err
 	}
 	if resp.Status != 401 {
 		return resp, nil
 	}
-	return c.send(ctx, method, path, body, extra, true)
+	return c.send(ctx, method, path, body, extra, true, retryOnTransient)
 }
 
-func (c *Client) send(ctx context.Context, method, path string, body []byte, extra map[string]string, forceRefresh bool) (*transport.Response, error) {
+func (c *Client) send(ctx context.Context, method, path string, body []byte, extra map[string]string, forceRefresh, retryOnTransient bool) (*transport.Response, error) {
 	tok, err := c.src.Token(ctx, forceRefresh)
 	if err != nil {
 		return nil, err
@@ -137,7 +139,7 @@ func (c *Client) send(ctx context.Context, method, path string, body []byte, ext
 	for k, v := range extra {
 		headers[k] = v
 	}
-	r := transport.Request{Accept: "application/json", Headers: headers}
+	r := transport.Request{Accept: "application/json", Headers: headers, RetryOnTransient: retryOnTransient}
 	if body != nil {
 		r.Body = body
 		r.ContentType = "application/json"

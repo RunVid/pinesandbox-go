@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -31,6 +32,12 @@ func TestFacade_TokenRouting_Comprehensive(t *testing.T) {
 		record(r)
 		if r.URL.Path == "/sessions" && r.Method == "POST" {
 			fmt.Fprintf(w, `{"session":{"name":"s1","token":%q}}`, ps) // give the Session its ps_
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/events") {
+			// One SSE frame so an event iterator yields once and the caller can break
+			// after a single (token-recording) request rather than reconnect-looping.
+			fmt.Fprint(w, "id: 1\ndata: {}\n\n")
 			return
 		}
 		fmt.Fprint(w, `{}`) // minimal; parse may fail downstream — we only assert the token
@@ -68,7 +75,10 @@ func TestFacade_TokenRouting_Comprehensive(t *testing.T) {
 	_ = sess.NotifyHuman(ctx, "r", "", "v1")
 	_, _ = sess.ListHandoffs(ctx, 0, "")
 	_, _ = sess.GetHandoff(ctx, "h1")
-	_, _ = sess.ControlEvents(ctx, "", noBytes)
+	for _, err := range sess.ControlEvents(ctx, "") {
+		_ = err
+		break // one request is enough to record the token
+	}
 	_, _ = sess.Epoch(ctx)
 	_ = sess.Focus(ctx)
 	_ = sess.RecreateTerminal(ctx)
@@ -79,7 +89,10 @@ func TestFacade_TokenRouting_Comprehensive(t *testing.T) {
 	_, _ = sess.CancelAuthor(ctx, "au1")
 	_, _ = sess.Agent().Status(ctx)
 	_, _ = sess.Agent().Result(ctx)
-	_, _ = sess.Agent().Events(ctx, "", noBytes)
+	for _, err := range sess.Agent().Events(ctx, "") {
+		_ = err
+		break
+	}
 	_, _ = sess.Drive().Observe(ctx)
 	_, _ = sess.Drive().ComputerUse(ctx, "click", nil)
 	_, _ = sess.Drive().UploadFile(ctx, "#f", "p")

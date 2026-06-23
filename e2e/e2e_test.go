@@ -82,8 +82,8 @@ func TestE2E_J1_Lifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListTabs: %v", err)
 	}
-	if !tabsInclude(t, tabs, "https://example.com") {
-		t.Errorf("tabs %s do not include example.com", tabs)
+	if !tabsInclude(tabs, "https://example.com") {
+		t.Errorf("tabs %+v do not include example.com", tabs)
 	}
 
 	res, err := sess.Exec(ctx, "echo pine-e2e-ok", pine.ExecOptions{}, nil)
@@ -101,6 +101,15 @@ func TestE2E_J1_Lifecycle(t *testing.T) {
 	// configured would error).
 	if _, err := comp.LatestSnapshot(ctx); err != nil {
 		t.Errorf("LatestSnapshot errored (persistence not configured?): %v", err)
+	}
+
+	// Browser-safe delegation: computer_host must be a FULL URI (scheme included) per
+	// computer-api.yaml — the web SDK derives the desktop ws/wss scheme from it. Assert it
+	// against the LIVE gateway host (this is the contract the cockpit/web SDK depends on).
+	if dc, derr := sess.Delegate(ctx); derr != nil {
+		t.Errorf("Delegate: %v", derr)
+	} else if !strings.HasPrefix(dc.ComputerHost, "https://") || !strings.Contains(dc.ComputerHost, ".computer.") {
+		t.Errorf("delegation computer_host = %q, want a full https://<id>.computer.<zone> URI", dc.ComputerHost)
 	}
 
 	if gone, err := comp.Stop(ctx); err != nil {
@@ -268,29 +277,33 @@ func TestE2E_J4_Agent(t *testing.T) {
 	deadline := time.Now().Add(5 * time.Minute)
 	var reason string
 	for {
-		raw, err := sess.Agent().Result(ctx)
+		res, err := sess.Agent().Result(ctx)
 		if err != nil {
-			// While a turn is in flight, /agent/result is a 409 task-not-ready — poll again.
-			var ae *pine.APIError
-			if errors.As(err, &ae) && ae.Status == 409 {
+			// While a turn is in flight the result isn't materialized — poll again. Uses the
+			// typed sentinel (dogfoods errors.Is against the live coord problem-type).
+			if errors.Is(err, pine.ErrTaskNotReady) {
 				if time.Now().After(deadline) {
-					t.Fatalf("agent turn still in flight past the window (last: %s)", ae.ProblemType)
+					t.Fatal("agent turn still in flight past the window")
 				}
 				time.Sleep(5 * time.Second)
 				continue
 			}
 			t.Fatalf("agent.Result: %v", err)
 		}
-		var r map[string]any
-		_ = json.Unmarshal(raw, &r)
-		if reason, _ = r["terminal_reason"].(string); reason != "" {
+		// Typed AgentResult — assert the parse held against the LIVE wire (the typed
+		// spine + Raw escape hatch both populated).
+		if len(res.Raw) == 0 {
+			t.Fatal("agent.Result: typed result has an empty Raw escape hatch")
+		}
+		if reason = res.TerminalReason; reason != "" {
+			if res.Status == "" {
+				t.Errorf("terminal result %q has empty status", reason)
+			}
 			break
 		}
 		// Cross-check the Task state stays a valid enum (idle/running/paused).
 		if st, serr := sess.Agent().Status(ctx); serr == nil {
-			var task map[string]any
-			_ = json.Unmarshal(st, &task)
-			if s, _ := task["state"].(string); s != "" && s != "idle" && s != "running" && s != "paused" {
+			if s := st.State; s != "" && s != "idle" && s != "running" && s != "paused" {
 				t.Fatalf("unexpected Task.state %q (want idle/running/paused)", s)
 			}
 		}
@@ -300,6 +313,87 @@ func TestE2E_J4_Agent(t *testing.T) {
 		time.Sleep(5 * time.Second)
 	}
 	t.Logf("agent turn terminal_reason=%q", reason)
+	_, _ = comp.Stop(ctx)
+}
+
+// J5 (optional) — the typed agent EVENT STREAM. Validates the resuming iterator against the
+// LIVE TaskEvent wire: every event carries a non-empty type, the Raw escape hatch is
+// populated, ids are monotonic, and the feed is bounded (a watchdog cancels it once the turn
+// is terminal, so the test never hangs on a continuous feed). Skips cleanly where no resident
+// agent is configured (run → 501/404), the same gate as J4.
+func TestE2E_J5_AgentEventStream(t *testing.T) {
+	c := newClient(t)
+	ctx, cancel := newCtx(t)
+	defer cancel()
+
+	comp, err := c.CreateComputer(ctx, pine.AttachOptions{})
+	if err != nil {
+		t.Fatalf("CreateComputer: %v", err)
+	}
+	defer teardown(comp)
+	sess := driveALittle(t, ctx, comp, "agent-stream")
+
+	if _, err := sess.Agent().Run(ctx, "Confirm the page title contains \"Example\".", pine.RunOptions{}); err != nil {
+		var ae *pine.APIError
+		if errors.As(err, &ae) && (ae.Status == 501 || ae.Status == 404) {
+			t.Skipf("resident agent not configured here (run → %d); J5 needs PINE_MODEL_* on the pool", ae.Status)
+		}
+		t.Fatalf("agent.Run: %v", err)
+	}
+
+	// Bounded stop: cancel the stream once this turn's result is terminal. The feed is
+	// continuous (it does not EOF when a turn ends), so without this the iterator would
+	// resume forever — the cancel is the deterministic terminator, not a feed EOF.
+	streamCtx, stopStream := context.WithCancel(ctx)
+	defer stopStream()
+	go func() {
+		for streamCtx.Err() == nil {
+			if res, rerr := sess.Agent().Result(streamCtx); rerr == nil && res.TerminalReason != "" {
+				time.Sleep(3 * time.Second) // let the turn's terminal event flush to the feed
+				stopStream()
+				return
+			}
+			time.Sleep(5 * time.Second)
+		}
+	}()
+
+	var n int
+	var lastID int64
+	sawTerminal := false
+	for ev, serr := range sess.Agent().Events(streamCtx, "") {
+		if serr != nil {
+			// The watchdog's cancel is the expected stop, not a failure.
+			if errors.Is(serr, context.Canceled) || streamCtx.Err() != nil {
+				break
+			}
+			var ae *pine.APIError
+			if errors.As(serr, &ae) && (ae.Status == 501 || ae.Status == 404) {
+				t.Skipf("agent event feed not implemented here (events → %d)", ae.Status)
+			}
+			t.Fatalf("agent events: %v", serr)
+		}
+		n++
+		if ev.Type == "" {
+			t.Errorf("event %d has an empty type (envelope did not parse)", n)
+		}
+		if len(ev.Raw) == 0 {
+			t.Errorf("event %d (%s) has an empty Raw escape hatch", n, ev.Type)
+		}
+		if ev.EventID != 0 {
+			if ev.EventID < lastID {
+				t.Errorf("event id went backwards: %d after %d", ev.EventID, lastID)
+			}
+			lastID = ev.EventID
+		}
+		if ev.Terminal {
+			sawTerminal = true
+			break
+		}
+	}
+	if n == 0 {
+		t.Fatal("agent event stream delivered no events for a turn that ran (typed feed not wired?)")
+	}
+	t.Logf("agent event stream: %d typed events (terminal frame seen=%t, lastID=%d)", n, sawTerminal, lastID)
 	_, _ = comp.Stop(ctx)
 }
 
@@ -332,14 +426,9 @@ func mustSnapshot(t *testing.T, ctx context.Context, comp *pine.Computer) map[st
 	}
 }
 
-func tabsInclude(t *testing.T, tabsJSON json.RawMessage, prefix string) bool {
-	t.Helper()
-	var tabs []map[string]any
-	if err := json.Unmarshal(tabsJSON, &tabs); err != nil {
-		t.Fatalf("tabs not a JSON array: %v", err)
-	}
+func tabsInclude(tabs []pine.Tab, prefix string) bool {
 	for _, tab := range tabs {
-		if u, _ := tab["url"].(string); strings.HasPrefix(u, prefix) {
+		if strings.HasPrefix(tab.URL, prefix) {
 			return true
 		}
 	}

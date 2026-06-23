@@ -32,17 +32,20 @@ func TestTabs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListTabs: %v", err)
 	}
-	var tabs []map[string]any
-	if json.Unmarshal(list, &tabs); len(tabs) != 2 {
-		t.Errorf("tabs = %s", list)
+	if len(list) != 2 || list[0].TargetID != "t1" || list[1].TargetID != "t2" {
+		t.Errorf("tabs = %+v, want 2 typed tabs t1/t2", list)
 	}
 	tab, err := c.CreateTab(context.Background(), "ps_", "s", "https://x", "lbl")
-	if err != nil || !contains(string(tab), `"target_id":"new"`) {
-		t.Errorf("CreateTab = %s, %v", tab, err)
+	if err != nil || tab.TargetID != "new" || tab.URL != "https://x" {
+		t.Errorf("CreateTab = %+v, %v, want typed tab target_id=new", tab, err)
 	}
 	active := true
-	if _, err := c.PatchTab(context.Background(), "ps_", "s", "t1", PatchTabOptions{Active: &active}); err != nil {
+	patched, err := c.PatchTab(context.Background(), "ps_", "s", "t1", PatchTabOptions{Active: &active})
+	if err != nil {
 		t.Fatalf("PatchTab: %v", err)
+	}
+	if patched.TargetID != "t1" || !patched.Active {
+		t.Errorf("PatchTab returned %+v, want typed tab t1 active=true", patched)
 	}
 	if patchBody["active"] != true {
 		t.Errorf("patch body = %v", patchBody)
@@ -104,53 +107,7 @@ func TestControlState(t *testing.T) {
 	}
 }
 
-// TestControlEvents_StreamAndResume: the control-event feed streams + tracks the resume
-// cursor, and sends Last-Event-ID on reconnect (the second leg resumes from the first's cursor).
-func TestControlEvents_StreamAndResume(t *testing.T) {
-	var leg2LastEventID string
-	leg := 0
-	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/sessions/s/control/events" {
-			t.Errorf("path = %s", r.URL.Path)
-		}
-		leg++
-		if leg == 1 {
-			_, _ = io.WriteString(w, "id: 7\ndata: {\"mode\":\"agent\"}\n\n")
-			return
-		}
-		leg2LastEventID = r.Header.Get("Last-Event-ID")
-		_, _ = io.WriteString(w, "id: 8\ndata: {\"mode\":\"control\"}\n\n")
-	})
-
-	var seen []string
-	collect := func(data []byte) error {
-		var m map[string]any
-		_ = json.Unmarshal(data, &m)
-		seen = append(seen, m["mode"].(string))
-		return nil
-	}
-	cursor, err := c.ControlEvents(context.Background(), "ps_", "s", "", collect)
-	if err != nil {
-		t.Fatalf("ControlEvents leg 1: %v", err)
-	}
-	if cursor != "7" {
-		t.Errorf("leg-1 cursor = %q, want 7", cursor)
-	}
-	// Reconnect with the cursor — the server must see it as Last-Event-ID and resume.
-	cursor2, err := c.ControlEvents(context.Background(), "ps_", "s", cursor, collect)
-	if err != nil {
-		t.Fatalf("ControlEvents leg 2: %v", err)
-	}
-	if leg2LastEventID != "7" {
-		t.Errorf("reconnect sent Last-Event-ID %q, want 7", leg2LastEventID)
-	}
-	if cursor2 != "8" {
-		t.Errorf("leg-2 cursor = %q, want 8", cursor2)
-	}
-	if len(seen) != 2 || seen[0] != "agent" || seen[1] != "control" {
-		t.Errorf("events = %v, want [agent control]", seen)
-	}
-}
+// The typed control-event iterator is covered in stream_test.go.
 
 func TestControlNotifyAndDesktopAndHandoffs(t *testing.T) {
 	var notifyIfMatch string
