@@ -10,14 +10,22 @@ import (
 	"testing"
 )
 
-// TestFacade_TokenRouting_Comprehensive asserts the ct_ vs ps_ choice for EVERY facade
-// method — the facade's core authorization decision. A coord stub records the X-Pine-Auth
-// it received per (method, path); we call every wrapper (ignoring response-parse errors —
-// only the sent token matters) and check each against its expected token class:
-//   - Computer-level ops + agent MUTATIONS + desktop-token mint → the Computer's ct_
-//   - session-scoped reads + drive + files/artifacts/tabs/control/skills-authoring → ps_
+// TestFacade_TokenRouting_Comprehensive asserts the ct_ vs ps_ choice for each
+// token-bearing facade wrapper — the facade's core authorization decision. A coord
+// stub records the X-Pine-Auth it received per (method, path); we call every
+// wrapper (ignoring response-parse errors — only the sent token matters) and check
+// each against its expected token class:
+//   - Computer-level ops + agent MUTATIONS + the control lease (state/patch/events/
+//     handoffs) + the skills-authoring lifecycle (learn/teach/author/cancel + its
+//     event stream) + desktop-token mint → the Computer's ct_ (the operator surface)
+//   - session-scoped reads + drive + files/artifacts/tabs + control/notify → ps_
 //   - health/metrics → token-less
 //
+// The expected token for each route is the COORD's contract, not the SDK's: it
+// must match RouteClass in components/session-coordinator/pkg/server/route_classify.go
+// (RequiresComputerToken → ct_; Drive → ps_; Read/ControlRead → either). When the
+// coord's class for a route changes, fix the wrapper AND re-pin here against that —
+// do NOT pin to whatever the wrapper currently sends (that masked the original bug).
 // A wrong token in any single wrapper fails here.
 func TestFacade_TokenRouting_Comprehensive(t *testing.T) {
 	const ct, ps = "ct_tok", "ps_tok"
@@ -139,20 +147,20 @@ func TestFacade_TokenRouting_Comprehensive(t *testing.T) {
 		"POST /sessions/s1/tabs":                        ps,
 		"PATCH /sessions/s1/tabs/t1":                    ps,
 		"DELETE /sessions/s1/tabs/t1":                   ps,
-		"GET /v1/sessions/s1/control":                   ps,
-		"PATCH /v1/sessions/s1/control":                 ps,
+		"GET /v1/sessions/s1/control":                   ct,
+		"PATCH /v1/sessions/s1/control":                 ct,
 		"POST /v1/sessions/s1/control/notify":           ps,
-		"GET /v1/sessions/s1/handoffs":                  ps,
-		"GET /v1/sessions/s1/handoffs/h1":               ps,
-		"GET /v1/sessions/s1/control/events":            ps,
+		"GET /v1/sessions/s1/handoffs":                  ct,
+		"GET /v1/sessions/s1/handoffs/h1":               ct,
+		"GET /v1/sessions/s1/control/events":            ct,
 		"GET /sessions/s1/epoch":                        ps,
 		"POST /sessions/s1/focus":                       ps,
 		"POST /sessions/s1/terminal/recreate":           ps,
-		"POST /v1/sessions/s1/learn":                    ps,
-		"POST /v1/sessions/s1/teach":                    ps,
-		"POST /v1/sessions/s1/skills":                   ps,
-		"GET /v1/sessions/s1/skills/author/au1/events":  ps,
-		"POST /v1/sessions/s1/skills/author/au1/cancel": ps,
+		"POST /v1/sessions/s1/learn":                    ct,
+		"POST /v1/sessions/s1/teach":                    ct,
+		"POST /v1/sessions/s1/skills":                   ct,
+		"GET /v1/sessions/s1/skills/author/au1/events":  ct,
+		"POST /v1/sessions/s1/skills/author/au1/cancel": ct,
 		"GET /v1/sessions/s1/agent":                     ps,
 		"GET /v1/sessions/s1/agent/result":              ps,
 		"GET /v1/sessions/s1/agent/events":              ps,

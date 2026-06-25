@@ -178,11 +178,14 @@ func (c *Client) streamJSONEvents(ctx context.Context, path, token, lastEventID 
 		if ferr != nil {
 			return latest, ferr // a read error (NOT a clean EOF — Frames just stops on EOF)
 		}
+		if frame.ID != "" {
+			// Advance the resume cursor for ANY id-bearing frame, BEFORE the empty-data
+			// skip — mirrors pumpFrames (stream.go) so a reconnect can't replay a frame
+			// we've already seen and skipped (an id-bearing keepalive).
+			latest = frame.ID
+		}
 		if frame.Data == "" {
 			continue
-		}
-		if frame.ID != "" {
-			latest = frame.ID
 		}
 		if err := fn([]byte(frame.Data)); err != nil {
 			return latest, err

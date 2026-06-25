@@ -27,6 +27,9 @@ var (
 	ErrTaskNotReady = &problem.APIError{Status: 409, ProblemType: "/errors/task-not-ready"}
 	// ErrSessionBusy (409): the session already has an active task (one-active-per-session).
 	ErrSessionBusy = &problem.APIError{Status: 409, ProblemType: "/errors/session-busy"}
+	// ErrSessionLimit (409): the Computer's concurrent-session cap is reached — close an
+	// idle/finished session (DestroySession) to free a slot, then retry CreateSession.
+	ErrSessionLimit = &problem.APIError{Status: 409, ProblemType: "/errors/session-limit"}
 	// ErrNoActiveTask (404): no task exists for this session yet (nothing to read/steer).
 	ErrNoActiveTask = &problem.APIError{Status: 404, ProblemType: "/errors/no-active-task"}
 	// ErrActionNotImplemented (501): the action isn't available here (e.g. no resident agent

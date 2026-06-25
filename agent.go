@@ -35,6 +35,8 @@ type (
 	FileRef      = coordinator.FileRef
 	Finding      = coordinator.Finding
 	AgentEvent   = coordinator.AgentEvent
+	// AgentAsk is the typed needs_input payload — read it via AgentEvent.Ask().
+	AgentAsk = coordinator.AgentAsk
 )
 
 // Run starts a turn toward goal; returns the session's Task (running for this turn).

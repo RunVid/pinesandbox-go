@@ -57,6 +57,45 @@ type AgentEvent struct {
 	Raw         json.RawMessage // the full TaskEvent envelope (forward-compat escape hatch)
 }
 
+// AgentAsk is the typed payload of a needs_input event — the agent paused on
+// pine_ask and is waiting for an answer. RequestID is the id echoed back to
+// AgentMode.Answer; Question is the human-facing prompt. Context and Options are
+// optional hints (Options = suggested answers, when the agent offered any).
+type AgentAsk struct {
+	RequestID string   // echo to AgentMode.Answer(requestID, …)
+	Question  string   // the question to surface to the human
+	Context   string   // optional extra context for the question
+	Options   []string // optional suggested answers (may be empty)
+}
+
+// Ask returns the typed ask payload when this event is a needs_input pause
+// (Type == "needs_input"), else (nil, false) — so callers drive Answer without
+// hand-parsing Payload:
+//
+//	if ask, ok := ev.Ask(); ok {
+//		ag.Answer(ctx, ask.RequestID, prompt(ask.Question), ev.TurnID)
+//	}
+func (e *AgentEvent) Ask() (*AgentAsk, bool) {
+	if e == nil || e.Type != "needs_input" {
+		return nil, false
+	}
+	var wire struct {
+		RequestID string   `json:"request_id"`
+		Question  string   `json:"question"`
+		Context   string   `json:"context"`
+		Options   []string `json:"options"`
+	}
+	if err := json.Unmarshal(e.Payload, &wire); err != nil {
+		return nil, false
+	}
+	return &AgentAsk{
+		RequestID: wire.RequestID,
+		Question:  wire.Question,
+		Context:   wire.Context,
+		Options:   wire.Options,
+	}, true
+}
+
 // ControlEvent is one control-plane SSE event (spec ControlEventV1), discriminated by the
 // SSE event: line. Data is the per-type payload (kept raw — the four shapes are small +
 // stable; read the fields you need).

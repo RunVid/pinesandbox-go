@@ -104,12 +104,13 @@ func TestE2E_J1_Lifecycle(t *testing.T) {
 	}
 
 	// Browser-safe delegation: computer_host must be a FULL URI (scheme included) per
-	// computer-api.yaml — the web SDK derives the desktop ws/wss scheme from it. Assert it
-	// against the LIVE gateway host (this is the contract the cockpit/web SDK depends on).
+	// computer-api.yaml — the web SDK derives the desktop ws/wss scheme from it. The scheme
+	// is env-dependent (https on staging/prod, http on the local lvh.me loop), so assert a
+	// scheme is present + the Computer host shape, not a hardcoded https.
 	if dc, derr := sess.Delegate(ctx); derr != nil {
 		t.Errorf("Delegate: %v", derr)
-	} else if !strings.HasPrefix(dc.ComputerHost, "https://") || !strings.Contains(dc.ComputerHost, ".computer.") {
-		t.Errorf("delegation computer_host = %q, want a full https://<id>.computer.<zone> URI", dc.ComputerHost)
+	} else if (!strings.HasPrefix(dc.ComputerHost, "https://") && !strings.HasPrefix(dc.ComputerHost, "http://")) || !strings.Contains(dc.ComputerHost, ".computer.") {
+		t.Errorf("delegation computer_host = %q, want a full http(s)://<id>.computer.<zone> URI", dc.ComputerHost)
 	}
 
 	if gone, err := comp.Stop(ctx); err != nil {
@@ -462,4 +463,43 @@ func envDuration(key string, def time.Duration) time.Duration {
 		}
 	}
 	return def
+}
+
+// J6 — control lease + stateless session reuse. Guards the ct_/ps_ routing
+// against the REAL coord (the non-enforcing unit stub can't): UpdateControl is
+// ct_-only, so the pre-fix SDK — which routed control through the session ps_ —
+// 403s here. Also exercises AdoptSession: rebuild a drivable handle from a
+// persisted ps_ (the path a stateless/restarted backend takes).
+func TestE2E_J6_ControlAndAdopt(t *testing.T) {
+	c := newClient(t)
+	ctx, cancel := newCtx(t)
+	defer cancel()
+
+	comp, err := c.CreateComputer(ctx, pine.AttachOptions{})
+	if err != nil {
+		t.Fatalf("CreateComputer: %v", err)
+	}
+	defer teardown(comp)
+	sess := driveALittle(t, ctx, comp, "control")
+
+	// Stateless reuse FIRST, while the session is still agent-driving (so the
+	// drive isn't control-mode-gated): rebuild from the persisted {name, ps_}.
+	adopted, err := comp.AdoptSession(sess.Name(), sess.Token())
+	if err != nil {
+		t.Fatalf("AdoptSession: %v", err)
+	}
+	if _, err := adopted.CreateTab(ctx, "https://example.org", ""); err != nil {
+		t.Fatalf("drive via AdoptSession (persisted ps_): %v", err)
+	}
+
+	// Take control (ct_-only mutate). A ps_-routed UpdateControl 403s — the bug.
+	st, err := sess.ControlState(ctx)
+	if err != nil {
+		t.Fatalf("ControlState (ct_): %v", err)
+	}
+	if _, err := sess.UpdateControl(ctx,
+		map[string]any{"controller": "human", "actor_type": "user_click"},
+		pine.PatchControlOptions{IfMatch: st.ETag}); err != nil {
+		t.Fatalf("UpdateControl take-human: %v (a 403 here is the ct_/ps_ routing bug)", err)
+	}
 }

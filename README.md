@@ -80,6 +80,40 @@ func main() {
 }
 ```
 
+## Stateless reuse (multi-instance / restarted backends)
+
+The handle isn't the source of truth — your **persisted credentials** are. A
+stateless backend rebuilds the handles per request, no provisioning and no coord
+round-trip for the session:
+
+- **Computer** — persist `comp.ID()`, `comp.Key()`, `comp.SandboxID()`, and
+  `comp.ComputerToken()` (the `ct_`).
+- **Session** — persist `sess.Name()` and `sess.Token()` (the `ps_`). The `ps_` is
+  minted once at `CreateSession` and the coordinator redacts it on read, so a
+  session re-fetched with `comp.Session(name)` has **no** `ps_` (its drive ops
+  `401`); keep the create-time value and rebuild with `AdoptSession`.
+
+```go
+// Per request:
+comp, err := client.AdoptExisting(ctx, id, key, sandboxID, ct) // rebuild the Computer
+if err != nil { /* … */ }
+sess, err := comp.AdoptSession(name, ps)                        // rebuild the session
+if err != nil { /* … */ }
+
+sess.CreateTab(ctx, "https://example.com", "")     // drive   → ps_
+sess.UpdateControl(ctx, body, opts)                 // control → ct_
+sess.Agent().Run(ctx, goal, pine.RunOptions{})      // agent   → ct_
+```
+
+Tokens split by tier: **`ct_` is the operator surface** — control lease, agent +
+skills-authoring mutations, lifecycle; **`ps_` is the session's own drive + reads**.
+The SDK attaches the right one per call.
+
+When a token is rejected (the pod was recycled/rebound, or the idle TTL lapsed) the
+SDK surfaces a typed `*pine.RebindRequiredError` — it never silently re-mints (that
+would land a fresh pod and invalidate every `ps_`). Recover by re-attaching:
+`AttachComputer` mints a fresh `ct_` + sessions/`ps_`; persist the new creds and retry.
+
 ## Driving the Computer with an agent
 
 A Computer is a real cloud browser + desktop + shell. There are **three ways** an
@@ -101,9 +135,10 @@ for ev, err := range ag.Events(ctx, "") {
 		return err
 	}
 	switch ev.Type {
-	case "needs_input": // the agent paused with a question (ev.Reason == "needs_input")
-		// read the question from ev.Payload, then answer to resume the turn:
-		_, _ = ag.Answer(ctx, requestID, "window seat", "")
+	case "needs_input": // the agent paused on a question
+		if ask, ok := ev.Ask(); ok { // typed: ask.Question / .Options / .RequestID
+			_, _ = ag.Answer(ctx, ask.RequestID, answer(ask.Question), ev.TurnID)
+		}
 	case "result":
 		res, _ := ag.Result(ctx) // TerminalReason, Summary, Usage, Artifacts, Findings
 		log.Printf("done: %s — %s", res.TerminalReason, res.Summary)

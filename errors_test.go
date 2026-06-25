@@ -20,6 +20,16 @@ func TestControlSentinels_ErrorsIsBySlug(t *testing.T) {
 		t.Error("a task-not-ready error must NOT match ErrSessionBusy")
 	}
 
+	// The session cap (CreateSession at the concurrent limit) matches ErrSessionLimit,
+	// not the unrelated ErrSessionBusy (both are 409).
+	atCap := &APIError{Status: 409, ProblemType: "/errors/session-limit"}
+	if !errors.Is(atCap, ErrSessionLimit) {
+		t.Error("errors.Is(session-limit, ErrSessionLimit) = false, want true")
+	}
+	if errors.Is(atCap, ErrSessionBusy) {
+		t.Error("a session-limit error must NOT match ErrSessionBusy")
+	}
+
 	// errors.As still reaches the full wire detail (the sentinel is not a lossy wrapper).
 	var ae *APIError
 	if !errors.As(inFlight, &ae) || ae.Status != 409 || ae.RequestID != "req-1" {
@@ -53,7 +63,7 @@ func TestControlSentinels_SlugsInTaxonomy(t *testing.T) {
 	for _, e := range f.Entries {
 		known[e.Type] = true
 	}
-	for _, s := range []*APIError{ErrTaskNotReady, ErrSessionBusy, ErrNoActiveTask, ErrActionNotImplemented} {
+	for _, s := range []*APIError{ErrTaskNotReady, ErrSessionBusy, ErrSessionLimit, ErrNoActiveTask, ErrActionNotImplemented} {
 		if !known[s.ProblemType] {
 			t.Errorf("sentinel slug %q is not in error-taxonomy.json (typo or renamed server slug)", s.ProblemType)
 		}

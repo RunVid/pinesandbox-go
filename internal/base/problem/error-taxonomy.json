@@ -72,6 +72,11 @@
       "retryable": true
     },
     {
+      "type": "/errors/session-limit",
+      "status": 409,
+      "retryable": false
+    },
+    {
       "type": "/errors/desktop-bind-failed",
       "status": 502,
       "retryable": true

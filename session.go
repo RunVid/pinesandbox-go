@@ -32,7 +32,13 @@ func (c *Computer) CreateSession(ctx context.Context, opts CreateSessionOptions)
 	return c.wrapSession(coord, s), nil
 }
 
-// Session fetches an existing session by name.
+// Session fetches an existing session's metadata by name (ct_-authorized).
+//
+// The coord redacts the session's ps_ on read (it's handed out only at
+// CreateSession), so the returned handle has no ps_: its ct_-routed ops work
+// (control, agent + authoring mutations), but ps_-routed ops (drive, agent/read
+// surfaces, files) 401. For reuse in a stateless backend, persist the ps_ from
+// CreateSession and rebuild with AdoptSession.
 func (c *Computer) Session(ctx context.Context, name string) (*Session, error) {
 	coord, ct, err := c.bound()
 	if err != nil {
@@ -43,6 +49,19 @@ func (c *Computer) Session(ctx context.Context, name string) (*Session, error) {
 		return nil, err
 	}
 	return c.wrapSession(coord, s), nil
+}
+
+// AdoptSession rebuilds a drive-capable *Session from a persisted ps_, with no
+// coord round-trip — the session analog of Client.AdoptExisting and the reuse path
+// for a stateless backend (persist {name, ps_} at CreateSession; per request
+// AdoptExisting the Computer, then AdoptSession). The Computer must be attached; a
+// wrong/expired ps_ surfaces as a 401 on first use.
+func (c *Computer) AdoptSession(name, sessionToken string) (*Session, error) {
+	coord, _, err := c.bound()
+	if err != nil {
+		return nil, err
+	}
+	return &Session{parent: c, coord: coord, name: name, token: sessionToken}, nil
 }
 
 // Sessions lists all of the Computer's sessions.
