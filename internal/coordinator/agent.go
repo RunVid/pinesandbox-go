@@ -116,16 +116,35 @@ func (c *Client) Observe(ctx context.Context, token, name string) (*Observation,
 	return parseObservation(raw)
 }
 
+// ComputerUseResult is the typed outcome of one computer-use action. For
+// action=="screenshot" Screenshot holds the base64 PNG; other actions return
+// OK==true. It models the full result shape, so there's no raw escape hatch.
+type ComputerUseResult struct {
+	Screenshot string // base64 PNG, set for action=="screenshot"
+	OK         bool   // true when a non-screenshot action completed
+}
+
 // ComputerUse issues one low-level action (the body is {action, ...params}). The action
 // verb always wins: a params key named "action" can't clobber it (params carry the action's
 // arguments — x/y/text/etc. — not the verb).
-func (c *Client) ComputerUse(ctx context.Context, token, name, action string, params map[string]any) (json.RawMessage, error) {
+func (c *Client) ComputerUse(ctx context.Context, token, name, action string, params map[string]any) (*ComputerUseResult, error) {
 	body := make(map[string]any, len(params)+1)
 	for k, v := range params {
 		body[k] = v
 	}
 	body["action"] = action
-	return c.postJSON(ctx, "/v1/sessions/"+url.PathEscape(name)+"/computer-use", token, body)
+	raw, err := c.postJSON(ctx, "/v1/sessions/"+url.PathEscape(name)+"/computer-use", token, body)
+	if err != nil {
+		return nil, err
+	}
+	var w struct {
+		Screenshot string `json:"screenshot"`
+		OK         bool   `json:"ok"`
+	}
+	if err := json.Unmarshal(raw, &w); err != nil {
+		return nil, fmt.Errorf("pinesandbox: unparseable computer-use result: %w", err)
+	}
+	return &ComputerUseResult{Screenshot: w.Screenshot, OK: w.OK}, nil
 }
 
 // UploadFile stages a file into a selector's picker.

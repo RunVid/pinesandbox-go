@@ -492,14 +492,13 @@ func TestE2E_J6_ControlAndAdopt(t *testing.T) {
 		t.Fatalf("drive via AdoptSession (persisted ps_): %v", err)
 	}
 
-	// Take control (ct_-only mutate). A ps_-routed UpdateControl 403s — the bug.
-	st, err := sess.ControlState(ctx)
+	// Take control (ct_-only mutate, via the typed TakeControl helper — ETag fetch +
+	// If-Match retry). A ps_-routed control mutate 403s here — the bug this guards.
+	st, err := sess.TakeControl(ctx)
 	if err != nil {
-		t.Fatalf("ControlState (ct_): %v", err)
+		t.Fatalf("TakeControl: %v (a 403 here is the ct_/ps_ routing bug)", err)
 	}
-	if _, err := sess.UpdateControl(ctx,
-		map[string]any{"controller": "human", "actor_type": "user_click"},
-		pine.PatchControlOptions{IfMatch: st.ETag}); err != nil {
-		t.Fatalf("UpdateControl take-human: %v (a 403 here is the ct_/ps_ routing bug)", err)
+	if st.Controller != pine.ControllerHuman {
+		t.Errorf("controller after TakeControl = %q, want human", st.Controller)
 	}
 }

@@ -7,6 +7,45 @@ package `pinesandbox`) are documented here. The format follows
 `0.<POOL_VERSION>.<patch>`. So `require go.pinesandbox.io/computer v0.3.x`
 targets `pine-cua-pool-v3` (the compatibility contract integrators pin to).
 
+## [0.3.3] — 2026-06-26
+
+### Changed
+
+- **Typed control, handoff, and computer-use surfaces (breaking).** The opaque
+  hand-built pieces are now spec-typed:
+  - `Session.ControlState` returns typed fields (`Controller`, `Epoch`,
+    `SessionName`, `IdlePaused`, `IdleDeadline`, `LastTransitionAt`) + `ETag`
+    instead of a raw `.State` blob (it models the full schema — no raw hatch).
+  - `Session.UpdateControl` takes a typed **`ControlPatch`** (`Controller`,
+    `IdlePaused`, `IdleDeadline` absolute or `IdleDeadlineIn` relative, `ActorType`;
+    nil = leave unchanged) instead of `body any`. New convenience **`TakeControl(ctx,
+    ...ControlOption)` / `ReleaseControl`** — the common case takes no args (no magic
+    `"user_click"`); pass **`WithForce()`** to override an existing holder. They
+    handle the ETag-fetch → If-Match → 412-retry (a fresh Idempotency-Key per
+    attempt — the retry must not reuse the rejected key).
+  - `Session.ListHandoffs` returns a **`*HandoffList`** (`Handoffs` + the
+    `NextBefore` pagination cursor); `GetHandoff` returns `*Handoff`. Summary fields
+    are typed (`HandoffID`, `StartedAt`, `EndedAt`, `ControllerAtStart/End`); the
+    deep forensic detail (nav / form_submit / xhr_submit / clicked_action) is in
+    `Handoff.Raw` for `GetHandoff`.
+  - `DriveMode.ComputerUse` returns a typed **`ComputerUseResult`** (`Screenshot`
+    for `action=="screenshot"`, else `OK`). Added typed
+    convenience helpers **`Click` / `RightClick` / `DoubleClick` / `MouseMove` /
+    `TypeText` / `Key` / `Scroll` / `Screenshot`** over the raw `ComputerUse`.
+
+  The design line: type the surfaces with stable spec schemas you act on; keep raw
+  (with a `.Raw` escape hatch / typed accessor) the loose/forensic/admin payloads.
+
+### Added
+
+- **Typed constants for the strings you match/supply** (no more magic strings):
+  agent event kinds (`EventNeedsInput`, `EventResult`, …), `Controller*`, `Actor*`,
+  `Terminal*` reasons, and control-event types — so you write `ev.Type ==
+  pine.EventNeedsInput`, not `"needs_input"`. (Additive sets — switch with a default.)
+- **`AgentMode.AnswerAsk(ctx, ask, text)`** + `AgentEvent.Ask` now carries `TurnID`,
+  so answering a `needs_input` pause needs no id plumbing:
+  `if ask, ok := ev.Ask(); ok { ag.AnswerAsk(ctx, ask, reply(ask.Question)) }`.
+
 ## [0.3.2] — 2026-06-25
 
 ### Fixed

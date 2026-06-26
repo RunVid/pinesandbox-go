@@ -101,7 +101,7 @@ sess, err := comp.AdoptSession(name, ps)                        // rebuild the s
 if err != nil { /* … */ }
 
 sess.CreateTab(ctx, "https://example.com", "")     // drive   → ps_
-sess.UpdateControl(ctx, body, opts)                 // control → ct_
+sess.TakeControl(ctx)                               // control → ct_ (WithForce() to override)
 sess.Agent().Run(ctx, goal, pine.RunOptions{})      // agent   → ct_
 ```
 
@@ -135,13 +135,15 @@ for ev, err := range ag.Events(ctx, "") {
 		return err
 	}
 	switch ev.Type {
-	case "needs_input": // the agent paused on a question
-		if ask, ok := ev.Ask(); ok { // typed: ask.Question / .Options / .RequestID
-			_, _ = ag.Answer(ctx, ask.RequestID, answer(ask.Question), ev.TurnID)
+	case pine.EventNeedsInput: // the agent paused on a question
+		if ask, ok := ev.Ask(); ok { // ask carries Question / Options / the ids
+			_, _ = ag.AnswerAsk(ctx, ask, answer(ask.Question)) // no id plumbing
 		}
-	case "result":
+	case pine.EventResult:
 		res, _ := ag.Result(ctx) // TerminalReason, Summary, Usage, Artifacts, Findings
-		log.Printf("done: %s — %s", res.TerminalReason, res.Summary)
+		if res.TerminalReason == pine.TerminalCompleted {
+			log.Printf("done: %s", res.Summary)
+		}
 	}
 	if ev.Terminal {
 		break
@@ -174,6 +176,12 @@ for {
 }
 ```
 
+For hand-coded steps, typed helpers wrap the common actions —
+`drive.Click(ctx, x, y)`, `drive.TypeText(ctx, s)`, `drive.Key(ctx, "ctrl+a")`,
+`drive.Scroll(ctx, x, y, "down", 3)`, `drive.Screenshot(ctx)` — so you don't
+hand-build params; the raw `ComputerUse(action, params)` remains the escape hatch
+for the long tail.
+
 Mix the two freely on the same session — e.g. delegate a sub-goal, then take over
 with your own `ComputerUse` calls, or vice-versa.
 
@@ -196,9 +204,12 @@ json.NewEncoder(w).Encode(env)       // → your frontend
 `Session.Drive()` (BYOA primitives). The package godoc is the authoritative
 surface reference (`go doc go.pinesandbox.io/computer`), and the wire contract
 is the published [API reference](https://pinesandbox.io/docs/integration). The
-noun/verb set matches the Ruby `pinesandbox` gem one-for-one (the cross-SDK
-`FACADE.md` contract). Errors are a flat, `errors.As`-able vocabulary
-(`errors.go`).
+noun/verb set matches the Ruby `pinesandbox` gem (the cross-SDK `FACADE.md`
+contract — same verbs, presented idiomatically per language), with Go-idiomatic
+conveniences on top: typed constants (`pine.EventNeedsInput`, `Controller*`, …),
+option funcs (`TakeControl(ctx, WithForce())`), `AnswerAsk`, and computer-use
+helpers (`Click`/`TypeText`/`Scroll`/…). Errors are a flat, `errors.As`-able
+vocabulary (`errors.go`).
 
 Tokens are never method parameters — the SDK holds the credential ladder (pk_ →
 project JWS → ct_ → ps_) and attaches the right one per call. To hand a browser

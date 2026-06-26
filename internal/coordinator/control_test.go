@@ -67,37 +67,54 @@ func TestExtractField_MissingFieldErrors(t *testing.T) {
 }
 
 func TestControlState(t *testing.T) {
-	var ifMatch, idem, force string
+	var ifMatch, idem, force, patchBody string
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/v1/sessions/s/control" && r.Method == "GET":
 			w.Header().Set("ETag", `"v1"`)
-			_, _ = io.WriteString(w, `{"mode":"agent"}`)
+			_, _ = io.WriteString(w, `{"controller":"agent","epoch":5,"session_name":"s","idle_paused":true,"idle_deadline":"2026-01-02T15:04:05Z"}`)
 		case r.URL.Path == "/v1/sessions/s/control" && r.Method == "PATCH":
 			ifMatch = r.Header.Get("If-Match")
 			idem = r.Header.Get("Idempotency-Key")
 			force = r.URL.Query().Get("force")
+			b, _ := io.ReadAll(r.Body)
+			patchBody = string(b)
 			w.Header().Set("ETag", `"v2"`)
-			_, _ = io.WriteString(w, `{"mode":"control"}`)
+			_, _ = io.WriteString(w, `{"controller":"human","epoch":6,"session_name":"s"}`)
 		default:
 			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 		}
 	})
 
+	// GET → typed fields parsed (controller / epoch / idle_paused / idle_deadline).
 	cs, err := c.GetControl(context.Background(), "ct_", "s")
 	if err != nil {
 		t.Fatalf("GetControl: %v", err)
 	}
-	if cs.ETag != `"v1"` || !contains(string(cs.State), "agent") {
+	if cs.ETag != `"v1"` || cs.Controller != "agent" || cs.Epoch != 5 || !cs.IdlePaused {
 		t.Errorf("control = %+v", cs)
 	}
-	out, err := c.PatchControl(context.Background(), "ct_", "s", map[string]any{"mode": "control"},
+	if cs.IdleDeadline == nil || cs.IdleDeadline.Year() != 2026 {
+		t.Errorf("idle_deadline not parsed: %v", cs.IdleDeadline)
+	}
+
+	// PATCH → typed ControlPatch marshals to the wire body (controller + actor_type),
+	// omitting unset fields; response re-parsed.
+	human := "human"
+	out, err := c.PatchControl(context.Background(), "ct_", "s",
+		ControlPatch{Controller: &human, ActorType: "user_click"},
 		PatchControlOptions{IfMatch: `"v1"`, IdempotencyKey: "idem-1"})
 	if err != nil {
 		t.Fatalf("PatchControl: %v", err)
 	}
-	if out.ETag != `"v2"` {
-		t.Errorf("new etag = %q", out.ETag)
+	if out.ETag != `"v2"` || out.Controller != "human" {
+		t.Errorf("patched = %+v", out)
+	}
+	if !contains(patchBody, `"controller":"human"`) || !contains(patchBody, `"actor_type":"user_click"`) {
+		t.Errorf("patch body = %s", patchBody)
+	}
+	if contains(patchBody, "idle_paused") || contains(patchBody, "idle_deadline") {
+		t.Errorf("unset fields must be omitted; body = %s", patchBody)
 	}
 	if ifMatch != `"v1"` || idem != "idem-1" {
 		t.Errorf("headers: if-match=%q idem=%q", ifMatch, idem)
@@ -122,9 +139,9 @@ func TestControlNotifyAndDesktopAndHandoffs(t *testing.T) {
 			if r.URL.Query().Get("limit") != "5" {
 				t.Errorf("limit = %q", r.URL.Query().Get("limit"))
 			}
-			_, _ = io.WriteString(w, `{"handoffs":[{"id":"h1"}]}`)
+			_, _ = io.WriteString(w, `{"handoffs":[{"handoff_id":"s:1","started_at":"2026-01-02T15:04:05Z","ended_at":"2026-01-02T15:05:05Z","controller_at_start":"human","controller_at_end":"agent"}],"next_before":"s:0"}`)
 		case "/v1/sessions/s/handoffs/h1":
-			_, _ = io.WriteString(w, `{"id":"h1","reason":"teach"}`)
+			_, _ = io.WriteString(w, `{"handoff_id":"s:1","controller_at_end":"agent","nav":[{"url":"https://x"}]}`)
 		default:
 			t.Errorf("unexpected %s", r.URL.Path)
 		}
@@ -141,11 +158,24 @@ func TestControlNotifyAndDesktopAndHandoffs(t *testing.T) {
 		t.Fatalf("MintDesktopToken = %+v, %v", dt, err)
 	}
 	hs, err := c.ListHandoffs(context.Background(), "ct_", "s", 5, "")
-	if err != nil || !contains(string(hs), "h1") {
-		t.Fatalf("ListHandoffs = %s, %v", hs, err)
+	if err != nil {
+		t.Fatalf("ListHandoffs: %v", err)
+	}
+	if hs.NextBefore != "s:0" {
+		t.Errorf("next_before = %q, want s:0 (pagination cursor must be returned)", hs.NextBefore)
+	}
+	if len(hs.Handoffs) != 1 || hs.Handoffs[0].HandoffID != "s:1" ||
+		hs.Handoffs[0].ControllerAtStart != "human" || hs.Handoffs[0].ControllerAtEnd != "agent" {
+		t.Errorf("handoffs = %+v", hs.Handoffs)
+	}
+	if hs.Handoffs[0].StartedAt.Year() != 2026 {
+		t.Errorf("started_at not parsed: %v", hs.Handoffs[0].StartedAt)
 	}
 	h, err := c.GetHandoff(context.Background(), "ct_", "s", "h1")
-	if err != nil || !contains(string(h), "teach") {
-		t.Fatalf("GetHandoff = %s, %v", h, err)
+	if err != nil {
+		t.Fatalf("GetHandoff: %v", err)
+	}
+	if h.HandoffID != "s:1" || h.ControllerAtEnd != "agent" || !contains(string(h.Raw), "nav") {
+		t.Errorf("handoff = %+v", h)
 	}
 }

@@ -79,7 +79,7 @@ func TestFacade_TokenRouting_Comprehensive(t *testing.T) {
 	_, _ = sess.PatchTab(ctx, "t1", PatchTabOptions{})
 	_ = sess.CloseTab(ctx, "t1")
 	_, _ = sess.ControlState(ctx)
-	_, _ = sess.UpdateControl(ctx, map[string]any{}, PatchControlOptions{IfMatch: "v1"})
+	_, _ = sess.UpdateControl(ctx, ControlPatch{ActorType: "user_click"}, PatchControlOptions{IfMatch: "v1"})
 	_ = sess.NotifyHuman(ctx, "r", "", "v1")
 	_, _ = sess.ListHandoffs(ctx, 0, "")
 	_, _ = sess.GetHandoff(ctx, "h1")

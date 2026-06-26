@@ -34,8 +34,10 @@ func TestAdoptSession_DrivesWithProvidedPs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AdoptSession: %v", err)
 	}
-	_, _ = sess.CreateTab(ctx, "https://x", "")                                          // drive → provided ps_
-	_, _ = sess.UpdateControl(ctx, map[string]any{}, PatchControlOptions{IfMatch: "v1"}) // control → ct_
+	_, _ = sess.CreateTab(ctx, "https://x", "") // drive → provided ps_
+	human := "human"
+	_, _ = sess.UpdateControl(ctx, ControlPatch{Controller: &human, ActorType: "user_click"},
+		PatchControlOptions{IfMatch: "v1"}) // control → ct_
 
 	mu.Lock()
 	defer mu.Unlock()

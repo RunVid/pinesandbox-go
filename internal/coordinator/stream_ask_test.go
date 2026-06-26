@@ -22,6 +22,9 @@ func TestAgentEvent_Ask(t *testing.T) {
 	if ask.RequestID != "call_42" {
 		t.Errorf("RequestID = %q, want call_42", ask.RequestID)
 	}
+	if ask.TurnID != "turn_1" { // carried from the event so AnswerAsk needs no plumbing
+		t.Errorf("TurnID = %q, want turn_1 (from the event)", ask.TurnID)
+	}
 	if ask.Question != "Which seat?" {
 		t.Errorf("Question = %q, want 'Which seat?'", ask.Question)
 	}

@@ -52,8 +52,18 @@ func (a *AgentMode) Steer(ctx context.Context, text string, opts SteerOptions) (
 }
 
 // Answer responds to the agent's clarifying question; returns the updated Task.
+// expectedTurnID guards against answering a stale turn (""=skip the guard). Prefer
+// AnswerAsk, which fills both ids from the ask.
 func (a *AgentMode) Answer(ctx context.Context, requestID, answer, expectedTurnID string) (*AgentTask, error) {
 	return a.s.coord.AgentAnswer(ctx, a.s.computerToken(), a.s.name, requestID, answer, expectedTurnID)
+}
+
+// AnswerAsk responds to a needs_input ask (from AgentEvent.Ask); the ask carries
+// the request id + turn id, so this is the no-plumbing path:
+//
+//	if ask, ok := ev.Ask(); ok { ag.AnswerAsk(ctx, ask, reply(ask.Question)) }
+func (a *AgentMode) AnswerAsk(ctx context.Context, ask *AgentAsk, answer string) (*AgentTask, error) {
+	return a.Answer(ctx, ask.RequestID, answer, ask.TurnID)
 }
 
 // Cancel cancels the running turn; returns the updated Task.

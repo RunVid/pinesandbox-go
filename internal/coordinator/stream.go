@@ -58,11 +58,12 @@ type AgentEvent struct {
 }
 
 // AgentAsk is the typed payload of a needs_input event — the agent paused on
-// pine_ask and is waiting for an answer. RequestID is the id echoed back to
-// AgentMode.Answer; Question is the human-facing prompt. Context and Options are
-// optional hints (Options = suggested answers, when the agent offered any).
+// pine_ask and is waiting for an answer. It carries BOTH ids the answer needs
+// (RequestID + TurnID), so AgentMode.AnswerAsk(ctx, ask, text) needs no extra
+// plumbing. Question is the human-facing prompt; Context/Options are optional hints.
 type AgentAsk struct {
-	RequestID string   // echo to AgentMode.Answer(requestID, …)
+	RequestID string   // the pending-request id
+	TurnID    string   // the turn this ask belongs to (expected_turn_id on answer)
 	Question  string   // the question to surface to the human
 	Context   string   // optional extra context for the question
 	Options   []string // optional suggested answers (may be empty)
@@ -73,7 +74,7 @@ type AgentAsk struct {
 // hand-parsing Payload:
 //
 //	if ask, ok := ev.Ask(); ok {
-//		ag.Answer(ctx, ask.RequestID, prompt(ask.Question), ev.TurnID)
+//		ag.AnswerAsk(ctx, ask, prompt(ask.Question))
 //	}
 func (e *AgentEvent) Ask() (*AgentAsk, bool) {
 	if e == nil || e.Type != "needs_input" {
@@ -90,6 +91,7 @@ func (e *AgentEvent) Ask() (*AgentAsk, bool) {
 	}
 	return &AgentAsk{
 		RequestID: wire.RequestID,
+		TurnID:    e.TurnID,
 		Question:  wire.Question,
 		Context:   wire.Context,
 		Options:   wire.Options,
