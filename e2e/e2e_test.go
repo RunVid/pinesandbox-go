@@ -8,7 +8,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -501,4 +504,197 @@ func TestE2E_J6_ControlAndAdopt(t *testing.T) {
 	if st.Controller != pine.ControllerHuman {
 		t.Errorf("controller after TakeControl = %q, want human", st.Controller)
 	}
+}
+
+// J7 — per-session UID isolation (SESSION_ISOLATION_HARDENING.md §3). Two sessions on the
+// SAME Computer must run as DISTINCT numeric UIDs, must not be able to read each other's
+// 0700 workdir, and a background survivor must be reaped when its session is destroyed
+// before its UID can be reused. This is the real split-pod drive against the live v3 pod —
+// exactly what the single-container coordinator e2e + chart-bypassing harness cannot exercise.
+func TestE2E_J7_SessionIsolation(t *testing.T) {
+	c := newClient(t)
+	ctx, cancel := newCtx(t)
+	defer cancel()
+
+	comp, err := c.CreateComputer(ctx, pine.AttachOptions{})
+	if err != nil {
+		t.Fatalf("CreateComputer: %v", err)
+	}
+	defer teardown(comp)
+
+	a, err := comp.CreateSession(ctx, pine.CreateSessionOptions{Name: "e2e-iso-a"})
+	if err != nil {
+		t.Fatalf("CreateSession a: %v", err)
+	}
+	b, err := comp.CreateSession(ctx, pine.CreateSessionOptions{Name: "e2e-iso-b"})
+	if err != nil {
+		t.Fatalf("CreateSession b: %v", err)
+	}
+
+	// a: record its UID + write a secret into its own 0700 workdir.
+	ra := mustExec(t, ctx, a, `echo "AUID=$(id -u)"; echo TOPSECRET-A > files/secret.txt`)
+	uidA := extractInt(t, ra, "AUID=")
+	if uidA < 2000 {
+		t.Fatalf("session a UID %d is not an isolation UID (>=2000); stdout=%q", uidA, ra)
+	}
+
+	// b: record its UID, try to read a's secret AND enumerate a's session root (both must fail).
+	rb := mustExec(t, ctx, b,
+		`echo "BUID=$(id -u)"; `+
+			`cat /var/lib/sandbox/sessions/e2e-iso-a/files/secret.txt 2>&1 || true; `+
+			`ls /var/lib/sandbox/sessions/e2e-iso-a/ 2>&1 || true`)
+	uidB := extractInt(t, rb, "BUID=")
+	if uidB < 2000 {
+		t.Fatalf("session b UID %d is not an isolation UID (>=2000); stdout=%q", uidB, rb)
+	}
+	if uidA == uidB {
+		t.Fatalf("sessions a and b got the SAME UID %d — not isolated", uidA)
+	}
+	if strings.Contains(rb, "TOPSECRET-A") {
+		t.Fatalf("session b READ session a's workdir secret — ISOLATION BREACHED; stdout=%q", rb)
+	}
+	if !strings.Contains(strings.ToLower(rb), "permission denied") {
+		t.Fatalf("session b's cross-session read should be permission-denied; stdout=%q", rb)
+	}
+	if strings.Contains(rb, "downloads") {
+		t.Fatalf("session b enumerated session a's session root (whole-dir wall broken); stdout=%q", rb)
+	}
+
+	// Reap: a spawns a background survivor; destroying a must kill it before its UID is reused.
+	rbg := mustExec(t, ctx, a, `sleep 300 </dev/null >/dev/null 2>&1 & echo "BGPID=$!"`)
+	bgpid := extractInt(t, rbg, "BGPID=")
+	if bgpid < 2 {
+		t.Fatalf("failed to capture background pid; stdout=%q", rbg)
+	}
+	alive := mustExec(t, ctx, b, fmt.Sprintf(`test -d /proc/%d && echo STATE-ALIVE || echo STATE-GONE`, bgpid))
+	if !strings.Contains(alive, "STATE-ALIVE") {
+		t.Fatalf("background survivor not running before destroy; stdout=%q", alive)
+	}
+	if err := comp.DestroySession(ctx, "e2e-iso-a", true); err != nil {
+		t.Fatalf("DestroySession a: %v", err)
+	}
+	// A SIGKILL'd survivor becomes a DEAD zombie (State Z) until PID 1 reaps it — the
+	// §3.2 "harmless, can't execute" state. Isolation holds the instant it's dead, so
+	// accept gone-OR-zombie as reaped; only a still-RUNNING process (S/R/D) is a UID-reuse
+	// hole. (`/proc/<pid>/stat` field 3 is the State letter.)
+	gone := mustExec(t, ctx, b, fmt.Sprintf(
+		`for i in $(seq 1 30); do s=$(awk '{print $3}' /proc/%d/stat 2>/dev/null); `+
+			`if [ -z "$s" ] || [ "$s" = "Z" ]; then echo "REAPED state=${s:-gone}"; break; fi; sleep 0.5; done; `+
+			`echo "FINAL=$(awk '{print $3}' /proc/%d/stat 2>/dev/null)"`, bgpid, bgpid))
+	if !strings.Contains(gone, "REAPED") {
+		t.Fatalf("destroy did not reap session a's background survivor — still RUNNING (UID-reuse hole); %q", gone)
+	}
+}
+
+// TestE2E_J8_EscapeBattery is the adversarial counterpart to J7: instead of proving
+// the wall exists, it tries to CLIMB it. Every probe runs as the session UID over the
+// real exec lane against the live split-pod, and MUST be denied. Findings are from
+// SESSION_ISOLATION_REDTEAM.md; each failing assertion names the finding it regresses.
+// (F3 symlink-chown is covered transitively: A1 squat-denial removes its precondition.)
+func TestE2E_J8_EscapeBattery(t *testing.T) {
+	c := newClient(t)
+	ctx, cancel := newCtx(t)
+	defer cancel()
+
+	comp, err := c.CreateComputer(ctx, pine.AttachOptions{})
+	if err != nil {
+		t.Fatalf("CreateComputer: %v", err)
+	}
+	defer teardown(comp)
+
+	s, err := comp.CreateSession(ctx, pine.CreateSessionOptions{Name: "e2e-escape"})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	// One round-trip; every attack runs as the session UID. The script prints
+	// labelled markers we assert on, then best-effort removes any litter a
+	// successful (unpatched) attack would leave on the shared pool volume.
+	const attack = `
+echo "WHOAMI=$(id -u)"
+echo "A1_RC=$(mkdir -p /var/lib/sandbox/sessions/J8-SQUAT/files 2>/dev/null; echo $?)"
+echo "A1_MADE=$(test -d /var/lib/sandbox/sessions/J8-SQUAT && echo yes || echo no)"
+echo "A2_RC=$(touch /var/lib/sandbox/J8-EVIL 2>/dev/null; echo $?)"
+echo "A3_RC=$( (cat /var/lib/sandbox/.pine/vnc-gate-secret >/dev/null 2>&1); echo $?)"
+echo "A3_LEN=$(cat /var/lib/sandbox/.pine/vnc-gate-secret 2>/dev/null | wc -c)"
+echo "A4_RC=$( (cat /var/lib/sandbox/.pine/execd-token >/dev/null 2>&1); echo $?)"
+echo "A5_COORD_RC=$(ls /var/lib/coord >/dev/null 2>&1; echo $?)"
+echo "A6_MOUNT=$(test -u /usr/bin/mount 2>/dev/null && echo SETUID || echo stripped)"
+echo "A6_SU=$(test -u /usr/bin/su 2>/dev/null && echo SETUID || echo stripped)"
+echo "A6_PASSWD=$(test -u /usr/bin/passwd 2>/dev/null && echo SETUID || echo stripped)"
+echo "A6_COUNT=$(find /usr/bin /bin /usr/sbin /sbin -perm -4000 -type f 2>/dev/null | wc -l)"
+rm -rf /var/lib/sandbox/sessions/J8-SQUAT /var/lib/sandbox/J8-EVIL 2>/dev/null || true
+`
+	out := mustExec(t, ctx, s, attack)
+
+	// Sanity: the exec lane must actually drop to a session UID — otherwise
+	// "isolation" isn't active on this deployment and every probe below is moot.
+	if uid, _ := strconv.Atoi(fieldVal(out, "WHOAMI")); uid < 2000 {
+		t.Fatalf("isolation not active: session uid %q < 2000 (deployment not hardened); out=%q", fieldVal(out, "WHOAMI"), out)
+	}
+
+	// F2 — squat the shared volume root / a peer session dir.
+	if fieldVal(out, "A1_RC") == "0" || fieldVal(out, "A1_MADE") == "yes" {
+		t.Errorf("F2 squat SUCCEEDED: session created sessions/J8-SQUAT (rc=%s made=%s) — /var/lib/sandbox world-writable",
+			fieldVal(out, "A1_RC"), fieldVal(out, "A1_MADE"))
+	}
+	if fieldVal(out, "A2_RC") == "0" {
+		t.Errorf("F2 write at the shared volume root SUCCEEDED — still world-writable")
+	}
+	// F4 — read the VNC gate shared secret.
+	if fieldVal(out, "A3_RC") == "0" {
+		t.Errorf("F4 VNC gate secret READABLE by the session (len=%s) — secret leak", fieldVal(out, "A3_LEN"))
+	}
+	// HOLD — the root execd API token must stay unreadable (a leak = root RCE).
+	if fieldVal(out, "A4_RC") == "0" {
+		t.Errorf("execd access token READABLE by the session — root-RCE token leak (regression)")
+	}
+	// HOLD — the ps_-bearing coord registry must not be mounted in the session container.
+	if fieldVal(out, "A5_COORD_RC") == "0" {
+		t.Errorf("/var/lib/coord (ps_ registry) reachable from the session container (regression)")
+	}
+	// F1 — setuid escalation surface.
+	for _, k := range []string{"A6_MOUNT", "A6_SU", "A6_PASSWD"} {
+		if fieldVal(out, k) == "SETUID" {
+			t.Errorf("F1 %s still setuid-root — session can escalate", k)
+		}
+	}
+	if n := fieldVal(out, "A6_COUNT"); n != "0" {
+		t.Errorf("F1 %s setuid-root binaries reachable in PATH dirs (want 0) — escalation surface open", n)
+	}
+	if t.Failed() {
+		t.Logf("J8 attack transcript:\n%s", out)
+	}
+}
+
+// mustExec runs cmd in the session over the real exec lane and returns accumulated stdout,
+// failing on transport/exec error.
+func mustExec(t *testing.T, ctx context.Context, s *pine.Session, cmd string) string {
+	t.Helper()
+	res, err := s.Exec(ctx, cmd, pine.ExecOptions{}, nil)
+	if err != nil {
+		t.Fatalf("Exec %q: %v", cmd, err)
+	}
+	return res.Stdout
+}
+
+// extractInt pulls the integer following prefix out of stdout (e.g. "AUID=2001" → 2001).
+func extractInt(t *testing.T, stdout, prefix string) int {
+	t.Helper()
+	m := regexp.MustCompile(regexp.QuoteMeta(prefix) + `(\d+)`).FindStringSubmatch(stdout)
+	if m == nil {
+		t.Fatalf("no %q marker in stdout=%q", prefix, stdout)
+	}
+	n, _ := strconv.Atoi(m[1])
+	return n
+}
+
+// fieldVal returns the value after "key=" up to end-of-line in stdout (the J8 attack
+// script's labelled markers), or "" if absent.
+func fieldVal(stdout, key string) string {
+	m := regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(key) + `=(.*)$`).FindStringSubmatch(stdout)
+	if m == nil {
+		return ""
+	}
+	return strings.TrimSpace(m[1])
 }

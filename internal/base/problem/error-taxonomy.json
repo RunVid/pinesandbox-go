@@ -62,6 +62,16 @@
       "retryable": false
     },
     {
+      "type": "/errors/lease-expired",
+      "status": 403,
+      "retryable": false
+    },
+    {
+      "type": "/errors/lease-refresh-unavailable",
+      "status": 503,
+      "retryable": true
+    },
+    {
       "type": "/errors/session-not-found",
       "status": 404,
       "retryable": false

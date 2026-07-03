@@ -18,13 +18,40 @@ import (
 // from must never hard-fail the whole parse — matching Session's behavior and the
 // old raw-return contract.
 
-// AgentUsage is a turn's token tally (spec Task.usage / TaskResult.usage). The
-// richer three-layer billing shape is the Phase-4 usage.finalized follow-up.
-// (Decoded directly, so it keeps json tags.)
+// AgentUsage is a turn's structured usage (spec Task.usage / TaskResult.usage):
+// the Pine-normalized token split, the turn duration (active excludes
+// human-wait), and the priced cost. Decoded directly, so it keeps json tags.
 type AgentUsage struct {
-	Tokens    int64   `json:"tokens"`
-	Cost      float64 `json:"cost"`
-	ComputeMs int64   `json:"compute_ms"`
+	LLM      AgentTokenUsage `json:"llm"`
+	Duration AgentDuration   `json:"duration"`
+	Cost     AgentCost       `json:"cost"`
+}
+
+// AgentTokenUsage is the disjoint LLM token split — input excludes cache;
+// total_tokens is Pine-computed (input + cache_read + cache_write + output).
+type AgentTokenUsage struct {
+	InputTokens      int64 `json:"input_tokens"`
+	OutputTokens     int64 `json:"output_tokens"`
+	CacheReadTokens  int64 `json:"cache_read_tokens"`
+	CacheWriteTokens int64 `json:"cache_write_tokens"`
+	TotalTokens      int64 `json:"total_tokens"`
+}
+
+// AgentDuration is the turn wall clock; ActiveMs excludes time parked awaiting a
+// human (the billable-active input).
+type AgentDuration struct {
+	TotalMs  int64 `json:"total_ms"`
+	ActiveMs int64 `json:"active_ms"`
+}
+
+// AgentCost is the priced LLM cost in USD. Total and LLM are nil when the model
+// is un-carded (cost unknown, never a guessed 0); Compute is nil until a
+// per-second compute rate exists (Total == LLM meanwhile).
+type AgentCost struct {
+	Currency string   `json:"currency"`
+	Total    *float64 `json:"total"`
+	LLM      *float64 `json:"llm"`
+	Compute  *float64 `json:"compute"`
 }
 
 // Finding is a structured key/value a Task surfaced (spec TaskResult.findings item).

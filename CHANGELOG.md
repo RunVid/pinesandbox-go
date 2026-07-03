@@ -7,6 +7,27 @@ package `pinesandbox`) are documented here. The format follows
 `0.<POOL_VERSION>.<patch>`. So `require go.pinesandbox.io/computer v0.3.x`
 targets `pine-cua-pool-v3` (the compatibility contract integrators pin to).
 
+## [0.3.4] — 2026-07-03
+
+### Changed
+
+- **Structured `AgentUsage` (breaking; matches the v3 coordinator wire).** The
+  flat `{Tokens, Cost, ComputeMs}` tally is replaced by the spec's structured
+  shape: `Usage.LLM` (`AgentTokenUsage` — disjoint
+  input/output/cache_read/cache_write + Pine-computed total), `Usage.Duration`
+  (`AgentDuration` — `TotalMs` + `ActiveMs`, active excludes human-wait), and
+  `Usage.Cost` (`AgentCost` — USD; `Total`/`LLM` are `*float64`, nil when the
+  model is un-carded — never a guessed 0; `Compute` nil until a per-second
+  rate exists). `charge_id` rides the `AgentEvent` envelope.
+
+### Added
+
+- **Access-lease error sentinels.** `ErrLeaseExpired` (403 — definitive portal
+  refusal: re-attach or surface the suspension) and
+  `ErrLeaseRefreshUnavailable` (503, retryable — transient refresh failure:
+  retry, do NOT re-attach), `errors.Is`-matchable like the other control
+  sentinels; both pinned in the shared `error-taxonomy.json`.
+
 ## [0.3.3] — 2026-06-26
 
 ### Changed

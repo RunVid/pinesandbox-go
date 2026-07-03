@@ -35,6 +35,13 @@ var (
 	// ErrActionNotImplemented (501): the action isn't available here (e.g. no resident agent
 	// configured on this pool — agent.Run / delegate-mode turns).
 	ErrActionNotImplemented = &problem.APIError{Status: 501, ProblemType: "/errors/action-not-implemented"}
+	// ErrLeaseExpired (403): the access lease lapsed and the portal DEFINITIVELY refused a
+	// refresh — the project is revoked / out of credits. Control is cut (reads stay open);
+	// re-attach the Computer or surface the suspension. Retrying won't help.
+	ErrLeaseExpired = &problem.APIError{Status: 403, ProblemType: "/errors/lease-expired"}
+	// ErrLeaseRefreshUnavailable (503, retryable): the lease lapsed and the refresh failed
+	// TRANSIENTLY (gateway/portal blip) — no revocation verdict. Retry; do NOT re-attach.
+	ErrLeaseRefreshUnavailable = &problem.APIError{Status: 503, ProblemType: "/errors/lease-refresh-unavailable"}
 )
 
 // Wire / transport / spec-version (coordinator + control-plane responses).

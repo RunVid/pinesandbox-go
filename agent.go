@@ -27,14 +27,17 @@ type AgentMode struct {
 // coordinator-api.yaml Task / TaskResult / TaskEvent schemas — each carries a Raw escape
 // hatch).
 type (
-	RunOptions   = coordinator.AgentRunOptions
-	SteerOptions = coordinator.AgentSteerOptions
-	AgentTask    = coordinator.AgentTask
-	AgentResult  = coordinator.AgentResult
-	AgentUsage   = coordinator.AgentUsage
-	FileRef      = coordinator.FileRef
-	Finding      = coordinator.Finding
-	AgentEvent   = coordinator.AgentEvent
+	RunOptions      = coordinator.AgentRunOptions
+	SteerOptions    = coordinator.AgentSteerOptions
+	AgentTask       = coordinator.AgentTask
+	AgentResult     = coordinator.AgentResult
+	AgentUsage      = coordinator.AgentUsage
+	AgentTokenUsage = coordinator.AgentTokenUsage
+	AgentDuration   = coordinator.AgentDuration
+	AgentCost       = coordinator.AgentCost
+	FileRef         = coordinator.FileRef
+	Finding         = coordinator.Finding
+	AgentEvent      = coordinator.AgentEvent
 	// AgentAsk is the typed needs_input payload — read it via AgentEvent.Ask().
 	AgentAsk = coordinator.AgentAsk
 )

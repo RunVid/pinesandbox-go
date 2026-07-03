@@ -91,7 +91,7 @@ func TestAgentCancelResetTaskResult(t *testing.T) {
 		case r.URL.Path == "/v1/sessions/s/agent" && r.Method == "GET":
 			fmt.Fprint(w, `{"task_id":"t1","state":"running","goal":"buy milk"}`)
 		case r.URL.Path == "/v1/sessions/s/agent/result" && r.Method == "GET":
-			fmt.Fprint(w, `{"status":"ok","terminal_reason":"completed","summary":"done","artifacts":[],"findings":[],"usage":{"tokens":42,"cost":0,"compute_ms":10}}`)
+			fmt.Fprint(w, `{"status":"ok","terminal_reason":"completed","summary":"done","artifacts":[],"findings":[],"usage":{"llm":{"input_tokens":30,"output_tokens":12,"cache_read_tokens":0,"cache_write_tokens":0,"total_tokens":42},"duration":{"total_ms":10,"active_ms":10},"cost":{"currency":"USD","total":0,"llm":0,"compute":null}}}`)
 		default:
 			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 		}
@@ -110,8 +110,8 @@ func TestAgentCancelResetTaskResult(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AgentResult: %v", err)
 	}
-	if res.Status != "ok" || res.TerminalReason != "completed" || res.Usage.Tokens != 42 {
-		t.Errorf("AgentResult parsed = %+v, want status=ok terminal=completed tokens=42", res)
+	if res.Status != "ok" || res.TerminalReason != "completed" || res.Usage.LLM.TotalTokens != 42 {
+		t.Errorf("AgentResult parsed = %+v, want status=ok terminal=completed total_tokens=42", res)
 	}
 }
 
@@ -139,7 +139,7 @@ func TestAgentTask_TolerantTimestamps(t *testing.T) {
 // whole terminal outcome (summary/findings/usage) over one cosmetic field.
 func TestAgentResult_TolerantArtifactTimestamp(t *testing.T) {
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, `{"status":"ok","terminal_reason":"completed","summary":"done","findings":[],"usage":{"tokens":1,"cost":0,"compute_ms":0},"artifacts":[{"root":"workdir","relative_path":"a.txt","content_type":"text/plain","size":3,"sha256":"x","modified_at":""}]}`)
+		fmt.Fprint(w, `{"status":"ok","terminal_reason":"completed","summary":"done","findings":[],"usage":{"llm":{"input_tokens":1,"output_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"total_tokens":1},"duration":{"total_ms":0,"active_ms":0},"cost":{"currency":"USD","total":0,"llm":0,"compute":null}},"artifacts":[{"root":"workdir","relative_path":"a.txt","content_type":"text/plain","size":3,"sha256":"x","modified_at":""}]}`)
 	})
 	res, err := c.AgentResult(context.Background(), "ps_", "s")
 	if err != nil {
