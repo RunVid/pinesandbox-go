@@ -7,6 +7,15 @@ package `pinesandbox`) are documented here. The format follows
 `0.<POOL_VERSION>.<patch>`. So `require go.pinesandbox.io/computer v0.3.x`
 targets `pine-cua-pool-v3` (the compatibility contract integrators pin to).
 
+## [0.3.6] — 2026-07-06
+
+### Added
+- **`Artifact.Filename`** — the human-facing name WITH extension (e.g.
+  `filled_w9.pdf`), the basename of the id-prefixed `RelativePath`. Display and
+  name downloads by this, never by `ID` (an `art_…` hash). Additive/non-breaking;
+  derived from `RelativePath` when talking to a coordinator that predates the
+  field, so it is always populated.
+
 ## [0.3.5] — 2026-07-06
 
 ### Changed

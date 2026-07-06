@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"path"
 	"time"
 )
 
@@ -35,12 +36,16 @@ type Artifact struct {
 	TurnID       string
 	Root         string
 	RelativePath string
-	ContentType  string
-	Size         int64
-	SHA256       string
-	CreatedBy    string
-	CreatedAt    *time.Time
-	Retention    string
+	// Filename is the human-facing name WITH extension (e.g. "filled_w9.pdf") —
+	// the basename of RelativePath (which is id-prefixed). Display and name
+	// downloads by this, never by ID (an art_… hash).
+	Filename    string
+	ContentType string
+	Size        int64
+	SHA256      string
+	CreatedBy   string
+	CreatedAt   *time.Time
+	Retention   string
 }
 
 type artifactWire struct {
@@ -49,6 +54,7 @@ type artifactWire struct {
 	TurnID       string `json:"turn_id"`
 	Root         string `json:"root"`
 	RelativePath string `json:"relative_path"`
+	Filename     string `json:"filename"`
 	ContentType  string `json:"content_type"`
 	Size         int64  `json:"size"`
 	SHA256       string `json:"sha256"`
@@ -58,9 +64,13 @@ type artifactWire struct {
 }
 
 func (w artifactWire) toArtifact() *Artifact {
+	filename := w.Filename
+	if filename == "" && w.RelativePath != "" { // derive if talking to an older coordinator
+		filename = path.Base(w.RelativePath) // guarded: path.Base("") is ".", never that
+	}
 	return &Artifact{
 		ID: w.ID, SessionID: w.SessionID, TurnID: w.TurnID, Root: w.Root, RelativePath: w.RelativePath,
-		ContentType: w.ContentType, Size: w.Size, SHA256: w.SHA256, CreatedBy: w.CreatedBy,
+		Filename: filename, ContentType: w.ContentType, Size: w.Size, SHA256: w.SHA256, CreatedBy: w.CreatedBy,
 		CreatedAt: parseTime(w.CreatedAt), Retention: w.Retention,
 	}
 }

@@ -170,3 +170,17 @@ func contains(s, sub string) bool {
 	}
 	return false
 }
+
+// TestArtifactFilename_ParsedAndDerived: Artifact.Filename is the human name
+// (with extension) — taken from the wire `filename` when present, else derived
+// from the basename of the id-prefixed relative_path (older coordinator).
+func TestArtifactFilename_ParsedAndDerived(t *testing.T) {
+	got := artifactWire{ID: "art_x", RelativePath: "art_x/filled_w9.pdf", Filename: "filled_w9.pdf"}.toArtifact()
+	if got.Filename != "filled_w9.pdf" {
+		t.Errorf("Filename = %q, want filled_w9.pdf (from wire)", got.Filename)
+	}
+	derived := artifactWire{ID: "art_y", RelativePath: "art_y/report.csv"}.toArtifact()
+	if derived.Filename != "report.csv" {
+		t.Errorf("derived Filename = %q, want report.csv (basename of relative_path)", derived.Filename)
+	}
+}
