@@ -226,7 +226,7 @@ func (c *Client) send(ctx context.Context, r coordReq) (*transport.Response, err
 		return nil, err
 	}
 	if resp.Status < 200 || resp.Status >= 300 {
-		return nil, c.respError(resp.Status, resp.Body, resp.Headers.Get("X-Request-Id"), r.token)
+		return nil, c.respError(resp.Status, resp.Body, resp.Headers.Get("X-Request-Id"), r.token, transport.Operation(r.method, r.path))
 	}
 	return resp, nil
 }
@@ -271,7 +271,7 @@ func (c *Client) openSSE(ctx context.Context, method, path, token string, body [
 	if sr.Status < 200 || sr.Status >= 300 {
 		b, _ := io.ReadAll(io.LimitReader(sr.Body, sseErrorBodyCap))
 		sr.Body.Close()
-		return nil, c.respError(sr.Status, b, sr.Headers.Get("X-Request-Id"), token)
+		return nil, c.respError(sr.Status, b, sr.Headers.Get("X-Request-Id"), token, transport.Operation(method, path))
 	}
 	return sr, nil
 }
@@ -281,9 +281,12 @@ func (c *Client) openSSE(ctx context.Context, method, path, token string, body [
 // never implicitly rebinds, which would land a fresh pod and invalidate every ps_). The
 // underlying *problem.APIError is wrapped, so errors.As still reaches it. Everything else is
 // the RFC-9457 *problem.APIError. Token-less routes (bind/health/metrics) never hit the 401
-// branch.
-func (c *Client) respError(status int, body []byte, requestID, token string) error {
+// branch. op is "<METHOD> <path>"; it + the data host stamp WHICH operation on WHICH Computer
+// failed (the primary spine) onto the typed error, so a generic handler is self-describing.
+func (c *Client) respError(status int, body []byte, requestID, token, op string) error {
 	ae := problem.Parse(status, body, requestID)
+	ae.Host = c.Host()
+	ae.Op = op
 	if status == 401 && token != "" {
 		return bind.NewRebindRequiredError(401, "the bound token was rejected — re-attach the Computer", ae)
 	}

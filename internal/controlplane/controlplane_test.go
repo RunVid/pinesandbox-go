@@ -220,6 +220,30 @@ func TestErrorMapping(t *testing.T) {
 	}
 }
 
+// TestErrorCarriesResourceContext: a control-plane failure is self-describing — the error
+// string names WHICH host, WHICH operation (`GET /sandboxes/<id>`), and the request id.
+func TestErrorCarriesResourceContext(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Request-Id", "req-cp")
+		w.WriteHeader(404)
+		fmt.Fprint(w, `{"message":"no such sandbox"}`)
+	}, &fakeSource{initial: "jws1"})
+	_, err := c.Get(context.Background(), "sbx-1")
+	var nf *NotFoundError
+	if !errors.As(err, &nf) {
+		t.Fatalf("err = %T (%v), want *NotFoundError", err, err)
+	}
+	msg := err.Error()
+	for _, want := range []string{"host=", "op=GET /sandboxes/sbx-1", "request_id=req-cp"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error %q missing %q", msg, want)
+		}
+	}
+	if nf.Op != "GET /sandboxes/sbx-1" || nf.RequestID != "req-cp" || nf.Host == "" {
+		t.Errorf("fields: Host=%q Op=%q RequestID=%q", nf.Host, nf.Op, nf.RequestID)
+	}
+}
+
 func TestSpecVersionMismatch(t *testing.T) {
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Computer-Spec-Version", "2")

@@ -128,25 +128,25 @@ func (s *ControlTokenSource) mint(ctx context.Context) (string, error) {
 		}
 		switch {
 		case ae.Status == 401:
-			return "", &InvalidClientKey{tokenBase{"unknown or revoked project client key", 401, ae.RequestID, ae}}
+			return "", &InvalidClientKey{tokenBaseFrom("unknown or revoked project client key", ae)}
 		case ae.Status == 403:
-			return "", &InsufficientScope{tokenBase{"this key may not mint control-plane tokens (needs pk_session/pk_admin)", 403, ae.RequestID, ae}}
+			return "", &InsufficientScope{tokenBaseFrom("this key may not mint control-plane tokens (needs pk_session/pk_admin)", ae)}
 		case ae.Status == 429:
 			if last {
-				return "", &RateLimited{tokenBase: tokenBase{"portal rate-limited the control-token mint", 429, ae.RequestID, ae}}
+				return "", &RateLimited{tokenBaseFrom("portal rate-limited the control-token mint", ae)}
 			}
 			if serr := s.sleeper(ctx, s.backoff(i+1)); serr != nil {
 				return "", serr
 			}
 		case ae.Status >= 500 && ae.Status <= 599:
 			if last {
-				return "", &ControlTokenError{tokenBase{"portal error minting control token", ae.Status, ae.RequestID, ae}}
+				return "", &ControlTokenError{tokenBaseFrom("portal error minting control token", ae)}
 			}
 			if serr := s.sleeper(ctx, s.backoff(i+1)); serr != nil {
 				return "", serr
 			}
 		default:
-			return "", &ControlTokenError{tokenBase{"unexpected portal response minting control token", ae.Status, ae.RequestID, ae}}
+			return "", &ControlTokenError{tokenBaseFrom("unexpected portal response minting control token", ae)}
 		}
 	}
 	// Unreachable: the loop returns on the last attempt for every retryable branch.
@@ -170,13 +170,19 @@ type mintResponse struct {
 	ExpiresAt *string `json:"expires_at"`
 }
 
+// malformedBase builds the tokenBase for a 200-but-unusable mint response: no request id to
+// wrap, but the known operation + host still name WHICH portal call this was.
+func (s *ControlTokenSource) malformedBase(msg string, cause error) tokenBase {
+	return tokenBase{Msg: msg, Status: 200, Host: s.client.Host(), Op: transport.Operation("POST", Path), Cause: cause}
+}
+
 func (s *ControlTokenSource) applySuccess(resp *transport.Response) (string, error) {
 	var body mintResponse
 	if err := json.Unmarshal(resp.Body, &body); err != nil {
-		return "", &ControlTokenError{tokenBase{Msg: "mint response was not valid JSON", Status: 200, Cause: err}}
+		return "", &ControlTokenError{s.malformedBase("mint response was not valid JSON", err)}
 	}
 	if body.Token == "" {
-		return "", &ControlTokenError{tokenBase{Msg: "mint response missing token", Status: 200}}
+		return "", &ControlTokenError{s.malformedBase("mint response missing token", nil)}
 	}
 	exp, err := s.computeExpiry(body)
 	if err != nil {
@@ -194,11 +200,11 @@ func (s *ControlTokenSource) computeExpiry(body mintResponse) (time.Time, error)
 	case body.ExpiresAt != nil:
 		t, err := time.Parse(time.RFC3339, *body.ExpiresAt)
 		if err != nil {
-			return time.Time{}, &ControlTokenError{tokenBase{Msg: "mint response has an unparseable expires_at", Status: 200, Cause: err}}
+			return time.Time{}, &ControlTokenError{s.malformedBase("mint response has an unparseable expires_at", err)}
 		}
 		return t, nil
 	default:
-		return time.Time{}, &ControlTokenError{tokenBase{Msg: "mint response missing expiry (expires_in / expires_at)", Status: 200}}
+		return time.Time{}, &ControlTokenError{s.malformedBase("mint response missing expiry (expires_in / expires_at)", nil)}
 	}
 }
 

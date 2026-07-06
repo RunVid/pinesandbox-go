@@ -7,6 +7,31 @@ package `pinesandbox`) are documented here. The format follows
 `0.<POOL_VERSION>.<patch>`. So `require go.pinesandbox.io/computer v0.3.x`
 targets `pine-cua-pool-v3` (the compatibility contract integrators pin to).
 
+## [0.3.5] — 2026-07-06
+
+### Changed
+- **Errors are self-describing at the RESOURCE level.** Every error surface now
+  folds a resource-first context — `(host=<computer host>, op=<METHOD path>,
+  request_id=<id>)`, `op` query-stripped — into its message, so a generic handler
+  that logs only `err` sees WHICH Computer and WHICH operation failed (the primary
+  spine) plus the `request_id` precision handle. Coverage: `*APIError` (new
+  exported `Host` / `Op` fields, set by the transport + coordinator);
+  `*TimeoutError` / `*ConnectionError` (new `Host` / `Op` / `RequestID` fields,
+  rendered once — message shape `pinesandbox: request timed out (host=…, op=…): …`);
+  `ErrStreamLost` (host + op + the last established stream's `request_id`); the
+  control-plane errors (`Host`/`Op`/`RequestID` on `cpBase`); and the portal
+  token/attach errors (`Host`/`Op` carried through from the wrapped `*APIError`).
+  Class/field-additive and wire-compatible — no existing field or error type
+  changed — but **error message STRINGS now carry troubleshooting context** (a
+  0.3.x behavior change for anyone keying tests/log-matchers off `err.Error()`).
+  Added a Troubleshooting section to the README.
+
+### Deprecated
+- `Computer.Metrics`: pre-gateway operator convenience — the gateway blocks
+  `/metrics` on the public hosts (direct in-cluster/local addressing only),
+  and checkpoint/fleet health is now a first-class platform alerting surface.
+  Kept for compatibility; slated for removal after a downstream-usage check.
+
 ## [0.3.4] — 2026-07-03
 
 ### Changed

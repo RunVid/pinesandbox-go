@@ -175,12 +175,12 @@ func (c *Client) doOnce(ctx context.Context, method, path string, r Request) (*R
 	}
 	resp, err := c.hc.Do(req)
 	if err != nil {
-		return nil, normalizeFault(method, path, err)
+		return nil, normalizeFault(c.Host(), method, path, err)
 	}
 	defer resp.Body.Close()
 	b, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, normalizeFault(method, path, err)
+		return nil, normalizeFault(c.Host(), method, path, err)
 	}
 	return &Response{Status: resp.StatusCode, Body: b, Headers: resp.Header}, nil
 }
@@ -249,7 +249,7 @@ func (c *Client) Stream(ctx context.Context, method, path string, r Request) (*S
 	}
 	resp, err := c.streamHC.Do(req)
 	if err != nil {
-		return nil, normalizeFault(method, path, err)
+		return nil, normalizeFault(c.Host(), method, path, err)
 	}
 	return &StreamResponse{Status: resp.StatusCode, Body: resp.Body, Headers: resp.Header}, nil
 }
@@ -266,25 +266,42 @@ func (c *Client) Do(ctx context.Context, method, path string, r Request) (*Respo
 	case resp.Status >= 200 && resp.Status < 300:
 		return resp, nil
 	case resp.Status == http.StatusRequestTimeout, resp.Status == http.StatusGatewayTimeout:
-		return nil, &TimeoutError{Op: method + " " + path, Msg: fmt.Sprintf("status %d", resp.Status)}
+		// A 408/504 is a real (short-circuit) response, so it still carries the gateway's
+		// X-Request-Id. Host / Op / RequestID ride the typed fields — rendered ONCE by
+		// TimeoutError.Error() via the shared suffix — so a timeout report is self-describing
+		// even in a generic handler, with no context hand-folded into Msg.
+		return nil, &TimeoutError{
+			Host:      c.Host(),
+			Op:        Operation(method, path),
+			RequestID: resp.Headers.Get("X-Request-Id"),
+			Msg:       fmt.Sprintf("status %d", resp.Status),
+		}
 	default:
-		return nil, problem.Parse(resp.Status, resp.Body, resp.Headers.Get("X-Request-Id"))
+		// Stamp WHICH Computer + WHICH operation onto the typed error — the primary
+		// troubleshooting spine — so a generic `errors.As(&apiErr)` handler is self-describing.
+		ae := problem.Parse(resp.Status, resp.Body, resp.Headers.Get("X-Request-Id"))
+		ae.Host = c.Host()
+		ae.Op = Operation(method, path)
+		return nil, ae
 	}
 }
 
 // normalizeFault maps a Go transport error to a typed SDK error. A caller-initiated
-// cancel propagates unchanged (it's not a transport fault).
-func normalizeFault(method, path string, err error) error {
-	op := method + " " + path
+// cancel propagates unchanged (it's not a transport fault). Host (WHICH Computer) + Op (WHICH
+// operation, query-stripped) ride the typed error's fields — rendered ONCE by Error() via the
+// shared suffix — so a bare connect/timeout fault (which has no response to read a request_id
+// from) still names the failing Computer/operation without any context hand-folded into Msg.
+func normalizeFault(host, method, path string, err error) error {
+	op := Operation(method, path)
 	if errors.Is(err, context.Canceled) {
 		return err
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
-		return &TimeoutError{Op: op, Msg: err.Error()}
+		return &TimeoutError{Host: host, Op: op, Msg: err.Error()}
 	}
 	var ne net.Error
 	if errors.As(err, &ne) && ne.Timeout() {
-		return &TimeoutError{Op: op, Msg: err.Error()}
+		return &TimeoutError{Host: host, Op: op, Msg: err.Error()}
 	}
-	return &ConnectionError{Op: op, Msg: err.Error()}
+	return &ConnectionError{Host: host, Op: op, Msg: err.Error()}
 }

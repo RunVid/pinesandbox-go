@@ -238,6 +238,33 @@ func TestAgentEvents_OpenFaultBudget(t *testing.T) {
 	}
 }
 
+// TestStreamLost_NoDoubleHost: a terminal reconnect failure wraps a *ConnectionError that
+// ALREADY renders host=/op= — streamLost must not append its own suffix on top, or the
+// message prints host= twice. (Same code path whether or not a stream was established first:
+// the cause is the reconnect's *ConnectionError.)
+func TestStreamLost_NoDoubleHost(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	raw := transport.New("http", strings.TrimPrefix(srv.URL, "http://"))
+	srv.Close() // every reconnect dial is refused → *ConnectionError (carries host=/op=)
+	c := NewClient(raw, 1)
+	c.streamBackoff = func(int) time.Duration { return 0 }
+	c.streamBudget = 2
+
+	var got error
+	for _, err := range c.AgentEvents(context.Background(), "ps_", "s", "") {
+		if err != nil {
+			got = err
+			break
+		}
+	}
+	if n := strings.Count(got.Error(), "host="); n != 1 {
+		t.Errorf("ErrStreamLost message = %q has %d host= occurrences, want exactly 1", got.Error(), n)
+	}
+	if !strings.Contains(got.Error(), "op=GET /v1/sessions/s/agent/events") {
+		t.Errorf("ErrStreamLost message = %q, want op= from the wrapped ConnectionError", got.Error())
+	}
+}
+
 // TestAgentEvents_EmptyFeedBudget: a server that opens the stream then immediately closes it
 // without sending anything makes no progress; the iterator bounds these empty reconnects and
 // surfaces ErrStreamLost (the clean-EOF, nil-cause budget branch) rather than hot-looping.
@@ -266,6 +293,40 @@ func TestAgentEvents_EmptyFeedBudget(t *testing.T) {
 	defer mu.Unlock()
 	if conns != c.streamBudget+1 {
 		t.Errorf("opened %d connections, want %d (budget+1 then give up)", conns, c.streamBudget+1)
+	}
+}
+
+// TestAgentEvents_StreamLostCarriesRequestID: an established feed (its 200 open carries an
+// X-Request-Id) that then makes no progress and exhausts the reconnect budget surfaces
+// ErrStreamLost whose message folds in the established stream's request id — so a dropped
+// long-lived feed stays correlatable even though the failing reconnects have no response.
+func TestAgentEvents_StreamLostCarriesRequestID(t *testing.T) {
+	c := streamTestClient(t, 2, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Request-Id", "stream-rid-3")
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200) // opens, then empty body → clean EOF, no progress
+	})
+	var got error
+	for _, err := range c.AgentEvents(context.Background(), "ps_", "s", "") {
+		if err != nil {
+			got = err
+			break
+		}
+		t.Fatal("an empty feed should deliver no events")
+	}
+	if !errors.Is(got, ErrStreamLost) {
+		t.Fatalf("err = %v, want ErrStreamLost", got)
+	}
+	// Resource-first: the drop names WHICH feed (op) on WHICH Computer (host) — the primary
+	// spine — plus the request_id precision handle off the last established stream.
+	if !strings.Contains(got.Error(), "op=GET /v1/sessions/s/agent/events") {
+		t.Errorf("ErrStreamLost message = %q, want it to carry op=GET /v1/sessions/s/agent/events", got.Error())
+	}
+	if !strings.Contains(got.Error(), "host=") {
+		t.Errorf("ErrStreamLost message = %q, want it to carry the host", got.Error())
+	}
+	if !strings.Contains(got.Error(), "request_id=stream-rid-3") {
+		t.Errorf("ErrStreamLost message = %q, want it to carry request_id=stream-rid-3", got.Error())
 	}
 }
 

@@ -164,6 +164,27 @@ func TestToken_401_InvalidClientKey(t *testing.T) {
 	}
 }
 
+// TestToken_ErrorCarriesResourceContext: the top-level token error string keeps the resource
+// context (host + op + request id) from the wrapped *problem.APIError, so a generic handler
+// that logs only err.Error() still sees WHICH portal call failed.
+func TestToken_ErrorCarriesResourceContext(t *testing.T) {
+	s, _ := newTestSource(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Request-Id", "req-tok")
+		w.WriteHeader(401)
+		fmt.Fprint(w, `{"detail":"nope"}`)
+	})
+	_, err := s.Token(context.Background(), false)
+	if err == nil {
+		t.Fatal("want an error")
+	}
+	msg := err.Error()
+	for _, want := range []string{"host=", "op=POST /v1/control-token", "request_id=req-tok"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error %q missing %q", msg, want)
+		}
+	}
+}
+
 func TestToken_403_InsufficientScope(t *testing.T) {
 	s, _ := newTestSource(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(403)
@@ -276,6 +297,11 @@ func TestToken_MalformedSuccess(t *testing.T) {
 			var e *ControlTokenError
 			if !errors.As(err, &e) {
 				t.Fatalf("err = %T (%v), want *ControlTokenError", err, err)
+			}
+			// Every malformed-200 must be self-describing (R3-1): the mint op
+			// is known even when the response gave us nothing to work with.
+			if msg := err.Error(); !strings.Contains(msg, "op=POST /v1/control-token") || !strings.Contains(msg, "host=") {
+				t.Fatalf("malformed-200 error lacks resource context: %q", msg)
 			}
 		})
 	}

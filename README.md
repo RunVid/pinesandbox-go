@@ -216,6 +216,42 @@ project JWS → ct_ → ps_) and attaches the right one per call. To hand a brow
 the desktop, `session.Delegate(ctx)` mints a short-lived view-only `dt_` envelope
 carrying nothing privileged.
 
+## Troubleshooting — reporting an issue
+
+Errors are **self-describing at the resource level**: every `*APIError` off a gateway-fronted
+response folds the failing Computer + operation into `Error()` — resource first — so a generic
+handler that logs only `err` shows WHICH Computer and WHICH call failed with no extra plumbing.
+`Host` / `Op` / `RequestID` are also exported fields (the transport-fault `*TimeoutError` /
+`*ConnectionError` and the control-plane / token errors carry the same context). The suffix
+grammar is uniform `key=value` across the Go and Ruby SDKs; the Go SDK renders **`host=`**
+because its data-plane client holds the gateway host, where the Ruby coordinator uses
+**`sandbox=`** because its adapter holds the sandbox id (same Computer, different handle each
+layer already has). `op` is always `<METHOD> <path>` with the query string stripped.
+
+```go
+if _, err := sess.Agent().Run(ctx, "book the 9am slot"); err != nil {
+    log.Printf("agent run failed: %v", err)
+    // => "… (host=sbx_abc123.computer.<zone>, op=POST /v1/sessions/main/agent/run, request_id=req_abc123)"
+    var apiErr *pinesandbox.APIError
+    if errors.As(err, &apiErr) {
+        report(computer.ID(), sess.Name(), time.Now().UTC(), apiErr.Host, apiErr.Op, apiErr.RequestID)
+    }
+}
+```
+
+When you file a report, **lead with the resource spine** — the durable key we pivot on across
+time via logs / metrics resource attrs / `./pine debug` / the portal:
+
+1. **`computer_id`** (`computer.ID()`) — WHICH Computer. Add the **session name** (`sess.Name()`)
+   and, for an agent-lane issue, the **`task_id`**.
+2. A **UTC time window**.
+3. **`request_id`** *when you have it* — the precision handle for a single failed call
+   (`apiErr.RequestID`, also in the message). A read or stream that fails *without* a response —
+   a `*pinesandbox.TimeoutError` / `*ConnectionError`, or `ErrStreamLost` after a feed can't
+   reconnect — carries no fresh id (a mid-stream `ErrStreamLost` does fold in the last live
+   stream's `request_id`); the resource spine above is enough. Every one of these still names the
+   failing Computer (`host=…`) + operation (`op=…`) in its message.
+
 ## Layout
 
 - root package `pinesandbox` — the hand-written facade.

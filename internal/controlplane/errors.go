@@ -10,20 +10,30 @@ package controlplane
 import (
 	"encoding/json"
 	"fmt"
+
+	"go.pinesandbox.io/computer/internal/base/problem"
+	"go.pinesandbox.io/computer/internal/base/transport"
 )
 
-// cpBase carries the common fields of every control-plane error.
+// cpBase carries the common fields of every control-plane error. Host / Op / RequestID are
+// the resource-first troubleshooting context (WHICH host, WHICH operation — the sandbox id
+// rides the path, e.g. `GET /sandboxes/<id>` — and the gateway's X-Request-Id); they render
+// once via the shared ContextSuffix, matching the coordinator/token error shape.
 type cpBase struct {
-	Status int
-	Msg    string
-	Body   string // the raw response body, for support/debugging
-	Cause  error
+	Status    int
+	Msg       string
+	Body      string // the raw response body, for support/debugging
+	Host      string
+	Op        string // "<METHOD> <path>" (query-stripped)
+	RequestID string
+	Cause     error
 }
 
 func (b cpBase) Unwrap() error { return b.Cause }
 
 func cpErr(b cpBase) string {
-	return fmt.Sprintf("pinesandbox: control plane %d: %s", b.Status, b.Msg)
+	return fmt.Sprintf("pinesandbox: control plane %d: %s", b.Status, b.Msg) +
+		problem.ContextSuffix(b.Host, b.Op, b.RequestID)
 }
 
 // ControlPlaneError is the generic / unmapped control-plane failure (Ruby ApiError).
@@ -67,9 +77,19 @@ type ServerError struct{ cpBase }
 func (e *ServerError) Error() string { return cpErr(e.cpBase) }
 
 // statusError maps a non-OK control-plane response to a typed error, mirroring the Ruby
-// raise_for_status!.
-func statusError(status int, body []byte) error {
-	b := cpBase{Status: status, Msg: statusMessage(status, body), Body: string(body)}
+// raise_for_status!. method/path/host/the X-Request-Id header stamp the resource spine (WHICH
+// operation on WHICH host, plus the precision handle) so a create/get/destroy/pause/resume
+// failure is self-describing in a generic handler.
+func statusError(method, path, host string, resp *transport.Response) error {
+	b := cpBase{
+		Status:    resp.Status,
+		Msg:       statusMessage(resp.Status, resp.Body),
+		Body:      string(resp.Body),
+		Host:      host,
+		Op:        transport.Operation(method, path),
+		RequestID: resp.Headers.Get("X-Request-Id"),
+	}
+	status := resp.Status
 	switch {
 	case status == 400:
 		return &BadRequestError{b}

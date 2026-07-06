@@ -2,10 +2,56 @@ package coordinator
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
+	"strings"
 	"testing"
+
+	"go.pinesandbox.io/computer/internal/base/problem"
 )
+
+// TestOp_QueryStripped: an error on a query-bearing route must NOT leak the query string
+// (a filename, a cursor, a selector) into APIError.Op — the op is "<METHOD> <path>" only.
+func TestOp_QueryStripped(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(500)
+		_, _ = io.WriteString(w, `{"type":"/errors/x","status":500,"detail":"boom"}`)
+	})
+	ctx := context.Background()
+	calls := []struct {
+		name string
+		run  func() error
+		op   string
+	}{
+		{"ReadFile", func() error { _, e := c.ReadFile(ctx, "ps_", "s", "secret.txt"); return e }, "GET /v1/sessions/s/files"},
+		{"ListFiles", func() error {
+			_, e := c.ListFiles(ctx, "ps_", "s", ListFilesOptions{Path: "sub", Pattern: "*.txt"})
+			return e
+		}, "GET /v1/sessions/s/files/list"},
+		{"UploadArtifact", func() error { _, e := c.UploadArtifact(ctx, "ps_", "s", "out.txt", []byte("x")); return e }, "POST /v1/sessions/s/artifacts"},
+		{"PatchControl(force)", func() error {
+			_, e := c.PatchControl(ctx, "ct_", "s", ControlPatch{}, PatchControlOptions{Force: true})
+			return e
+		}, "PATCH /v1/sessions/s/control"},
+		{"DestroySession(clean)", func() error { return c.DestroySession(ctx, "ct_", "s", true) }, "DELETE /sessions/s"},
+	}
+	for _, tc := range calls {
+		t.Run(tc.name, func(t *testing.T) {
+			var ae *problem.APIError
+			if err := tc.run(); !errors.As(err, &ae) {
+				t.Fatalf("err = %T (%v), want *problem.APIError", err, err)
+			}
+			if strings.ContainsAny(ae.Op, "?#") {
+				t.Errorf("Op = %q must not contain a query string", ae.Op)
+			}
+			if ae.Op != tc.op {
+				t.Errorf("Op = %q, want %q", ae.Op, tc.op)
+			}
+		})
+	}
+}
 
 func TestListFiles(t *testing.T) {
 	var gotQuery string

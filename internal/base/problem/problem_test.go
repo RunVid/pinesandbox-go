@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -86,6 +87,63 @@ func TestParse_RequestID(t *testing.T) {
 	// Non-JSON body still yields a usable error with the header request id.
 	if e := Parse(502, []byte(`<html>bad gateway</html>`), "hdr-rid"); e.Status != 502 || e.RequestID != "hdr-rid" {
 		t.Errorf("non-JSON body: %+v", e)
+	}
+}
+
+// TestError_IncludesRequestID: the request id must land IN the Error() string (integrators
+// overwhelmingly log only err.Error()) — with a slug and without, and be omitted when absent.
+func TestError_IncludesRequestID(t *testing.T) {
+	withSlug := (&APIError{Status: 409, ProblemType: "/errors/session-busy", Detail: "busy", RequestID: "rid-7"}).Error()
+	if !strings.Contains(withSlug, "request_id=rid-7") {
+		t.Errorf("Error() = %q, want it to contain request_id=rid-7", withSlug)
+	}
+	noSlug := (&APIError{Status: 500, Detail: "boom", RequestID: "rid-8"}).Error()
+	if !strings.Contains(noSlug, "request_id=rid-8") {
+		t.Errorf("Error() = %q, want it to contain request_id=rid-8", noSlug)
+	}
+	absent := (&APIError{Status: 500, Detail: "boom"}).Error()
+	if strings.Contains(absent, "request_id=") {
+		t.Errorf("Error() = %q, want no request_id fragment when none is set", absent)
+	}
+}
+
+// TestError_ResourceFirstContext: the message is self-describing at the RESOURCE level —
+// host (WHICH Computer) then op (WHICH operation) precede the request_id precision handle,
+// in that order, and each part appears only when set.
+func TestError_ResourceFirstContext(t *testing.T) {
+	full := (&APIError{
+		Status: 409, ProblemType: "/errors/session-busy", Detail: "busy",
+		Host: "abc123.computer.test.example", Op: "POST /v1/sessions/main/agent/run", RequestID: "req-xyz",
+	}).Error()
+	want := "pinesandbox: 409 /errors/session-busy: busy (host=abc123.computer.test.example, op=POST /v1/sessions/main/agent/run, request_id=req-xyz)"
+	if full != want {
+		t.Errorf("Error() = %q, want %q", full, want)
+	}
+	// host + op present without a request_id (a transport fault has no id) still self-describes.
+	noRID := (&APIError{Status: 503, Detail: "unavailable", Host: "abc123.computer.test.example", Op: "GET /health"}).Error()
+	if !strings.Contains(noRID, "host=abc123.computer.test.example") || !strings.Contains(noRID, "op=GET /health") {
+		t.Errorf("Error() = %q, want host+op even with no request_id", noRID)
+	}
+	if strings.Contains(noRID, "request_id=") {
+		t.Errorf("Error() = %q, want no request_id fragment when none is set", noRID)
+	}
+	// host must precede op must precede request_id.
+	if h, o := strings.Index(full, "host="), strings.Index(full, "op="); h < 0 || o < 0 || h > o {
+		t.Errorf("host= must precede op= in %q", full)
+	}
+	if o, r := strings.Index(full, "op="), strings.Index(full, "request_id="); o < 0 || r < 0 || o > r {
+		t.Errorf("op= must precede request_id= in %q", full)
+	}
+}
+
+// TestContextSuffix_OmitsAbsentParts: the shared renderer includes each part only when set,
+// and returns "" when all three are absent (a bare error stays clean).
+func TestContextSuffix_OmitsAbsentParts(t *testing.T) {
+	if got := ContextSuffix("", "", ""); got != "" {
+		t.Errorf("ContextSuffix(all empty) = %q, want empty", got)
+	}
+	if got := ContextSuffix("h", "", "r"); got != " (host=h, request_id=r)" {
+		t.Errorf("ContextSuffix skipping op = %q", got)
 	}
 }
 

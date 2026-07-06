@@ -79,7 +79,7 @@ func (s *AttachCredentialsSource) RegisterComputer(ctx context.Context, computer
 	}
 	switch {
 	case ae.Status == 409 || ae.Status == 422:
-		return &ComputerRegistrationError{tokenBase{fmt.Sprintf("computer registration refused (%d)", ae.Status), ae.Status, ae.RequestID, ae}}
+		return &ComputerRegistrationError{tokenBaseFrom(fmt.Sprintf("computer registration refused (%d)", ae.Status), ae)}
 	default:
 		return s.generic(ae, "computer registration")
 	}
@@ -97,11 +97,12 @@ func (s *AttachCredentialsSource) Credentials(ctx context.Context, req Credentia
 	if req.TTLSeconds != nil {
 		body["ttl_seconds"] = *req.TTLSeconds
 	}
-	resp, err := s.post(ctx, registerPath+"/"+req.ComputerID+"/attach-credentials", body)
+	path := registerPath + "/" + req.ComputerID + "/attach-credentials"
+	resp, err := s.post(ctx, path, body)
 	if err != nil {
 		if ae, ok := asAPIError(err); ok {
 			if ae.Status == 404 {
-				return nil, &UnknownComputerError{tokenBase{fmt.Sprintf("unknown, deleted, or cross-project computer_id %s — register it first", req.ComputerID), 404, ae.RequestID, ae}}
+				return nil, &UnknownComputerError{tokenBaseFrom(fmt.Sprintf("unknown, deleted, or cross-project computer_id %s — register it first", req.ComputerID), ae)}
 			}
 			return nil, s.generic(ae, "attach-credentials mint")
 		}
@@ -112,10 +113,10 @@ func (s *AttachCredentialsSource) Credentials(ctx context.Context, req Credentia
 		BrokerGrant string `json:"broker_grant"`
 	}
 	if err := json.Unmarshal(resp.Body, &out); err != nil {
-		return nil, &AttachCredentialsError{tokenBase{Msg: "attach-credentials response was not valid JSON", Status: 200, Cause: err}}
+		return nil, &AttachCredentialsError{s.malformedBase("attach-credentials response was not valid JSON", path, err)}
 	}
 	if out.BindToken == "" || out.BrokerGrant == "" {
-		return nil, &AttachCredentialsError{tokenBase{Msg: "attach-credentials response missing bind_token/broker_grant", Status: 200}}
+		return nil, &AttachCredentialsError{s.malformedBase("attach-credentials response missing bind_token/broker_grant", path, nil)}
 	}
 	return &AttachCredentials{BindToken: out.BindToken, BrokerGrant: out.BrokerGrant}, nil
 }
@@ -129,11 +130,12 @@ func (s *AttachCredentialsSource) GrantRefresh(ctx context.Context, req GrantRef
 	if req.TTLSeconds != nil {
 		body["ttl_seconds"] = *req.TTLSeconds
 	}
-	resp, err := s.post(ctx, registerPath+"/"+req.ComputerID+"/grant-refresh", body)
+	path := registerPath + "/" + req.ComputerID + "/grant-refresh"
+	resp, err := s.post(ctx, path, body)
 	if err != nil {
 		if ae, ok := asAPIError(err); ok {
 			if ae.Status == 404 {
-				return nil, &UnknownComputerError{tokenBase{fmt.Sprintf("unknown, deleted, or cross-project computer_id %s", req.ComputerID), 404, ae.RequestID, ae}}
+				return nil, &UnknownComputerError{tokenBaseFrom(fmt.Sprintf("unknown, deleted, or cross-project computer_id %s", req.ComputerID), ae)}
 			}
 			return nil, s.generic(ae, "grant-refresh mint")
 		}
@@ -144,10 +146,10 @@ func (s *AttachCredentialsSource) GrantRefresh(ctx context.Context, req GrantRef
 		RefreshToken string `json:"refresh_token"`
 	}
 	if err := json.Unmarshal(resp.Body, &out); err != nil {
-		return nil, &AttachCredentialsError{tokenBase{Msg: "grant-refresh response was not valid JSON", Status: 200, Cause: err}}
+		return nil, &AttachCredentialsError{s.malformedBase("grant-refresh response was not valid JSON", path, err)}
 	}
 	if out.BrokerGrant == "" || out.RefreshToken == "" {
-		return nil, &AttachCredentialsError{tokenBase{Msg: "grant-refresh response missing broker_grant/refresh_token", Status: 200}}
+		return nil, &AttachCredentialsError{s.malformedBase("grant-refresh response missing broker_grant/refresh_token", path, nil)}
 	}
 	return &GrantRefresh{BrokerGrant: out.BrokerGrant, RefreshToken: out.RefreshToken}, nil
 }
@@ -187,7 +189,13 @@ func (s *AttachCredentialsSource) generic(ae *problem.APIError, op string) error
 	default:
 		msg = fmt.Sprintf("portal %s failed (%d)", op, ae.Status)
 	}
-	return &AttachCredentialsError{tokenBase{msg, ae.Status, ae.RequestID, ae}}
+	return &AttachCredentialsError{tokenBaseFrom(msg, ae)}
+}
+
+// malformedBase builds the tokenBase for a 200-but-unusable mint response: no request id to
+// wrap, but the known operation (path) + host still name WHICH portal call this was.
+func (s *AttachCredentialsSource) malformedBase(msg, path string, cause error) tokenBase {
+	return tokenBase{Msg: msg, Status: 200, Host: s.client.Host(), Op: transport.Operation("POST", path), Cause: cause}
 }
 
 func asAPIError(err error) (*problem.APIError, bool) {

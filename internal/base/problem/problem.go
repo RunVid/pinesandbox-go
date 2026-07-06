@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 )
 
 //go:embed error-taxonomy.json
@@ -48,15 +49,50 @@ type APIError struct {
 	ProblemType string // RFC-9457 `type`, e.g. "/errors/session-busy"
 	Title       string
 	Detail      string
-	RequestID   string // body `request_id`, else the X-Request-Id header (0C)
-	Retryable   bool   // wire `retryable` (0C) when present, else the taxonomy fallback
+	// Host + Op are the PRIMARY troubleshooting spine: WHICH Computer (the data host
+	// <sandbox>.computer.<zone>) and WHICH operation ("<METHOD> <path>") failed. They are
+	// set by the transport / coordinator layer that knows them (problem.Parse is host-
+	// agnostic by design), so an integrator catching this in a generic handler sees the
+	// resource + op with no extra plumbing. RequestID is the SECONDARY precision handle.
+	Host      string // data host — WHICH Computer/endpoint (empty for the sentinels)
+	Op        string // "<METHOD> <path>" — WHICH operation (empty for the sentinels)
+	RequestID string // body `request_id`, else the X-Request-Id header (0C)
+	Retryable bool   // wire `retryable` (0C) when present, else the taxonomy fallback
 }
 
 func (e *APIError) Error() string {
+	var msg string
 	if e.ProblemType != "" {
-		return fmt.Sprintf("pinesandbox: %d %s: %s", e.Status, e.ProblemType, e.Detail)
+		msg = fmt.Sprintf("pinesandbox: %d %s: %s", e.Status, e.ProblemType, e.Detail)
+	} else {
+		msg = fmt.Sprintf("pinesandbox: %d: %s", e.Status, e.Detail)
 	}
-	return fmt.Sprintf("pinesandbox: %d: %s", e.Status, e.Detail)
+	// Resource-first context suffix (host → op → request_id): integrators overwhelmingly
+	// log only err.Error(), so the resource + operation that failed — the primary spine —
+	// and the request_id precision handle must all land in the message, not only on fields.
+	return msg + ContextSuffix(e.Host, e.Op, e.RequestID)
+}
+
+// ContextSuffix renders the resource-first troubleshooting context appended to an error
+// message: host (WHICH Computer) → op (WHICH operation) → request_id (the single failed
+// call). host/op are the PRIMARY spine (durable, held by the integrator, pivots across
+// time); request_id is the SECONDARY precision handle. Each part is included only when
+// non-empty, in that order; returns "" when all are absent (so a bare error stays clean).
+func ContextSuffix(host, op, requestID string) string {
+	parts := make([]string, 0, 3)
+	if host != "" {
+		parts = append(parts, "host="+host)
+	}
+	if op != "" {
+		parts = append(parts, "op="+op)
+	}
+	if requestID != "" {
+		parts = append(parts, "request_id="+requestID)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return " (" + strings.Join(parts, ", ") + ")"
 }
 
 // Is matches by RFC-9457 problem-type slug, so a caller can branch on a named sentinel

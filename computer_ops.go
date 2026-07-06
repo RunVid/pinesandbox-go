@@ -18,6 +18,12 @@ func (c *Computer) Health(ctx context.Context) (json.RawMessage, error) {
 }
 
 // Metrics returns the bound coord's Prometheus metrics (token-less, text/plain).
+//
+// Deprecated: pre-gateway operator convenience. The gateway blocks /metrics on
+// the public hosts, so this only works with direct in-cluster/local
+// addressing; fleet metrics live on the platform telemetry pipeline (SigNoz)
+// and per-Computer debugging goes through `./pine debug`. Kept for
+// compatibility; do not build new tooling on it.
 func (c *Computer) Metrics(ctx context.Context) ([]byte, error) {
 	coord, _, err := c.bound()
 	if err != nil {

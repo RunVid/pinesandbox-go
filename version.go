@@ -13,7 +13,7 @@ package pinesandbox
 // the minor (0.3) is the cua-pool compatibility contract shared across all SDKs; the
 // patch is per-SDK and bumps independently when this SDK has pending [Unreleased] work.
 // 0.3.x targets pine-cua-pool-v3 (the new-spec wire flip; the default profile).
-const Version = "0.3.4"
+const Version = "0.3.5"
 
 // SpecVersion is the Computer wire-major this SDK targets — the CG-1 version-identity
 // source. It MUST equal computer-api.yaml's x-pine-spec-version, the gateway's

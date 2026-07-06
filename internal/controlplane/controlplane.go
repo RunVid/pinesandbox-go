@@ -58,31 +58,33 @@ func (c *Client) Create(ctx context.Context, body any, idempotencyKey string) (*
 		return nil, err
 	}
 	if !okStatus(resp.Status, 200, 201, 202) {
-		return nil, statusError(resp.Status, resp.Body)
+		return nil, statusError("POST", "/sandboxes", c.raw.Host(), resp)
 	}
 	return ParseSandboxInfo(resp.Body)
 }
 
 // Get fetches a sandbox by id.
 func (c *Client) Get(ctx context.Context, sandboxID string) (*SandboxInfo, error) {
-	resp, err := c.do(ctx, "GET", "/sandboxes/"+url.PathEscape(sandboxID), nil, nil, false)
+	path := "/sandboxes/" + url.PathEscape(sandboxID)
+	resp, err := c.do(ctx, "GET", path, nil, nil, false)
 	if err != nil {
 		return nil, err
 	}
 	if resp.Status != 200 {
-		return nil, statusError(resp.Status, resp.Body)
+		return nil, statusError("GET", path, c.raw.Host(), resp)
 	}
 	return ParseSandboxInfo(resp.Body)
 }
 
 // Destroy deletes a sandbox. Idempotent: a 404 (already gone) is success.
 func (c *Client) Destroy(ctx context.Context, sandboxID string) error {
-	resp, err := c.do(ctx, "DELETE", "/sandboxes/"+url.PathEscape(sandboxID), nil, nil, false)
+	path := "/sandboxes/" + url.PathEscape(sandboxID)
+	resp, err := c.do(ctx, "DELETE", path, nil, nil, false)
 	if err != nil {
 		return err
 	}
 	if !okStatus(resp.Status, 200, 202, 204, 404) {
-		return statusError(resp.Status, resp.Body)
+		return statusError("DELETE", path, c.raw.Host(), resp)
 	}
 	return nil
 }
@@ -100,7 +102,8 @@ func (c *Client) Resume(ctx context.Context, sandboxID string) (bool, error) {
 }
 
 func (c *Client) transition(ctx context.Context, sandboxID, verb string) (bool, error) {
-	resp, err := c.do(ctx, "POST", "/sandboxes/"+url.PathEscape(sandboxID)+"/"+verb, nil, nil, false)
+	path := "/sandboxes/" + url.PathEscape(sandboxID) + "/" + verb
+	resp, err := c.do(ctx, "POST", path, nil, nil, false)
 	if err != nil {
 		return false, err
 	}
@@ -108,7 +111,7 @@ func (c *Client) transition(ctx context.Context, sandboxID, verb string) (bool, 
 		return false, nil
 	}
 	if !okStatus(resp.Status, 200, 202, 204) {
-		return false, statusError(resp.Status, resp.Body)
+		return false, statusError("POST", path, c.raw.Host(), resp)
 	}
 	return true, nil
 }

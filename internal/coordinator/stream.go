@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"time"
 
+	"go.pinesandbox.io/computer/internal/base/problem"
 	"go.pinesandbox.io/computer/internal/base/sse"
 	"go.pinesandbox.io/computer/internal/base/transport"
 )
@@ -180,6 +181,13 @@ func streamTyped[T any](ctx context.Context, c *Client, path, token, lastID stri
 	return func(yield func(T, error) bool) {
 		cursor := lastID
 		fails := 0
+		// host + op are the PRIMARY spine (WHICH Computer, WHICH feed) — constant for this
+		// iterator, so a terminal ErrStreamLost always names the resource that dropped even
+		// though the failing reconnects have no response to read from. requestID is the
+		// SECONDARY handle: the X-Request-Id of the most recently ESTABLISHED stream.
+		host := c.Host()
+		op := transport.Operation("GET", path)
+		requestID := ""
 		for {
 			sr, err := c.openSSE(ctx, "GET", path, token, nil, lastEventIDHeader(cursor))
 			if err != nil {
@@ -192,10 +200,13 @@ func streamTyped[T any](ctx context.Context, c *Client, path, token, lastID stri
 					yield(zero, err) // terminal: auth / session-gone / spec mismatch / non-2xx
 					return
 				}
-				if !streamRetry(ctx, c, &fails, err, yield) {
+				if !streamRetry(ctx, c, &fails, err, host, op, requestID, yield) {
 					return
 				}
 				continue
+			}
+			if rid := sr.Headers.Get("X-Request-Id"); rid != "" {
+				requestID = rid
 			}
 			delivered, ferr := pumpFrames(sr.Body, &cursor, decode, yield)
 			if errors.Is(ferr, errConsumerStopped) || ctx.Err() != nil {
@@ -205,7 +216,7 @@ func streamTyped[T any](ctx context.Context, c *Client, path, token, lastID stri
 				fails = 0
 			}
 			// The established stream ended (EOF or read fault) → reconnect under budget.
-			if !streamRetry(ctx, c, &fails, ferr, yield) {
+			if !streamRetry(ctx, c, &fails, ferr, host, op, requestID, yield) {
 				return
 			}
 		}
@@ -246,21 +257,47 @@ func pumpFrames[T any](body io.ReadCloser, cursor *string, decode func(sse.Frame
 
 // streamRetry charges one reconnect against the budget. It returns true to reconnect (after
 // sleeping the backoff), or false to stop — either because the budget is spent (it yields
-// ErrStreamLost, wrapping cause) or because ctx ended during the wait.
-func streamRetry[T any](ctx context.Context, c *Client, fails *int, cause error, yield func(T, error) bool) bool {
+// ErrStreamLost, wrapping cause + the resource-first host/op/request-id context) or because
+// ctx ended during the wait.
+func streamRetry[T any](ctx context.Context, c *Client, fails *int, cause error, host, op, requestID string, yield func(T, error) bool) bool {
 	*fails++
 	if *fails > c.streamBudget {
 		var zero T
-		if cause != nil {
-			// Double-wrap: errors.Is(err, ErrStreamLost) AND errors.As to the underlying
-			// transport fault both succeed (Go 1.20+ multi-%w).
-			yield(zero, fmt.Errorf("%w: %w", ErrStreamLost, cause))
-		} else {
-			yield(zero, ErrStreamLost)
-		}
+		yield(zero, streamLost(cause, host, op, requestID))
 		return false
 	}
 	return c.streamWait(ctx, *fails)
+}
+
+// streamLost builds the terminal ErrStreamLost error, wrapping the underlying cause and
+// folding the resource-first context (host = WHICH Computer, op = WHICH feed — the primary
+// spine — then the last established stream's request id) into the message. The %w chain keeps
+// BOTH errors.Is(err, ErrStreamLost) AND errors.As to the underlying transport fault working
+// (Go 1.20+ multi-%w). It adds its OWN suffix only when the cause doesn't already carry SDK
+// resource context: a reconnect *TimeoutError/*ConnectionError already renders host/op, so
+// re-appending it here would print host= twice (a clean EOF / raw read fault carries none).
+func streamLost(cause error, host, op, requestID string) error {
+	var err error
+	switch {
+	case cause != nil:
+		err = fmt.Errorf("%w: %w", ErrStreamLost, cause)
+	default:
+		err = ErrStreamLost
+	}
+	if !causeCarriesContext(cause) {
+		if suffix := problem.ContextSuffix(host, op, requestID); suffix != "" {
+			err = fmt.Errorf("%w%s", err, suffix)
+		}
+	}
+	return err
+}
+
+// causeCarriesContext reports whether cause is a transport fault that already renders the
+// resource suffix (host/op) — so streamLost doesn't double-fold it.
+func causeCarriesContext(cause error) bool {
+	var te *transport.TimeoutError
+	var ce *transport.ConnectionError
+	return errors.As(cause, &te) || errors.As(cause, &ce)
 }
 
 // reconnectable reports whether an openSSE error is a transient transport fault worth

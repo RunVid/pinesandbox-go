@@ -4,28 +4,53 @@
 // root SDK re-exports the error types.
 package tokens
 
-import "fmt"
+import (
+	"fmt"
+
+	"go.pinesandbox.io/computer/internal/base/problem"
+)
 
 // tokenBase carries the common fields of every control-token error: the originating HTTP
-// status (0 for a pre-flight failure), the portal's request id (for support), and the
-// underlying cause (for errors.Unwrap).
+// status (0 for a pre-flight failure), the portal's request id (for support), the resource
+// context (Host = WHICH portal, Op = WHICH operation "<METHOD> <path>"), and the underlying
+// cause (for errors.Unwrap). Host / Op ride the top-level error string so a generic handler
+// keeps them even though the wrapping loses the underlying *problem.APIError's message.
 type tokenBase struct {
 	Msg       string
 	Status    int
 	RequestID string
+	Host      string
+	Op        string
 	Cause     error
 }
 
 func (b tokenBase) Unwrap() error { return b.Cause }
 
 func tokErr(label string, b tokenBase) string {
+	var head string
 	switch {
-	case b.Status != 0 && b.RequestID != "":
-		return fmt.Sprintf("pinesandbox: %s (%d, request %s): %s", label, b.Status, b.RequestID, b.Msg)
 	case b.Status != 0:
-		return fmt.Sprintf("pinesandbox: %s (%d): %s", label, b.Status, b.Msg)
+		head = fmt.Sprintf("pinesandbox: %s (%d): %s", label, b.Status, b.Msg)
 	default:
-		return fmt.Sprintf("pinesandbox: %s: %s", label, b.Msg)
+		head = fmt.Sprintf("pinesandbox: %s: %s", label, b.Msg)
+	}
+	// Resource-first troubleshooting suffix (host → op → request_id), rendered once via the
+	// shared helper so the token layer matches the coordinator/control-plane error shape.
+	return head + problem.ContextSuffix(b.Host, b.Op, b.RequestID)
+}
+
+// tokenBaseFrom builds a tokenBase from a wrapped *problem.APIError, carrying its resource
+// context (Host / Op — set by transport.Do) + request id + status through to the top-level
+// token error string. The default attach path (portal-as-issuer) is where an integrator sees
+// these, so WHICH portal + WHICH operation must survive the wrapping.
+func tokenBaseFrom(msg string, ae *problem.APIError) tokenBase {
+	return tokenBase{
+		Msg:       msg,
+		Status:    ae.Status,
+		RequestID: ae.RequestID,
+		Host:      ae.Host,
+		Op:        ae.Op,
+		Cause:     ae,
 	}
 }
 
