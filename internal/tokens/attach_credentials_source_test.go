@@ -127,16 +127,9 @@ func TestCredentials_MissingFields(t *testing.T) {
 	}
 }
 
-func TestCredentials_401InvalidKey(t *testing.T) {
-	s := newAttachSource(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(401) })
-	var e *InvalidClientKey
-	if _, err := s.Credentials(context.Background(), CredentialsRequest{ComputerID: "c", PodUID: "p", CoordBootID: "b", SandboxID: "s"}); !errors.As(err, &e) {
-		t.Fatalf("err = %T (%v), want *InvalidClientKey", err, err)
-	} else if e.Status != 401 {
-		t.Errorf("status = %d, want 401", e.Status)
-	}
-}
-
+// A bad key (401) stays in the AttachCredentialsError family so a caller's
+// errors.As(*AttachCredentialsError) on the attach call keeps catching it; only the
+// project/computer-status 403 is broken out as a distinct *ProjectAccessDenied.
 func TestCredentials_403ProjectAccessDenied(t *testing.T) {
 	s := newAttachSource(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(403) })
 	var e *ProjectAccessDenied
@@ -147,8 +140,21 @@ func TestCredentials_403ProjectAccessDenied(t *testing.T) {
 	}
 }
 
+// 403 is NOT swallowed by the generic AttachCredentialsError type — it's the more
+// specific ProjectAccessDenied (Go has no inheritance, so the two are distinct).
+func TestCredentials_403IsNotGenericAttachError(t *testing.T) {
+	s := newAttachSource(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(403) })
+	_, err := s.Credentials(context.Background(), CredentialsRequest{ComputerID: "c", PodUID: "p", CoordBootID: "b", SandboxID: "s"})
+	var generic *AttachCredentialsError
+	if errors.As(err, &generic) {
+		t.Errorf("403 → %T, want a distinct *ProjectAccessDenied, not *AttachCredentialsError", err)
+	}
+}
+
 func TestCredentials_GenericByStatus(t *testing.T) {
-	for _, status := range []int{429, 500} {
+	// 401 (bad key), 429, and 5xx all land in the generic AttachCredentialsError family
+	// (only 403 → ProjectAccessDenied, 404 → UnknownComputerError are broken out).
+	for _, status := range []int{401, 429, 500} {
 		s := newAttachSource(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(status) })
 		var e *AttachCredentialsError
 		if _, err := s.Credentials(context.Background(), CredentialsRequest{ComputerID: "c", PodUID: "p", CoordBootID: "b", SandboxID: "s"}); !errors.As(err, &e) {

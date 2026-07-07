@@ -29,11 +29,10 @@ const (
 
 // ControlTokenSource mints and caches a project JWS from a pk_ client key. It is
 // goroutine-safe with single-flight refresh: concurrent callers serialize on the mint and
-// reuse its result. Freshness is derived from the JWS exp claim when present, with the
-// portal response expiry as a compatibility fallback; callers must not depend on sidecar
-// in-memory expiry state being authoritative. 429/5xx are retried with bounded jittered
-// backoff; 401/403 are terminal. The pk_ and the minted JWS never appear in the String()
-// form.
+// reuse its result. The cached expiry is taken from the minted JWS's own exp claim when
+// present, falling back to the portal response expiry (expires_in / expires_at) otherwise.
+// 429/5xx are retried with bounded jittered backoff; 401/403 are terminal. The pk_ and the
+// minted JWS never appear in the String() form.
 type ControlTokenSource struct {
 	client *transport.Client
 	apiKey string // pk_
@@ -115,11 +114,10 @@ func (s *ControlTokenSource) Token(ctx context.Context, forceRefresh bool) (stri
 }
 
 func (s *ControlTokenSource) fresh(now time.Time) bool {
-	exp := s.expiresAt
-	if tokenExp, ok := controlTokenExpiry(s.token); ok {
-		exp = tokenExp
-	}
-	return !exp.IsZero() && now.Before(exp.Add(-s.skew))
+	// s.expiresAt already reflects the token's own exp claim — computeExpiry prefers it
+	// over the response metadata at mint time — so freshness reads the cached value
+	// directly rather than re-parsing the JWS on every call.
+	return !s.expiresAt.IsZero() && now.Before(s.expiresAt.Add(-s.skew))
 }
 
 // mint runs the bounded retry loop. Caller holds s.mu.

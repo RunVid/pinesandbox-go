@@ -15,11 +15,13 @@ targets `pine-cua-pool-v3` (the compatibility contract integrators pin to).
   integrations do not run a timer or call a refresh API.
 
 ### Changed
-- Attach-credential mints now type authz failures precisely: invalid `pk_`
-  returns `*InvalidClientKey` (401), while disabled/revoked/insufficient project
-  access returns `*ProjectAccessDenied` (403).
-- `ControlTokenSource` derives cache freshness from the minted token's own
-  `exp` claim when present, using response expiry metadata only as fallback.
+- Attach-credential mints break out `*ProjectAccessDenied` (403 — the project,
+  key, or computer may not mint now) from the generic `*AttachCredentialsError`.
+  A bad key (401), a rate limit (429), and server errors stay
+  `*AttachCredentialsError` (with `.Status`), so `errors.As` on the attach call
+  keeps catching them.
+- `ControlTokenSource` takes its cache expiry from the minted token's own `exp`
+  claim when present, falling back to the response expiry metadata otherwise.
 
 ## [0.3.6] — 2026-07-06
 

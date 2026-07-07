@@ -139,30 +139,35 @@ func TestToken_MintSuccess_UsesJWTExpWithoutResponseExpiry(t *testing.T) {
 	}
 }
 
-func TestToken_CachedJWTFreshnessDerivesFromExpClaim(t *testing.T) {
+// The token's own exp is authoritative for cache lifetime — a longer response expires_in
+// must NOT keep an already-expiring JWS cached past its real exp.
+func TestToken_JWTExpPreferredOverResponseExpiry(t *testing.T) {
 	clk := &fakeClock{t: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
-	tok := unsignedJWT(t, map[string]any{"exp": clk.now().Add(time.Hour).Unix()})
+	tok := unsignedJWT(t, map[string]any{"exp": clk.now().Add(2 * time.Minute).Unix()})
 	var hits int32
 	s, _ := newTestSource(t, func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&hits, 1)
-		fmt.Fprint(w, `{"token":"new-jws","expires_in":3600}`)
+		fmt.Fprintf(w, `{"token":%q,"expires_in":3600}`, tok) // response claims 1h; token exp says 2m
 	}, WithClock(clk.now), WithSkew(60*time.Second))
-	s.token = tok
-	s.expiresAt = time.Time{} // simulate rebuilding only the token string, not sidecar expiry state
 
-	if got, err := s.Token(context.Background(), false); err != nil || got != tok {
-		t.Fatalf("Token = %q, %v; want cached JWT", got, err)
+	if _, err := s.Token(context.Background(), false); err != nil {
+		t.Fatalf("mint: %v", err)
 	}
-	if got := atomic.LoadInt32(&hits); got != 0 {
-		t.Errorf("server hit %d times, want 0 (cached JWT exp is still fresh)", got)
-	}
-
-	clk.advance(time.Hour - 30*time.Second)
-	if got, err := s.Token(context.Background(), false); err != nil || got != "new-jws" {
-		t.Fatalf("stale Token = %q, %v; want re-minted token", got, err)
+	// Inside the token's real exp (minus skew) → still cached, no re-mint.
+	clk.advance(30 * time.Second)
+	if _, err := s.Token(context.Background(), false); err != nil {
+		t.Fatalf("cached Token: %v", err)
 	}
 	if got := atomic.LoadInt32(&hits); got != 1 {
-		t.Errorf("server hit %d times, want 1 after JWT entered skew window", got)
+		t.Errorf("server hit %d times, want 1 (still fresh within the token exp)", got)
+	}
+	// Past the token exp minus skew (2m − 60s = 90s) → re-mint, despite expires_in=3600.
+	clk.advance(90 * time.Second)
+	if _, err := s.Token(context.Background(), false); err != nil {
+		t.Fatalf("re-mint: %v", err)
+	}
+	if got := atomic.LoadInt32(&hits); got != 2 {
+		t.Errorf("server hit %d times, want 2 (token exp, not expires_in, drives re-mint)", got)
 	}
 }
 

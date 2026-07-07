@@ -128,13 +128,16 @@ func (s *AttachCredentialsSource) post(ctx context.Context, path string, body an
 	})
 }
 
-// generic maps a non-specific portal failure to AttachCredentialsError with a status-keyed
-// default message (mirrors the Ruby raise_generic).
+// generic maps a portal failure to a typed error (mirrors the Ruby raise_generic): 403 →
+// ProjectAccessDenied (the project/key/computer may not mint now); everything else — a bad
+// key (401), rate limit (429), or server error — → AttachCredentialsError with a status-keyed
+// message. A bad pk_ stays in the AttachCredentialsError family so `errors.As` on the attach
+// call keeps catching it; callers distinguish it by ae.Status == 401.
 func (s *AttachCredentialsSource) generic(ae *problem.APIError, op string) error {
 	var msg string
 	switch ae.Status {
 	case 401:
-		return &InvalidClientKey{tokenBaseFrom("invalid or unknown project client key", ae)}
+		msg = "invalid or unknown project client key"
 	case 403:
 		return &ProjectAccessDenied{tokenBaseFrom("project or key may not mint attach credentials (scope, project status, or computer status)", ae)}
 	case 429:
