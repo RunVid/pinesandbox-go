@@ -2,6 +2,8 @@ package tokens
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -14,6 +16,20 @@ import (
 
 	"go.pinesandbox.io/computer/internal/base/transport"
 )
+
+func unsignedJWT(t *testing.T, claims map[string]any) string {
+	t.Helper()
+	header, err := json.Marshal(map[string]string{"alg": "none", "typ": "JWT"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(claims)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return base64.RawURLEncoding.EncodeToString(header) + "." +
+		base64.RawURLEncoding.EncodeToString(payload) + "."
+}
 
 type fakeClock struct {
 	mu sync.Mutex
@@ -100,6 +116,53 @@ func TestToken_MintSuccess_ExpiresAt(t *testing.T) {
 	}
 	if tok != "jws-at" {
 		t.Errorf("token = %q, want jws-at", tok)
+	}
+}
+
+func TestToken_MintSuccess_UsesJWTExpWithoutResponseExpiry(t *testing.T) {
+	clk := &fakeClock{t: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+	tok := unsignedJWT(t, map[string]any{"exp": clk.now().Add(time.Hour).Unix()})
+	var hits int32
+	s, _ := newTestSource(t, func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		fmt.Fprintf(w, `{"token":%q}`, tok)
+	}, WithClock(clk.now), WithSkew(60*time.Second))
+
+	if got, err := s.Token(context.Background(), false); err != nil || got != tok {
+		t.Fatalf("Token = %q, %v; want minted JWT", got, err)
+	}
+	if _, err := s.Token(context.Background(), false); err != nil {
+		t.Fatalf("cached Token: %v", err)
+	}
+	if got := atomic.LoadInt32(&hits); got != 1 {
+		t.Errorf("server hit %d times, want 1 (JWT exp should make cache fresh)", got)
+	}
+}
+
+func TestToken_CachedJWTFreshnessDerivesFromExpClaim(t *testing.T) {
+	clk := &fakeClock{t: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+	tok := unsignedJWT(t, map[string]any{"exp": clk.now().Add(time.Hour).Unix()})
+	var hits int32
+	s, _ := newTestSource(t, func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		fmt.Fprint(w, `{"token":"new-jws","expires_in":3600}`)
+	}, WithClock(clk.now), WithSkew(60*time.Second))
+	s.token = tok
+	s.expiresAt = time.Time{} // simulate rebuilding only the token string, not sidecar expiry state
+
+	if got, err := s.Token(context.Background(), false); err != nil || got != tok {
+		t.Fatalf("Token = %q, %v; want cached JWT", got, err)
+	}
+	if got := atomic.LoadInt32(&hits); got != 0 {
+		t.Errorf("server hit %d times, want 0 (cached JWT exp is still fresh)", got)
+	}
+
+	clk.advance(time.Hour - 30*time.Second)
+	if got, err := s.Token(context.Background(), false); err != nil || got != "new-jws" {
+		t.Fatalf("stale Token = %q, %v; want re-minted token", got, err)
+	}
+	if got := atomic.LoadInt32(&hits); got != 1 {
+		t.Errorf("server hit %d times, want 1 after JWT entered skew window", got)
 	}
 }
 

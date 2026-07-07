@@ -9,7 +9,6 @@ import (
 
 func TestAdminRoutes(t *testing.T) {
 	var claimBody string
-	var grantBody string
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/health":
@@ -34,10 +33,6 @@ func TestAdminRoutes(t *testing.T) {
 			_, _ = io.WriteString(w, `{"claimed":true}`)
 		case r.URL.Path == "/downloads/orphans/g1" && r.Method == "DELETE":
 			w.WriteHeader(204)
-		case r.URL.Path == "/v1/coord/grant" && r.Method == "POST":
-			b, _ := io.ReadAll(r.Body)
-			grantBody = string(b)
-			_, _ = io.WriteString(w, `{"expires_at":1700000000}`)
 		default:
 			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 		}
@@ -67,12 +62,6 @@ func TestAdminRoutes(t *testing.T) {
 	}
 	if err := c.DiscardOrphanDownload(ctx, "ct_", "g1"); err != nil {
 		t.Fatalf("DiscardOrphanDownload: %v", err)
-	}
-	if _, err := c.GrantRefresh(ctx, "ct_", "pod-1", "boot-1", "bg", "rt"); err != nil {
-		t.Fatalf("GrantRefresh: %v", err)
-	}
-	if !contains(grantBody, `"broker_grant":"bg"`) || !contains(grantBody, `"refresh_token":"rt"`) {
-		t.Errorf("grant body = %s", grantBody)
 	}
 }
 

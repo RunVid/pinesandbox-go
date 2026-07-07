@@ -3,9 +3,6 @@ package pinesandbox
 import (
 	"context"
 	"encoding/json"
-	"fmt"
-
-	"go.pinesandbox.io/computer/internal/tokens"
 )
 
 // Health returns the bound coord's health document (token-less route).
@@ -77,30 +74,4 @@ func (c *Computer) DiscardOrphanDownload(ctx context.Context, guid string) error
 		return err
 	}
 	return coord.DiscardOrphanDownload(ctx, ct, guid)
-}
-
-// RefreshBrokerGrant performs the §6.4 mid-life broker-grant refresh: mint a fresh
-// {broker_grant, refresh_token} at the portal for the live pod, then have coord swap its
-// in-RAM grant. Long-lived integrations call this on a cadence well under the grant TTL
-// (idempotent) so the grant never expires while the pod is alive. Returns the raw
-// {expires_at}.
-func (c *Computer) RefreshBrokerGrant(ctx context.Context, ttlSeconds *int) (json.RawMessage, error) {
-	c.mu.Lock()
-	coord, conn, ct := c.coord, c.conn, c.computerToken
-	c.mu.Unlock()
-	if coord == nil || conn == nil || ct == "" {
-		return nil, fmt.Errorf("pinesandbox: Computer is not attached")
-	}
-	// pod_uid + coord_boot_id are stable for the pod's life; re-fetch them (public route).
-	pubkey, err := coord.BindPubkey(ctx)
-	if err != nil {
-		return nil, err
-	}
-	minted, err := conn.attachProvider.GrantRefresh(ctx, tokens.GrantRefreshRequest{
-		ComputerID: c.id, PodUID: pubkey.PodUID, CoordBootID: pubkey.CoordBootID, TTLSeconds: ttlSeconds,
-	})
-	if err != nil {
-		return nil, err
-	}
-	return coord.GrantRefresh(ctx, ct, pubkey.PodUID, pubkey.CoordBootID, minted.BrokerGrant, minted.RefreshToken)
 }

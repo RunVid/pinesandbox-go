@@ -226,59 +226,6 @@ func TestAttach_BindFailureCleansUp(t *testing.T) {
 	}
 }
 
-// TestRefreshBrokerGrant drives the 3-step §6.4 flow: re-fetch pod identity (bind-pubkey) →
-// mint a fresh grant at the portal → coord swaps its in-RAM grant.
-func TestRefreshBrokerGrant(t *testing.T) {
-	kp, _ := bindhpke.GenerateKeypair()
-	var portalMinted, coordSwapped bool
-	controlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/v1/computers/c1/grant-refresh" {
-			portalMinted = true
-			fmt.Fprint(w, `{"broker_grant":"bg_new","refresh_token":"rt_new"}`)
-			return
-		}
-		w.WriteHeader(500)
-	}))
-	defer controlSrv.Close()
-	coordSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/v1/coord/bind-pubkey":
-			fmt.Fprintf(w, `{"pod_uid":"pod-1","coord_boot_id":"boot-1","ephem_pub_x25519":%q}`,
-				base64.RawURLEncoding.EncodeToString(kp.PublicKeyRaw()))
-		case "/v1/coord/grant":
-			var body map[string]any
-			_ = json.NewDecoder(r.Body).Decode(&body)
-			if body["broker_grant"] != "bg_new" || body["refresh_token"] != "rt_new" {
-				t.Errorf("coord grant body = %v", body)
-			}
-			if r.Header.Get("X-Pine-Auth") != "ct_x" {
-				t.Errorf("grant auth = %q, want ct_x", r.Header.Get("X-Pine-Auth"))
-			}
-			coordSwapped = true
-			fmt.Fprint(w, `{"expires_at":1700000000}`)
-		default:
-			w.WriteHeader(500)
-		}
-	}))
-	defer coordSrv.Close()
-
-	conn := buildTestConnection(t, controlSrv.URL, coordSrv.URL)
-	comp := newComputer("c1", make([]byte, 32))
-	if err := comp.adopt(conn, "sb-1", "ct_x", "running"); err != nil {
-		t.Fatal(err)
-	}
-	out, err := comp.RefreshBrokerGrant(context.Background(), nil)
-	if err != nil {
-		t.Fatalf("RefreshBrokerGrant: %v", err)
-	}
-	if !portalMinted || !coordSwapped {
-		t.Errorf("flow incomplete: portalMinted=%v coordSwapped=%v", portalMinted, coordSwapped)
-	}
-	if !strings.Contains(string(out), "expires_at") {
-		t.Errorf("out = %s", out)
-	}
-}
-
 func TestNewClient_Validation(t *testing.T) {
 	if _, err := NewClient(ClientOptions{APIKey: "pk_x"}); err == nil {
 		t.Error("expected error for missing Endpoint")

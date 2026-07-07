@@ -127,8 +127,28 @@ func TestCredentials_MissingFields(t *testing.T) {
 	}
 }
 
+func TestCredentials_401InvalidKey(t *testing.T) {
+	s := newAttachSource(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(401) })
+	var e *InvalidClientKey
+	if _, err := s.Credentials(context.Background(), CredentialsRequest{ComputerID: "c", PodUID: "p", CoordBootID: "b", SandboxID: "s"}); !errors.As(err, &e) {
+		t.Fatalf("err = %T (%v), want *InvalidClientKey", err, err)
+	} else if e.Status != 401 {
+		t.Errorf("status = %d, want 401", e.Status)
+	}
+}
+
+func TestCredentials_403ProjectAccessDenied(t *testing.T) {
+	s := newAttachSource(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(403) })
+	var e *ProjectAccessDenied
+	if _, err := s.Credentials(context.Background(), CredentialsRequest{ComputerID: "c", PodUID: "p", CoordBootID: "b", SandboxID: "s"}); !errors.As(err, &e) {
+		t.Fatalf("err = %T (%v), want *ProjectAccessDenied", err, err)
+	} else if e.Status != 403 {
+		t.Errorf("status = %d, want 403", e.Status)
+	}
+}
+
 func TestCredentials_GenericByStatus(t *testing.T) {
-	for _, status := range []int{401, 403, 429, 500} {
+	for _, status := range []int{429, 500} {
 		s := newAttachSource(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(status) })
 		var e *AttachCredentialsError
 		if _, err := s.Credentials(context.Background(), CredentialsRequest{ComputerID: "c", PodUID: "p", CoordBootID: "b", SandboxID: "s"}); !errors.As(err, &e) {
@@ -136,59 +156,6 @@ func TestCredentials_GenericByStatus(t *testing.T) {
 		} else if e.Status != status {
 			t.Errorf("status = %d, want %d", e.Status, status)
 		}
-	}
-}
-
-func TestGrantRefresh(t *testing.T) {
-	var gotPath string
-	s := newAttachSource(t, func(w http.ResponseWriter, r *http.Request) {
-		gotPath = r.URL.Path
-		fmt.Fprint(w, `{"broker_grant":"bg_2","refresh_token":"rt_2"}`)
-	})
-	gr, err := s.GrantRefresh(context.Background(), GrantRefreshRequest{ComputerID: "c1", PodUID: "p", CoordBootID: "b"})
-	if err != nil {
-		t.Fatalf("GrantRefresh: %v", err)
-	}
-	if gr.BrokerGrant != "bg_2" || gr.RefreshToken != "rt_2" {
-		t.Errorf("gr = %+v", gr)
-	}
-	if gotPath != "/v1/computers/c1/grant-refresh" {
-		t.Errorf("path = %q", gotPath)
-	}
-}
-
-func TestGrantRefresh_404Unknown(t *testing.T) {
-	s := newAttachSource(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(404) })
-	var e *UnknownComputerError
-	if _, err := s.GrantRefresh(context.Background(), GrantRefreshRequest{ComputerID: "c", PodUID: "p", CoordBootID: "b"}); !errors.As(err, &e) {
-		t.Fatalf("err = %T (%v), want *UnknownComputerError", err, err)
-	}
-}
-
-func TestGrantRefresh_MissingFields(t *testing.T) {
-	s := newAttachSource(t, func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, `{"broker_grant":"bg"}`) // missing refresh_token
-	})
-	var e *AttachCredentialsError
-	if _, err := s.GrantRefresh(context.Background(), GrantRefreshRequest{ComputerID: "c", PodUID: "p", CoordBootID: "b"}); !errors.As(err, &e) {
-		t.Fatalf("err = %T (%v), want *AttachCredentialsError", err, err)
-	}
-}
-
-func TestGrantRefresh_GenericByStatus(t *testing.T) {
-	for _, status := range []int{401, 403, 500} {
-		s := newAttachSource(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(status) })
-		var e *AttachCredentialsError
-		if _, err := s.GrantRefresh(context.Background(), GrantRefreshRequest{ComputerID: "c", PodUID: "p", CoordBootID: "b"}); !errors.As(err, &e) {
-			t.Errorf("status %d → %T, want *AttachCredentialsError", status, err)
-		}
-	}
-}
-
-func TestGrantRefresh_MissingArgs(t *testing.T) {
-	s := newAttachSource(t, func(w http.ResponseWriter, r *http.Request) { t.Error("server should not be hit") })
-	if _, err := s.GrantRefresh(context.Background(), GrantRefreshRequest{ComputerID: "c"}); err == nil {
-		t.Error("expected an error for missing pod_uid/coord_boot_id")
 	}
 }
 

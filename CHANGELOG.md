@@ -7,6 +7,20 @@ package `pinesandbox`) are documented here. The format follows
 `0.<POOL_VERSION>.<patch>`. So `require go.pinesandbox.io/computer v0.3.x`
 targets `pine-cua-pool-v3` (the compatibility contract integrators pin to).
 
+## [0.3.7] — 2026-07-07
+
+### Removed
+- Removed `Computer.RefreshBrokerGrant` and the attach-provider `GrantRefresh`
+  mint. Broker-grant refresh is now only the platform lease refresher;
+  integrations do not run a timer or call a refresh API.
+
+### Changed
+- Attach-credential mints now type authz failures precisely: invalid `pk_`
+  returns `*InvalidClientKey` (401), while disabled/revoked/insufficient project
+  access returns `*ProjectAccessDenied` (403).
+- `ControlTokenSource` derives cache freshness from the minted token's own
+  `exp` claim when present, using response expiry metadata only as fallback.
+
 ## [0.3.6] — 2026-07-06
 
 ### Added

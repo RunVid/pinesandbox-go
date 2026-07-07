@@ -63,11 +63,3 @@ func (c *Client) DiscardOrphanDownload(ctx context.Context, token, guid string) 
 	_, err := c.do(ctx, "DELETE", "/downloads/orphans/"+url.PathEscape(guid), token, nil)
 	return err
 }
-
-// GrantRefresh swaps the pod's in-RAM broker grant (ct_-gated; the signed refresh_token is
-// the real authority). Returns the raw {expires_at}.
-func (c *Client) GrantRefresh(ctx context.Context, token, podUID, coordBootID, brokerGrant, refreshToken string) (json.RawMessage, error) {
-	return c.postJSON(ctx, "/v1/coord/grant", token, map[string]any{
-		"pod_uid": podUID, "coord_boot_id": coordBootID, "broker_grant": brokerGrant, "refresh_token": refreshToken,
-	})
-}

@@ -25,11 +25,9 @@ var sdkRoutes = []string{
 	"POST /v1/control-token",
 	"POST /v1/computers",
 	"POST /v1/computers/{id}/attach-credentials",
-	"POST /v1/computers/{id}/grant-refresh",
 	// coordinator: bind + admin
 	"GET /v1/coord/bind-pubkey",
 	"POST /v1/coord/bind",
-	"POST /v1/coord/grant",
 	"POST /v1/coord/capture",
 	"GET /health",
 	"GET /metrics",

@@ -2,11 +2,13 @@ package tokens
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
 	"math/rand"
+	"strings"
 	"sync"
 	"time"
 
@@ -27,8 +29,11 @@ const (
 
 // ControlTokenSource mints and caches a project JWS from a pk_ client key. It is
 // goroutine-safe with single-flight refresh: concurrent callers serialize on the mint and
-// reuse its result. 429/5xx are retried with bounded jittered backoff; 401/403 are
-// terminal. The pk_ and the minted JWS never appear in the String() form.
+// reuse its result. Freshness is derived from the JWS exp claim when present, with the
+// portal response expiry as a compatibility fallback; callers must not depend on sidecar
+// in-memory expiry state being authoritative. 429/5xx are retried with bounded jittered
+// backoff; 401/403 are terminal. The pk_ and the minted JWS never appear in the String()
+// form.
 type ControlTokenSource struct {
 	client *transport.Client
 	apiKey string // pk_
@@ -110,7 +115,11 @@ func (s *ControlTokenSource) Token(ctx context.Context, forceRefresh bool) (stri
 }
 
 func (s *ControlTokenSource) fresh(now time.Time) bool {
-	return !s.expiresAt.IsZero() && now.Before(s.expiresAt.Add(-s.skew))
+	exp := s.expiresAt
+	if tokenExp, ok := controlTokenExpiry(s.token); ok {
+		exp = tokenExp
+	}
+	return !exp.IsZero() && now.Before(exp.Add(-s.skew))
 }
 
 // mint runs the bounded retry loop. Caller holds s.mu.
@@ -194,6 +203,9 @@ func (s *ControlTokenSource) applySuccess(resp *transport.Response) (string, err
 }
 
 func (s *ControlTokenSource) computeExpiry(body mintResponse) (time.Time, error) {
+	if exp, ok := controlTokenExpiry(body.Token); ok {
+		return exp, nil
+	}
 	switch {
 	case body.ExpiresIn != nil:
 		return s.clock().Add(time.Duration(*body.ExpiresIn) * time.Second), nil
@@ -206,6 +218,28 @@ func (s *ControlTokenSource) computeExpiry(body mintResponse) (time.Time, error)
 	default:
 		return time.Time{}, &ControlTokenError{s.malformedBase("mint response missing expiry (expires_in / expires_at)", nil)}
 	}
+}
+
+func controlTokenExpiry(token string) (time.Time, bool) {
+	parts := strings.Split(token, ".")
+	if len(parts) < 2 {
+		return time.Time{}, false
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return time.Time{}, false
+	}
+	var claims struct {
+		Exp json.Number `json:"exp"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil || claims.Exp == "" {
+		return time.Time{}, false
+	}
+	sec, err := claims.Exp.Int64()
+	if err != nil || sec <= 0 {
+		return time.Time{}, false
+	}
+	return time.Unix(sec, 0), true
 }
 
 // backoff is bounded jittered exponential: 0.2·2^(attempt-1) seconds + up to 100ms jitter,

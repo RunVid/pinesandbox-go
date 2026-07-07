@@ -74,6 +74,7 @@ type (
 	ControlTokenError         = tokens.ControlTokenError
 	InvalidClientKey          = tokens.InvalidClientKey
 	InsufficientScope         = tokens.InsufficientScope
+	ProjectAccessDenied       = tokens.ProjectAccessDenied
 	RateLimited               = tokens.RateLimited
 	AttachCredentialsError    = tokens.AttachCredentialsError
 	ComputerRegistrationError = tokens.ComputerRegistrationError

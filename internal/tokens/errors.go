@@ -72,6 +72,15 @@ func (e *InsufficientScope) Error() string {
 	return tokErr("insufficient client-key scope", e.tokenBase)
 }
 
+// ProjectAccessDenied: the pk_ was accepted but the project/computer is not allowed to
+// mint attach credentials or broker grants (403) — disabled project, missing scope, or
+// disallowed computer status.
+type ProjectAccessDenied struct{ tokenBase }
+
+func (e *ProjectAccessDenied) Error() string {
+	return tokErr("project access denied", e.tokenBase)
+}
+
 // RateLimited: the portal rate-limited the mint (429) and retries were exhausted.
 type RateLimited struct{ tokenBase }
 

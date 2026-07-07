@@ -39,12 +39,6 @@ type AttachCredentials struct {
 	BrokerGrant string
 }
 
-// GrantRefresh is the §6.4 mid-life grant-refresh result.
-type GrantRefresh struct {
-	BrokerGrant  string
-	RefreshToken string
-}
-
 // CredentialsRequest are the coordinates for a per-attach mint.
 type CredentialsRequest struct {
 	ComputerID  string
@@ -53,14 +47,6 @@ type CredentialsRequest struct {
 	SandboxID   string
 	Profile     string // optional
 	TTLSeconds  *int   // optional sizing hint
-}
-
-// GrantRefreshRequest are the coordinates for a grant refresh.
-type GrantRefreshRequest struct {
-	ComputerID  string
-	PodUID      string
-	CoordBootID string
-	TTLSeconds  *int // optional
 }
 
 // RegisterComputer registers computer_id into the portal ownership registry (idempotent
@@ -121,39 +107,6 @@ func (s *AttachCredentialsSource) Credentials(ctx context.Context, req Credentia
 	return &AttachCredentials{BindToken: out.BindToken, BrokerGrant: out.BrokerGrant}, nil
 }
 
-// GrantRefresh mints a fresh {broker_grant, refresh_token} for the §6.4 mid-life refresh.
-func (s *AttachCredentialsSource) GrantRefresh(ctx context.Context, req GrantRefreshRequest) (*GrantRefresh, error) {
-	if req.ComputerID == "" || req.PodUID == "" || req.CoordBootID == "" {
-		return nil, fmt.Errorf("pinesandbox: computer_id, pod_uid, coord_boot_id all required")
-	}
-	body := map[string]any{"pod_uid": req.PodUID, "coord_boot_id": req.CoordBootID}
-	if req.TTLSeconds != nil {
-		body["ttl_seconds"] = *req.TTLSeconds
-	}
-	path := registerPath + "/" + req.ComputerID + "/grant-refresh"
-	resp, err := s.post(ctx, path, body)
-	if err != nil {
-		if ae, ok := asAPIError(err); ok {
-			if ae.Status == 404 {
-				return nil, &UnknownComputerError{tokenBaseFrom(fmt.Sprintf("unknown, deleted, or cross-project computer_id %s", req.ComputerID), ae)}
-			}
-			return nil, s.generic(ae, "grant-refresh mint")
-		}
-		return nil, err
-	}
-	var out struct {
-		BrokerGrant  string `json:"broker_grant"`
-		RefreshToken string `json:"refresh_token"`
-	}
-	if err := json.Unmarshal(resp.Body, &out); err != nil {
-		return nil, &AttachCredentialsError{s.malformedBase("grant-refresh response was not valid JSON", path, err)}
-	}
-	if out.BrokerGrant == "" || out.RefreshToken == "" {
-		return nil, &AttachCredentialsError{s.malformedBase("grant-refresh response missing broker_grant/refresh_token", path, nil)}
-	}
-	return &GrantRefresh{BrokerGrant: out.BrokerGrant, RefreshToken: out.RefreshToken}, nil
-}
-
 // String is redacted: it never reveals the pk_.
 func (s *AttachCredentialsSource) String() string {
 	return "AttachCredentialsSource{pk_ redacted}"
@@ -181,9 +134,9 @@ func (s *AttachCredentialsSource) generic(ae *problem.APIError, op string) error
 	var msg string
 	switch ae.Status {
 	case 401:
-		msg = "invalid or unknown project client key"
+		return &InvalidClientKey{tokenBaseFrom("invalid or unknown project client key", ae)}
 	case 403:
-		msg = "this key may not mint attach credentials (scope or computer status)"
+		return &ProjectAccessDenied{tokenBaseFrom("project or key may not mint attach credentials (scope, project status, or computer status)", ae)}
 	case 429:
 		msg = "portal rate-limited the " + op
 	default:
