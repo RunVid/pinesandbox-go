@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/url"
 	"path"
 	"time"
@@ -166,6 +167,19 @@ func (c *Client) ReadArtifact(ctx context.Context, token, name, id string) ([]by
 		return nil, err
 	}
 	return resp.Body, nil
+}
+
+// OpenArtifact opens a streaming read of an artifact's bytes — ReadArtifact without
+// buffering the whole file. The open retries transient faults under the same budget
+// as the buffered read (pre-headers only; the returned stream is caller-owned). On
+// success the caller owns the reader and MUST Close it.
+func (c *Client) OpenArtifact(ctx context.Context, token, name, id string) (io.ReadCloser, error) {
+	route := "/v1/sessions/" + url.PathEscape(name) + "/artifacts/" + url.PathEscape(id)
+	sr, err := c.openStream(ctx, "GET", route, token, "application/octet-stream", true, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	return sr.Body, nil
 }
 
 // ZipArtifacts returns a zip of the session's artifacts (optionally turn-scoped).

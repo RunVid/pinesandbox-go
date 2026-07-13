@@ -16,7 +16,7 @@ import (
 // wrapper (ignoring response-parse errors — only the sent token matters) and check
 // each against its expected token class:
 //   - Computer-level ops + agent MUTATIONS + the control lease (state/patch/events/
-//     handoffs) + the skills-authoring lifecycle (learn/teach/author/cancel + its
+//     handoffs) + the skills-authoring lifecycle (learn/teach/refine/author/cancel + its
 //     event stream) + desktop-token mint → the Computer's ct_ (the operator surface)
 //   - session-scoped reads + drive + files/artifacts/tabs + control/notify → ps_
 //   - health/metrics → token-less
@@ -72,6 +72,9 @@ func TestFacade_TokenRouting_Comprehensive(t *testing.T) {
 	_, _ = sess.WriteFile(ctx, "f", []byte("b"))
 	_, _ = sess.ListArtifacts(ctx, "")
 	_, _ = sess.ReadArtifact(ctx, "a1")
+	if rc, err := sess.OpenArtifact(ctx, "a1"); err == nil {
+		_ = rc.Close()
+	}
 	_, _ = sess.ZipArtifacts(ctx, "")
 	_, _ = sess.UploadArtifact(ctx, "o", []byte("b"))
 	_, _ = sess.ListTabs(ctx)
@@ -92,6 +95,7 @@ func TestFacade_TokenRouting_Comprehensive(t *testing.T) {
 	_ = sess.RecreateTerminal(ctx)
 	_, _ = sess.Learn(ctx, "")
 	_, _ = sess.Teach(ctx, "g", TeachOptions{})
+	_, _ = sess.Refine(ctx, "sk", 1, "tighten")
 	_, _ = sess.AuthorSkill(ctx, "sk", "md", "why", AuthorSkillOptions{})
 	_, _ = sess.AuthorEvents(ctx, "au1", "", noBytes)
 	_, _ = sess.CancelAuthor(ctx, "au1")
@@ -158,6 +162,7 @@ func TestFacade_TokenRouting_Comprehensive(t *testing.T) {
 		"POST /sessions/s1/terminal/recreate":           ps,
 		"POST /v1/sessions/s1/learn":                    ct,
 		"POST /v1/sessions/s1/teach":                    ct,
+		"POST /v1/sessions/s1/refine":                   ct,
 		"POST /v1/sessions/s1/skills":                   ct,
 		"GET /v1/sessions/s1/skills/author/au1/events":  ct,
 		"POST /v1/sessions/s1/skills/author/au1/cancel": ct,

@@ -91,6 +91,7 @@ var sdkRoutes = []string{
 	"DELETE /v1/skills/{name}/versions/{version}",
 	"POST /v1/sessions/{name}/learn",
 	"POST /v1/sessions/{name}/teach",
+	"POST /v1/sessions/{name}/refine",
 	"POST /v1/sessions/{name}/skills",
 	"GET /v1/sessions/{name}/skills/author/{author_id}/events",
 	"POST /v1/sessions/{name}/skills/author/{author_id}/cancel",

@@ -76,7 +76,7 @@ func TestSkills_ServedAndVersions(t *testing.T) {
 }
 
 func TestSkills_Authoring(t *testing.T) {
-	var teachBody, authorBody map[string]any
+	var teachBody, refineBody, authorBody map[string]any
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/sessions/s/learn":
@@ -84,6 +84,9 @@ func TestSkills_Authoring(t *testing.T) {
 		case "/v1/sessions/s/teach":
 			_ = json.NewDecoder(r.Body).Decode(&teachBody)
 			_, _ = io.WriteString(w, `{"author_id":"au2"}`)
+		case "/v1/sessions/s/refine":
+			_ = json.NewDecoder(r.Body).Decode(&refineBody)
+			_, _ = io.WriteString(w, `{"author_id":"au3"}`)
 		case "/v1/sessions/s/skills":
 			_ = json.NewDecoder(r.Body).Decode(&authorBody)
 			_, _ = io.WriteString(w, `{"draft":"d1"}`)
@@ -104,6 +107,12 @@ func TestSkills_Authoring(t *testing.T) {
 	}
 	if teachBody["goal"] != "book a flight" || teachBody["handoff_id"] != "h1" {
 		t.Errorf("teach body = %v", teachBody)
+	}
+	if _, err := c.RefineSkill(ctx, "ps_", "s", "book-flight", 2, "add the empty-results gotcha"); err != nil {
+		t.Fatalf("RefineSkill: %v", err)
+	}
+	if refineBody["name"] != "book-flight" || refineBody["version"] != float64(2) || refineBody["guidance"] != "add the empty-results gotcha" {
+		t.Errorf("refine body = %v", refineBody)
 	}
 	if _, err := c.AuthorSkillDraft(ctx, "ps_", "s", "book-flight", "# SKILL", "manual", AuthorSkillOptions{Origin: "byoa", Tainted: &tainted}); err != nil {
 		t.Fatalf("AuthorSkillDraft: %v", err)

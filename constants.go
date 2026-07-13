@@ -42,7 +42,7 @@ const (
 	TerminalExecutorPanic          = "executor_panic"
 	TerminalCoordinatorRestarted   = "coordinator_restarted"
 	TerminalOutputInvalid          = "output_invalid"
-	TerminalDraftRegistered        = "draft_registered"        // learn/teach authoring
+	TerminalDraftRegistered        = "draft_registered"        // learn/teach/refine authoring
 	TerminalClarificationRequested = "clarification_requested" // learn/teach authoring
 	TerminalNotReusable            = "not_reusable"
 	TerminalRegistrationFailed     = "registration_failed"

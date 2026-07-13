@@ -22,9 +22,11 @@ import (
 	"go.pinesandbox.io/computer/internal/base/problem"
 )
 
-// defaultTimeout matches the Ruby reference's unary HTTP timeout. Streaming uses a
-// separate client with NO total timeout (an SSE stream is long-lived; cancel it via the
-// context).
+// defaultTimeout is the FALLBACK deadline for a unary call whose caller passed no context
+// deadline of its own. It is not a hard cap: a caller (or a flow like attach, which bounds
+// provisioning by the readiness budget) that sets its own context deadline gets THAT budget
+// honored — a longer one is no longer clipped to 30s. Streaming uses a separate client with
+// no total timeout (an SSE stream is long-lived; cancel it via the context).
 const defaultTimeout = 30 * time.Second
 
 // streamHeaderTimeout floors how long the streaming client waits for the response HEADERS.
@@ -40,19 +42,26 @@ const defaultMaxAttempts = 3
 
 // Client issues unary requests against scheme://host.
 type Client struct {
-	base        string
-	hc          *http.Client
-	streamHC    *http.Client
-	maxAttempts int
-	backoff     func(attempt int) time.Duration
+	base         string
+	hc           *http.Client
+	streamHC     *http.Client
+	unaryTimeout time.Duration // fallback deadline applied only when the caller set none
+	maxAttempts  int
+	backoff      func(attempt int) time.Duration
 }
 
 // Option configures a Client.
 type Option func(*Client)
 
-// WithHTTPClient injects a custom *http.Client (timeouts, transport, test doubles). The
-// streaming client reuses its Transport but drops the total timeout.
+// WithHTTPClient injects a custom *http.Client (transport, test doubles). The streaming
+// client reuses its Transport but drops the total timeout. Prefer a context deadline over
+// the client's own Timeout for per-call bounds — a client-level Timeout hard-caps every call.
 func WithHTTPClient(hc *http.Client) Option { return func(c *Client) { c.hc = hc } }
+
+// WithUnaryTimeout overrides the fallback deadline applied to a unary call whose caller
+// passed no context deadline. A caller's own deadline is always honored regardless; d <= 0
+// disables the fallback (unbounded unless the caller sets a deadline).
+func WithUnaryTimeout(d time.Duration) Option { return func(c *Client) { c.unaryTimeout = d } }
 
 // WithRetry overrides the transient-retry budget + backoff (tests inject a zero backoff so
 // they don't actually sleep). attempts < 1 disables retry.
@@ -74,10 +83,14 @@ func defaultBackoff(attempt int) time.Duration {
 // New builds a Client for scheme://host (host may include a local-dev port).
 func New(scheme, host string, opts ...Option) *Client {
 	c := &Client{
-		base:        scheme + "://" + host,
-		hc:          &http.Client{Timeout: defaultTimeout},
-		maxAttempts: defaultMaxAttempts,
-		backoff:     defaultBackoff,
+		base: scheme + "://" + host,
+		// No hard client Timeout: the per-call bound is a context deadline (the caller's, or
+		// the unaryTimeout fallback applied in doOnce), so a caller can extend a slow call
+		// (e.g. cold provisioning) past 30s instead of being clipped to it.
+		hc:           &http.Client{},
+		unaryTimeout: defaultTimeout,
+		maxAttempts:  defaultMaxAttempts,
+		backoff:      defaultBackoff,
 	}
 	for _, o := range opts {
 		o(c)
@@ -169,6 +182,13 @@ func (c *Client) DoRaw(ctx context.Context, method, path string, r Request) (*Re
 
 // doOnce is a single send: build, execute, read the full body, normalize a fault.
 func (c *Client) doOnce(ctx context.Context, method, path string, r Request) (*Response, error) {
+	// Bound this attempt by the caller's context deadline when it set one; otherwise fall
+	// back to unaryTimeout. Body is fully read before return, so the cancel is safe to defer.
+	if _, ok := ctx.Deadline(); !ok && c.unaryTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, c.unaryTimeout)
+		defer cancel()
+	}
 	req, err := c.newRequest(ctx, method, path, r)
 	if err != nil {
 		return nil, err
@@ -252,6 +272,30 @@ func (c *Client) Stream(ctx context.Context, method, path string, r Request) (*S
 		return nil, normalizeFault(c.Host(), method, path, err)
 	}
 	return &StreamResponse{Status: resp.StatusCode, Body: resp.Body, Headers: resp.Header}, nil
+}
+
+// StreamWithRetry is Stream with DoRaw's transient-retry budget applied to the OPEN:
+// a pre-headers fault means nothing was delivered, so a replay is as safe as a unary
+// retry. Once headers return, the live Body is caller-owned — a mid-stream fault is
+// never retried here. The SSE feeds deliberately keep the single-shot Stream: their
+// iterators own a cursor-resumed reconnect budget, and stacking this loop underneath
+// would compound the two budgets.
+func (c *Client) StreamWithRetry(ctx context.Context, method, path string, r Request) (*StreamResponse, error) {
+	attempts := 1
+	if c.maxAttempts > 1 && (idempotentMethod(method) || r.RetryOnTransient) {
+		attempts = c.maxAttempts
+	}
+	for attempt := 1; ; attempt++ {
+		sr, err := c.Stream(ctx, method, path, r)
+		if err == nil || !isTransientFault(err) || attempt >= attempts {
+			return sr, err
+		}
+		select {
+		case <-time.After(c.backoff(attempt)):
+		case <-ctx.Done():
+			return nil, err
+		}
+	}
 }
 
 // Do executes method+path. On 2xx returns *Response. On non-2xx returns a typed

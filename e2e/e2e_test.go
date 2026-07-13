@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"regexp"
 	"strconv"
@@ -248,6 +249,18 @@ func TestE2E_J3_Files(t *testing.T) {
 	}
 	if string(back) != "artifact-bytes" {
 		t.Errorf("ReadArtifact = %q, want artifact-bytes", back)
+	}
+	// The streaming read must yield the same bytes as the buffered read.
+	rc, err := sess.OpenArtifact(ctx, art.ID)
+	if err != nil {
+		t.Fatalf("OpenArtifact: %v", err)
+	}
+	streamed, rerr := io.ReadAll(rc)
+	if cerr := rc.Close(); cerr != nil {
+		t.Errorf("OpenArtifact Close: %v", cerr)
+	}
+	if rerr != nil || string(streamed) != "artifact-bytes" {
+		t.Errorf("OpenArtifact stream = %q, %v; want artifact-bytes", streamed, rerr)
 	}
 
 	_, _ = comp.Stop(ctx)

@@ -7,6 +7,30 @@ package `pinesandbox`) are documented here. The format follows
 `0.<POOL_VERSION>.<patch>`. So `require go.pinesandbox.io/computer v0.3.x`
 targets `pine-cua-pool-v3` (the compatibility contract integrators pin to).
 
+## [0.3.8] — 2026-07-13
+
+### Added
+- `Session.Refine(ctx, skill, version, guidance)` starts an asynchronous author
+  turn that revises an existing immutable skill version. It uses the Computer's
+  `ct_` and returns the raw 202 body; consume progress and the terminal draft
+  through `Session.AuthorEvents` like Learn and Teach.
+- **`Session.OpenArtifact`** — a streaming artifact read (`io.ReadCloser`):
+  `ReadArtifact` without buffering the whole file, for consumers that copy
+  artifacts onward (object storage, an HTTP response) and should hold O(1)
+  memory rather than up to the platform's 100 MiB per-artifact cap. The open
+  retries transient faults under the same budget as the buffered read
+  (pre-headers only — the returned stream is caller-owned). The caller must
+  `Close` the returned reader.
+
+### Fixed
+- Cold `CreateComputer` / `AttachComputer` no longer die on a fixed 30s transport
+  timeout. The unary timeout is now a FALLBACK applied only when the caller passes
+  no `context` deadline, so a caller's deadline is honored instead of clipped to
+  30s; and attach bounds the whole provision (`POST /sandboxes` + readiness poll)
+  by `AttachOptions.Timeout` (the readiness budget, default 300s). Pass a longer
+  `AttachOptions.Timeout`, or a longer `context` deadline, for an unusually cold
+  pool — other calls keep the 30s default.
+
 ## [0.3.7] — 2026-07-07
 
 ### Removed

@@ -91,6 +91,13 @@ func (c *Client) TeachSkill(ctx context.Context, token, name, goal string, opts 
 	return c.postJSON(ctx, "/v1/sessions/"+url.PathEscape(name)+"/teach", token, body)
 }
 
+// RefineSkill revises an existing immutable skill version with operator guidance
+// (raw 202 body; progress and the terminal outcome arrive through AuthorEvents).
+func (c *Client) RefineSkill(ctx context.Context, token, name, skill string, version int, guidance string) (json.RawMessage, error) {
+	body := map[string]any{"name": skill, "version": version, "guidance": guidance}
+	return c.postJSON(ctx, "/v1/sessions/"+url.PathEscape(name)+"/refine", token, body)
+}
+
 // AuthorSkillOptions are the optional fields for AuthorSkillDraft.
 type AuthorSkillOptions struct {
 	Origin  string

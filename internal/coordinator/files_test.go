@@ -184,3 +184,84 @@ func TestArtifactFilename_ParsedAndDerived(t *testing.T) {
 		t.Errorf("derived Filename = %q, want report.csv (basename of relative_path)", derived.Filename)
 	}
 }
+
+// TestOpenArtifact_StreamsBytesAndMapsErrors: the streaming artifact read returns the live
+// body (octet-stream Accept; the caller closes it) and maps a non-2xx exactly like the
+// buffered read — a typed *problem.APIError with the query-less Op — closing the body on
+// that path so a reject can't leak the connection.
+func TestOpenArtifact_StreamsBytesAndMapsErrors(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "GET" {
+			t.Errorf("method = %s", r.Method)
+		}
+		switch r.URL.Path {
+		case "/v1/sessions/s/artifacts/a1":
+			if r.Header.Get("Accept") != "application/octet-stream" {
+				t.Errorf("Accept = %q", r.Header.Get("Accept"))
+			}
+			_, _ = w.Write([]byte("streamed-artifact-bytes"))
+		case "/v1/sessions/s/artifacts/missing":
+			w.Header().Set("Content-Type", "application/problem+json")
+			w.WriteHeader(404)
+			_, _ = io.WriteString(w, `{"type":"/errors/artifact-not-found","status":404,"detail":"no such artifact"}`)
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	})
+
+	rc, err := c.OpenArtifact(context.Background(), "ps_", "s", "a1")
+	if err != nil {
+		t.Fatalf("OpenArtifact: %v", err)
+	}
+	b, rerr := io.ReadAll(rc)
+	if cerr := rc.Close(); cerr != nil {
+		t.Errorf("Close: %v", cerr)
+	}
+	if rerr != nil || string(b) != "streamed-artifact-bytes" {
+		t.Fatalf("stream = %q, %v", b, rerr)
+	}
+
+	_, err = c.OpenArtifact(context.Background(), "ps_", "s", "missing")
+	var ae *problem.APIError
+	if !errors.As(err, &ae) {
+		t.Fatalf("err = %T (%v), want *problem.APIError", err, err)
+	}
+	if ae.Status != 404 {
+		t.Errorf("Status = %d, want 404", ae.Status)
+	}
+	if ae.Op != "GET /v1/sessions/s/artifacts/missing" {
+		t.Errorf("Op = %q", ae.Op)
+	}
+}
+
+// TestOpenArtifact_RetriesTransientOpenFault: the streaming read's OPEN rides the same
+// transient-retry budget as the buffered ReadArtifact (Codex review, PR #170) — a
+// gateway/TCP blip before response headers must not surface to the caller. The first
+// request is killed pre-headers (hijack + close → EOF); the retry must land the bytes.
+func TestOpenArtifact_RetriesTransientOpenFault(t *testing.T) {
+	var n int
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		n++
+		if n == 1 {
+			conn, _, err := w.(http.Hijacker).Hijack()
+			if err != nil {
+				t.Fatalf("hijack: %v", err)
+			}
+			_ = conn.Close() // pre-headers connection fault
+			return
+		}
+		_, _ = w.Write([]byte("retried-bytes"))
+	})
+	rc, err := c.OpenArtifact(context.Background(), "ps_", "s", "a1")
+	if err != nil {
+		t.Fatalf("OpenArtifact should absorb a pre-headers fault: %v", err)
+	}
+	b, rerr := io.ReadAll(rc)
+	_ = rc.Close()
+	if rerr != nil || string(b) != "retried-bytes" {
+		t.Fatalf("stream = %q, %v", b, rerr)
+	}
+	if n != 2 {
+		t.Errorf("requests = %d, want 2 (1 fault + 1 retry)", n)
+	}
+}

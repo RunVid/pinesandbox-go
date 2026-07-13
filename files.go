@@ -3,6 +3,7 @@ package pinesandbox
 import (
 	"context"
 	"encoding/json"
+	"io"
 
 	"go.pinesandbox.io/computer/internal/coordinator"
 )
@@ -39,6 +40,14 @@ func (s *Session) ListArtifacts(ctx context.Context, turnID string) ([]*Artifact
 // ReadArtifact returns an artifact's raw bytes (ps_).
 func (s *Session) ReadArtifact(ctx context.Context, id string) ([]byte, error) {
 	return s.coord.ReadArtifact(ctx, s.token, s.name, id)
+}
+
+// OpenArtifact opens a streaming read of an artifact's bytes (ps_) — ReadArtifact
+// without buffering the whole file, for consumers that copy artifacts onward
+// (object storage, an HTTP response) and should hold O(1) memory rather than the
+// platform's full per-artifact cap. The caller MUST Close the returned reader.
+func (s *Session) OpenArtifact(ctx context.Context, id string) (io.ReadCloser, error) {
+	return s.coord.OpenArtifact(ctx, s.token, s.name, id)
 }
 
 // ZipArtifacts returns a zip of the session's artifacts, optionally turn-scoped (ps_).

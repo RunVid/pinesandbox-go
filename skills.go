@@ -110,6 +110,12 @@ func (s *Session) Teach(ctx context.Context, goal string, opts TeachOptions) (js
 	return s.coord.TeachSkill(ctx, s.computerToken(), s.name, goal, opts)
 }
 
+// Refine revises an existing immutable skill version with operator guidance
+// (raw 202 body — drive AuthorEvents for progress and the resulting draft).
+func (s *Session) Refine(ctx context.Context, skill string, version int, guidance string) (json.RawMessage, error) {
+	return s.coord.RefineSkill(ctx, s.computerToken(), s.name, skill, version, guidance)
+}
+
 // AuthorSkill registers a BYOA-authored SKILL.md draft directly (raw).
 func (s *Session) AuthorSkill(ctx context.Context, skillName, skillMD, reason string, opts AuthorSkillOptions) (json.RawMessage, error) {
 	return s.coord.AuthorSkillDraft(ctx, s.computerToken(), s.name, skillName, skillMD, reason, opts)

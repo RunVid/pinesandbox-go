@@ -241,22 +241,32 @@ func (c *Client) baseHeaders(extra map[string]string) map[string]string {
 	return h
 }
 
-// sseErrorBodyCap bounds how much of a non-2xx SSE response (a problem+json body, not a
-// stream) we read before surfacing the typed error.
-const sseErrorBodyCap = 64 << 10
+// streamErrorBodyCap bounds how much of a non-2xx streaming response (a problem+json
+// body, not a stream) we read before surfacing the typed error.
+const streamErrorBodyCap = 64 << 10
 
-// openSSE opens a streaming request, validates the spec-version, and maps a non-2xx (a
-// problem+json body, not a stream) to a typed error — the shared open path for the agent /
-// author / control event feeds and exec. On success the caller owns the frame loop and MUST
-// Close the returned Body; on every error path openSSE closes it.
-func (c *Client) openSSE(ctx context.Context, method, path, token string, body []byte, extra map[string]string) (*transport.StreamResponse, error) {
+// openStream opens a streaming request with the caller's Accept, validates the
+// spec-version, and maps a non-2xx (a problem+json body, not a stream) to a typed
+// error — the single open path for the SSE feeds and binary streams (artifact reads).
+// On success the caller owns the frame/byte loop and MUST Close the returned Body;
+// on every error path openStream closes it.
+//
+// retryTransient opts the OPEN into the transport's transient-retry budget (parity
+// with the buffered reads, which get it via DoRaw). The SSE feeds pass false: their
+// iterators own a cursor-resumed reconnect budget, and retrying under them would
+// compound the two.
+func (c *Client) openStream(ctx context.Context, method, path, token, accept string, retryTransient bool, body []byte, extra map[string]string) (*transport.StreamResponse, error) {
 	contentType := ""
 	if body != nil {
 		contentType = "application/json"
 	}
-	sr, err := c.raw.Stream(ctx, method, path, transport.Request{
+	open := c.raw.Stream
+	if retryTransient {
+		open = c.raw.StreamWithRetry
+	}
+	sr, err := open(ctx, method, path, transport.Request{
 		Token:       token,
-		Accept:      "text/event-stream",
+		Accept:      accept,
 		ContentType: contentType,
 		Body:        body,
 		Headers:     c.baseHeaders(extra),
@@ -269,11 +279,17 @@ func (c *Client) openSSE(ctx context.Context, method, path, token string, body [
 		return nil, err
 	}
 	if sr.Status < 200 || sr.Status >= 300 {
-		b, _ := io.ReadAll(io.LimitReader(sr.Body, sseErrorBodyCap))
+		b, _ := io.ReadAll(io.LimitReader(sr.Body, streamErrorBodyCap))
 		sr.Body.Close()
 		return nil, c.respError(sr.Status, b, sr.Headers.Get("X-Request-Id"), token, transport.Operation(method, path))
 	}
 	return sr, nil
+}
+
+// openSSE is openStream for the text/event-stream feeds (agent / author / control
+// events and exec). Single-shot open — the feed iterators own the reconnect budget.
+func (c *Client) openSSE(ctx context.Context, method, path, token string, body []byte, extra map[string]string) (*transport.StreamResponse, error) {
+	return c.openStream(ctx, method, path, token, "text/event-stream", false, body, extra)
 }
 
 // respError maps a non-2xx coordinator response to a typed error: a 401 on a token'd call is

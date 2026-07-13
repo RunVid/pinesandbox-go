@@ -182,6 +182,11 @@ func (c *Computer) Attach(ctx context.Context, conn *Connection, opts AttachOpti
 	if timeout <= 0 {
 		timeout = defaultAttachTimeout
 	}
+	// Bound the WHOLE attach — the cold provision POST /sandboxes AND the readiness poll —
+	// by the readiness budget, so a cold provision isn't clipped to the transport's 30s
+	// fallback. The caller's own deadline, if shorter, still wins (WithTimeout takes the min).
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 
 	// A stable Idempotency-Key makes the create POST safe to retry on a transient
 	// connection fault (the server dedupes the replay). Auto-fill one per attach when the

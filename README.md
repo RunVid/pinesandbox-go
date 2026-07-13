@@ -80,6 +80,16 @@ func main() {
 }
 ```
 
+## Timeouts
+
+Every call is bounded by the `context` you pass — the SDK applies a 30s fallback
+only when your context has no deadline, so you extend (or shorten) any call with
+`context.WithTimeout`. Provisioning is special-cased: `CreateComputer` /
+`AttachComputer` bound the cold provision (`POST /sandboxes` + the readiness poll)
+by `AttachOptions.Timeout` (the readiness budget, default 300s), so a cold pool
+doesn't trip the 30s fallback. Raise `AttachOptions.Timeout` for an unusually cold
+pool.
+
 ## Stateless reuse (multi-instance / restarted backends)
 
 The handle isn't the source of truth — your **persisted credentials** are. A
@@ -108,6 +118,10 @@ sess.Agent().Run(ctx, goal, pine.RunOptions{})      // agent   → ct_
 Tokens split by tier: **`ct_` is the operator surface** — control lease, agent +
 skills-authoring mutations, lifecycle; **`ps_` is the session's own drive + reads**.
 The SDK attaches the right one per call.
+
+Skill authoring is asynchronous: `Session.Learn`, `Session.Teach`, and
+`Session.Refine` return the accepted author run; consume progress and its terminal
+draft through `Session.AuthorEvents`.
 
 When a token is rejected (the pod was recycled/rebound, or the idle TTL lapsed) the
 SDK surfaces a typed `*pine.RebindRequiredError` — it never silently re-mints (that

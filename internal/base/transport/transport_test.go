@@ -211,6 +211,35 @@ func TestDo_Timeout(t *testing.T) {
 	}
 }
 
+// TestDo_ContextDeadlineOverridesFallback: the unary fallback is a default for
+// deadline-less callers, NOT a hard cap — a caller passing a longer deadline gets it, so a
+// slow call (e.g. cold provisioning) is bounded by the caller's budget, not clipped to 30s.
+func TestDo_ContextDeadlineOverridesFallback(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-time.After(200 * time.Millisecond): // slower than the fallback below
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{}`))
+		case <-r.Context().Done(): // let the client's timeout cancel us promptly
+		}
+	}))
+	defer srv.Close()
+	c := New("http", strings.TrimPrefix(srv.URL, "http://"), WithUnaryTimeout(30*time.Millisecond))
+
+	// A caller's generous 5s deadline is honored past the 30ms fallback → the 200ms call succeeds.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := c.Do(ctx, "GET", "/x", Request{}); err != nil {
+		t.Fatalf("caller's 5s deadline should be honored past the 30ms fallback, got: %T %v", err, err)
+	}
+
+	// A deadline-less caller falls back to 30ms → the 200ms call times out.
+	var te *TimeoutError
+	if _, err := c.Do(context.Background(), "GET", "/x", Request{}); !errors.As(err, &te) {
+		t.Fatalf("deadline-less caller should hit the 30ms fallback → *TimeoutError, got: %T %v", err, err)
+	}
+}
+
 // ---- transient-retry (Phase-C parity) ----
 
 // rtFunc adapts a function to an http.RoundTripper so a test can fail N sends then succeed.
@@ -320,5 +349,51 @@ func TestRetry_StatusErrorNotRetried(t *testing.T) {
 	}
 	if n != 1 {
 		t.Errorf("500 sends = %d, want 1 (a status is not a transport fault)", n)
+	}
+}
+
+// TestRetry_StreamOpenRetries: a streaming GET open retries a pre-headers transient
+// fault under the same budget as a unary GET (parity — a buffered read would have
+// absorbed the blip via DoRaw, so the streaming counterpart must too).
+func TestRetry_StreamOpenRetries(t *testing.T) {
+	var n int
+	c := retryClient(rtFunc(func(r *http.Request) (*http.Response, error) {
+		n++
+		if n == 1 {
+			return nil, io.ErrUnexpectedEOF // → *ConnectionError
+		}
+		return okJSON(r), nil
+	}))
+	sr, err := c.StreamWithRetry(context.Background(), "GET", "/x", Request{})
+	if err != nil || sr.Status != 200 {
+		t.Fatalf("stream open should retry then succeed: %v", err)
+	}
+	b, rerr := io.ReadAll(sr.Body)
+	_ = sr.Body.Close()
+	if rerr != nil || string(b) != `{"ok":true}` {
+		t.Fatalf("body = %q, %v", b, rerr)
+	}
+	if n != 2 {
+		t.Errorf("sends = %d, want 2 (1 fault + 1 retry)", n)
+	}
+}
+
+// TestRetry_PlainStreamStaysSingleShot: Stream must NOT retry — the SSE iterators own
+// a cursor-resumed reconnect budget on top of it, and a retry loop underneath would
+// silently compound the two budgets. Streaming callers without their own reconnect
+// policy opt in via StreamWithRetry.
+func TestRetry_PlainStreamStaysSingleShot(t *testing.T) {
+	var n int
+	c := retryClient(rtFunc(func(*http.Request) (*http.Response, error) {
+		n++
+		return nil, io.ErrUnexpectedEOF
+	}))
+	_, err := c.Stream(context.Background(), "GET", "/x", Request{})
+	var ce *ConnectionError
+	if !errors.As(err, &ce) {
+		t.Fatalf("want *ConnectionError, got %T", err)
+	}
+	if n != 1 {
+		t.Errorf("sends = %d, want 1 (single-shot)", n)
 	}
 }
