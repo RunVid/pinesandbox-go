@@ -1,6 +1,7 @@
 package pinesandbox_test
 
 import (
+	"errors"
 	"testing"
 
 	pinesandbox "go.pinesandbox.io/computer"
@@ -18,5 +19,15 @@ func TestPortalErrorMetadataIsPublic(_ *testing.T) {
 func TestCommittedAttachRecoveryCredentialsArePublic(_ *testing.T) {
 	_ = func(err *pinesandbox.AttachAuthorizationCommittedError) *pinesandbox.Credentials {
 		return err.Credentials
+	}
+}
+
+func TestDataPlaneErrorSemanticsArePublic(_ *testing.T) {
+	_ = func(err error) bool {
+		var gone *pinesandbox.SandboxGoneError
+		return errors.As(err, &gone) ||
+			errors.Is(err, pinesandbox.ErrSessionNotFound) ||
+			errors.Is(err, pinesandbox.ErrControlNotHeld) ||
+			pinesandbox.IsRetryable(err)
 	}
 }

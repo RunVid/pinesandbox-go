@@ -15,10 +15,12 @@
     {
      "status": 503,
      "problem_type": null,
-     "note": "ingress: backend not up. ONLY a plain 404/503 (no problem_type) is a readiness signal \u2014 a problem-typed 404/503 is a real answer"
+     "note": "older gateway: backend not up. Plain 404/503 remain attach-readiness signals for compatibility"
     }
    ],
    "problem_types": [
+    "/errors/sandbox-not-found",
+    "/errors/sandbox-not-ready",
     "/errors/bind-in-progress"
    ],
    "conditional": [

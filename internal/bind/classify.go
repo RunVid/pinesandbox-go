@@ -57,9 +57,13 @@ func Classify(o Outcome) (Class, error) {
 		return ClassTerminal, o.statusFallback()
 	}
 
-	// 3–5. Problem-type-driven.
+	// 3–5. Problem-type-driven. The two gateway routing problems are
+	// readiness signals ONLY here, inside the attach deadline. Normal data-plane
+	// calls surface sandbox-not-found as SandboxGoneError.
 	switch {
-	case o.ProblemType == "/errors/bind-in-progress":
+	case o.ProblemType == "/errors/sandbox-not-found",
+		o.ProblemType == "/errors/sandbox-not-ready",
+		o.ProblemType == "/errors/bind-in-progress":
 		return ClassReadiness, nil
 	case o.ProblemType == "/errors/bind-restore-failed":
 		// The epoch-conflict variant is terminal (another pod won the lease). A

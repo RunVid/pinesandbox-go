@@ -149,6 +149,14 @@ re-mints (that would land a fresh pod and invalidate every `ps_`). Reconcile, an
 recover by re-attaching **only when the sandbox is confirmed gone**:
 `AttachComputer` mints a fresh `ct_` + sessions/`ps_`; persist the new creds and retry.
 
+Gateway evidence that the bound sandbox is gone surfaces as
+`*pine.SandboxGoneError`; `errors.As` still reaches its underlying `*pine.APIError`
+for host, operation, request id, and wire detail. A missing session on a live
+Computer instead matches `pine.ErrSessionNotFound`, and a control ownership
+conflict matches `pine.ErrControlNotHeld`. Use `pine.IsRetryable(err)` for the
+server's data-plane retry judgment; it intentionally does not guess whether an
+opaque transport failure or mutation is safe to replay.
+
 ## Driving the Computer with an agent
 
 A Computer is a real cloud browser + desktop + shell. There are **three ways** an

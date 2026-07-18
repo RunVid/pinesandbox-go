@@ -1,6 +1,7 @@
 package pinesandbox
 
 import (
+	"errors"
 	"fmt"
 
 	"go.pinesandbox.io/computer/internal/base/problem"
@@ -8,6 +9,7 @@ import (
 	"go.pinesandbox.io/computer/internal/base/transport"
 	"go.pinesandbox.io/computer/internal/bind"
 	"go.pinesandbox.io/computer/internal/controlplane"
+	"go.pinesandbox.io/computer/internal/coordinator"
 	"go.pinesandbox.io/computer/internal/tokens"
 )
 
@@ -23,6 +25,12 @@ import (
 // &apiErr) still reaches its full detail (status, request id, retryable). Slugs are pinned
 // to the coordinator's error taxonomy (validated in errors_test.go).
 var (
+	// ErrControlNotHeld (409): this session/caller does not hold the control
+	// authority required by the attempted mutation.
+	ErrControlNotHeld = &problem.APIError{Status: 409, ProblemType: "/errors/control-not-held"}
+	// ErrSessionNotFound (404): the named session does not exist on this live
+	// Computer. It is deliberately distinct from SandboxGoneError.
+	ErrSessionNotFound = &problem.APIError{Status: 404, ProblemType: "/errors/session-not-found"}
 	// ErrTaskNotReady (409): a turn is in flight, the result isn't materialized — poll again.
 	ErrTaskNotReady = &problem.APIError{Status: 409, ProblemType: "/errors/task-not-ready"}
 	// ErrSessionBusy (409): the session already has an active task (one-active-per-session).
@@ -82,7 +90,19 @@ type (
 	ConnectionError = transport.ConnectionError
 	// SpecVersionMismatch is raised when the gateway serves a different Computer-API major.
 	SpecVersionMismatch = spec.MismatchError
+	// SandboxGoneError means the gateway cannot route the bound sandbox. It
+	// wraps APIError, preserving host/op/request-id diagnostics via errors.As.
+	SandboxGoneError = coordinator.SandboxGoneError
 )
+
+// IsRetryable returns the server's retry judgment for a data-plane API error,
+// including errors wrapped by SandboxGoneError or TokenRejectedError. It does
+// not guess replay safety for transport failures: callers must apply the
+// operation-specific retry policy for timeouts and connection errors.
+func IsRetryable(err error) bool {
+	var apiErr *problem.APIError
+	return errors.As(err, &apiErr) && apiErr.Retryable
+}
 
 // AttachAuthorizationCommittedError means Portal committed a new binding
 // revision, but the later coordinator bind did not complete. The fresh pod is

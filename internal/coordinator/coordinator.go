@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"time"
 
@@ -313,16 +314,23 @@ func (c *Client) openSSE(ctx context.Context, method, path, token string, body [
 // ct_/ps_, not an instruction to re-attach. On a live current sandbox that is
 // binding_auth_lost; only confirmed sandbox-gone evidence justifies an attach, and the SDK
 // never implicitly rebinds (a fresh pod invalidates every ps_ and fences the old pod). The
-// underlying *problem.APIError is wrapped, so errors.As still reaches it. Everything else is
-// the RFC-9457 *problem.APIError. Token-less routes (bind/health/metrics) never hit the 401
-// branch. op is "<METHOD> <path>"; it + the data host stamp WHICH operation on WHICH Computer
-// failed (the primary spine) onto the typed error, so a generic handler is self-describing.
+// underlying *problem.APIError is wrapped, so errors.As still reaches it. A gateway
+// /errors/sandbox-not-found response becomes SandboxGoneError for every buffered and
+// streaming data-plane operation; attach still classifies its wrapped APIError as a
+// phase-specific readiness signal. Everything else remains the RFC-9457
+// *problem.APIError. Token-less routes (bind/health/metrics) never hit the 401 branch. op
+// is "<METHOD> <path>"; it + the data host stamp WHICH operation on WHICH Computer failed
+// (the primary spine) onto the typed error, so a generic handler is self-describing.
 func (c *Client) respError(status int, body []byte, requestID, token, op string) error {
 	ae := problem.Parse(status, body, requestID)
 	ae.Host = c.Host()
 	ae.Op = op
 	if status == 401 && token != "" {
 		return bind.NewTokenRejectedError(401, "the bound token was rejected by the coordinator (binding_auth_lost on a live sandbox; re-attach ONLY on confirmed sandbox-gone evidence)", ae)
+	}
+	if ae.ProblemType == "/errors/sandbox-not-found" ||
+		(status == http.StatusNotFound && ae.ProblemType == "" && op == "GET /sessions") {
+		return newSandboxGoneError(ae)
 	}
 	return ae
 }

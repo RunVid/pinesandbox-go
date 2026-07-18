@@ -1,6 +1,16 @@
 {
-  "description": "Per-slug retryable judgment \u2014 the language-neutral mirror of coord's control.RetryableDefault (pkg/control/problem.go). retryable=true: retrying the same operation (after refreshing preconditions where applicable) is a sane automated response. Every problem carries this on the wire (0C); SDKs use this table only as the fallback for older servers. Heuristic for unknown slugs: 412 true; 501 false; >=500 true; else false.",
+  "description": "Per-slug retryable judgment for the Computer data plane (gateway + coordinator). retryable=true: retrying the same operation (after refreshing preconditions where applicable) is a sane automated response. Every problem carries this on the wire (0C); SDKs use this table only as the fallback for older servers. Heuristic for unknown slugs: 412 true; 501 false; >=500 true; else false.",
   "entries": [
+    {
+      "type": "/errors/sandbox-not-found",
+      "status": 404,
+      "retryable": false
+    },
+    {
+      "type": "/errors/sandbox-not-ready",
+      "status": 503,
+      "retryable": true
+    },
     {
       "type": "/errors/unauthorized",
       "status": 401,
@@ -62,6 +72,11 @@
       "retryable": false
     },
     {
+      "type": "/errors/idempotency-in-progress",
+      "status": 409,
+      "retryable": true
+    },
+    {
       "type": "/errors/lease-expired",
       "status": 403,
       "retryable": false
@@ -113,7 +128,7 @@
     },
     {
       "type": "/errors/handoff-not-human",
-      "status": 409,
+      "status": 404,
       "retryable": false
     },
     {

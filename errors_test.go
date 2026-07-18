@@ -42,6 +42,31 @@ func TestControlSentinels_ErrorsIsBySlug(t *testing.T) {
 	}
 }
 
+func TestResourceSentinelsRemainDistinct(t *testing.T) {
+	missingSession := &APIError{Status: 404, ProblemType: "/errors/session-not-found"}
+	if !errors.Is(missingSession, ErrSessionNotFound) {
+		t.Error("session-not-found must match ErrSessionNotFound")
+	}
+	if errors.Is(&APIError{Status: 404, ProblemType: "/errors/sandbox-not-found"}, ErrSessionNotFound) {
+		t.Error("sandbox-not-found must not match ErrSessionNotFound")
+	}
+	if !errors.Is(&APIError{Status: 409, ProblemType: "/errors/control-not-held"}, ErrControlNotHeld) {
+		t.Error("control-not-held must match ErrControlNotHeld")
+	}
+}
+
+func TestIsRetryableUsesOnlyServerAPIJudgment(t *testing.T) {
+	if !IsRetryable(&APIError{Status: 503, ProblemType: "/errors/sandbox-not-ready", Retryable: true}) {
+		t.Error("retryable APIError must be retryable")
+	}
+	if IsRetryable(&APIError{Status: 503, ProblemType: "/errors/bind-not-configured", Retryable: false}) {
+		t.Error("explicitly terminal 503 must not be retryable")
+	}
+	if IsRetryable(errors.New("connection reset")) {
+		t.Error("opaque/transport errors must not be declared replay-safe")
+	}
+}
+
 // TestNoTaskSentinels_MatchTheWirePairsTheCoordinatorEmits: the two idle-session cases the
 // coordinator actually produces map to two DISTINCT sentinels. The historical single
 // sentinel carried {404, /errors/no-active-task} — a pair emitted by neither path — so
@@ -105,7 +130,7 @@ func TestControlSentinels_SlugsInTaxonomy(t *testing.T) {
 	for _, e := range f.Entries {
 		known[e.Type] = true
 	}
-	for _, s := range []*APIError{ErrTaskNotReady, ErrSessionBusy, ErrSessionLimit, ErrTaskNotFound, ErrNoActiveTurn, ErrNoActiveTask, ErrActionNotImplemented} {
+	for _, s := range []*APIError{ErrControlNotHeld, ErrSessionNotFound, ErrTaskNotReady, ErrSessionBusy, ErrSessionLimit, ErrTaskNotFound, ErrNoActiveTurn, ErrNoActiveTask, ErrActionNotImplemented} {
 		for _, slug := range append([]string{s.ProblemType}, s.AltProblemTypes...) {
 			if !known[slug] {
 				t.Errorf("sentinel slug %q is not in error-taxonomy.json (typo or renamed server slug)", slug)

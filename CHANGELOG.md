@@ -7,6 +7,14 @@ package `pinesandbox`) are documented here. The format follows
 `0.<POOL_VERSION>.<patch>`. So `require go.pinesandbox.io/computer v0.3.x`
 targets `pine-cua-pool-v3` (the compatibility contract integrators pin to).
 
+## [0.3.10] — 2026-07-18
+
+### Added
+- Typed data-plane control flow: `ErrControlNotHeld`, `ErrSessionNotFound`, and
+  `SandboxGoneError` (which preserves the underlying `APIError` diagnostics).
+- `IsRetryable(error) bool` exposes the server's problem-detail retry judgment
+  without treating transport failures or arbitrary mutations as replay-safe.
+
 ## [0.3.9] — 2026-07-18
 
 ### Added

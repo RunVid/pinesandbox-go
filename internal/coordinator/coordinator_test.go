@@ -273,6 +273,64 @@ func TestError_RFC9457Mapping(t *testing.T) {
 	}
 }
 
+func TestSandboxNotFoundMapsToSandboxGoneError(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusNotFound)
+		fmt.Fprint(w, `{"type":"/errors/sandbox-not-found","status":404,"detail":"gone","request_id":"rid-gone","retryable":false}`)
+	})
+
+	_, err := c.ListSessions(context.Background(), "ct_bound")
+	var gone *SandboxGoneError
+	if !errors.As(err, &gone) {
+		t.Fatalf("sandbox-not-found → %T (%v), want *SandboxGoneError", err, err)
+	}
+	var ae *problem.APIError
+	if !errors.As(err, &ae) || ae.ProblemType != "/errors/sandbox-not-found" || ae.RequestID != "rid-gone" {
+		t.Errorf("wrapped APIError diagnostics lost: %+v", ae)
+	}
+	if msg := err.Error(); !strings.Contains(msg, "op=GET /sessions") || !strings.Contains(msg, "request_id=rid-gone") {
+		t.Errorf("SandboxGoneError message lost operation/request context: %q", msg)
+	}
+}
+
+func TestLegacyBareListSessions404MapsToSandboxGoneError(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "Computer not found", http.StatusNotFound)
+	})
+
+	_, err := c.ListSessions(context.Background(), "ct_bound")
+	var gone *SandboxGoneError
+	if !errors.As(err, &gone) {
+		t.Fatalf("legacy bare gateway 404 → %T (%v), want *SandboxGoneError", err, err)
+	}
+
+	// A bare 404 on a named session is ambiguous on an old coordinator and
+	// must remain opaque rather than being mislabeled as a missing sandbox.
+	_, err = c.GetSession(context.Background(), "ct_bound", "missing")
+	if errors.As(err, &gone) {
+		t.Fatal("bare named-session 404 must remain opaque")
+	}
+}
+
+func TestSessionNotFoundRemainsAPIError(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusNotFound)
+		fmt.Fprint(w, `{"type":"/errors/session-not-found","status":404,"detail":"missing session","retryable":false}`)
+	})
+
+	_, err := c.GetSession(context.Background(), "ct_bound", "gone")
+	var gone *SandboxGoneError
+	if errors.As(err, &gone) {
+		t.Fatal("session-not-found must not be classified as a missing sandbox")
+	}
+	var ae *problem.APIError
+	if !errors.As(err, &ae) || ae.ProblemType != "/errors/session-not-found" {
+		t.Errorf("session-not-found → %T (%v), want *problem.APIError", err, err)
+	}
+}
+
 // TestTokenRejectedOn401 verifies a token'd 401 maps to *bind.TokenRejectedError (a report
 // of binding_auth_lost, never an attach instruction), with the underlying *problem.APIError
 // still reachable.
