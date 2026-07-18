@@ -17,16 +17,16 @@ type decisionTable struct {
 				ProblemType *string `json:"problem_type"`
 			} `json:"http_plain"`
 			ProblemTypes []string `json:"problem_types"`
-			Transport    []string `json:"transport"`
+			Conditional  []struct {
+				ProblemType string `json:"problem_type"`
+				When        string `json:"when"`
+			} `json:"conditional"`
+			Transport []string `json:"transport"`
 		} `json:"signals"`
 	} `json:"readiness_retry"`
-	RaceRetry struct {
+	RestoreRestart struct {
 		ProblemTypes []string `json:"problem_types"`
-		Conditional  []struct {
-			ProblemType string `json:"problem_type"`
-			When        string `json:"when"`
-		} `json:"conditional"`
-	} `json:"race_retry"`
+	} `json:"restore_restart"`
 	Terminal []struct {
 		ProblemType string `json:"problem_type"`
 		ErrorClass  string `json:"error_class"`
@@ -97,6 +97,13 @@ func TestClassify_DecisionTable(t *testing.T) {
 			t.Errorf("readiness problem_type %s → %s, want readiness", pt, c)
 		}
 	}
+	// Readiness — conditional transient restore failure.
+	for _, cond := range dt.ReadinessRetry.Signals.Conditional {
+		out := Outcome{Status: 500, ProblemType: cond.ProblemType, Message: "broker pipeline failure"}
+		if c, _ := Classify(out); c != ClassReadiness {
+			t.Errorf("readiness conditional %s (status 500, non-epoch) → %s, want readiness", cond.ProblemType, c)
+		}
+	}
 	// Readiness — transport faults (any fault, regardless of the named kind).
 	for _, kind := range dt.ReadinessRetry.Signals.Transport {
 		if c, _ := Classify(Outcome{TransportFault: true}); c != ClassReadiness {
@@ -104,17 +111,12 @@ func TestClassify_DecisionTable(t *testing.T) {
 		}
 	}
 
-	// Race — pod-identity-shift problem types.
-	for _, pt := range dt.RaceRetry.ProblemTypes {
-		if c, _ := Classify(Outcome{Status: 409, ProblemType: pt}); c != ClassRace {
-			t.Errorf("race problem_type %s → %s, want race", pt, c)
-		}
-	}
-	// Race — conditional (bind-restore-failed, status>=500, no epoch conflict).
-	for _, cond := range dt.RaceRetry.Conditional {
-		out := Outcome{Status: 500, ProblemType: cond.ProblemType, Message: "broker pipeline failure"}
-		if c, _ := Classify(out); c != ClassRace {
-			t.Errorf("race conditional %s (status 500, non-epoch) → %s, want race", cond.ProblemType, c)
+	// Restore restarts are orchestration signals, not classifier retries. They must
+	// remain terminal here so a caller that does not implement the two-round restart
+	// cannot accidentally loop or re-mint.
+	for _, pt := range dt.RestoreRestart.ProblemTypes {
+		if c, _ := Classify(Outcome{Status: 409, ProblemType: pt}); c != ClassTerminal {
+			t.Errorf("restore restart problem_type %s → %s, want terminal classifier result", pt, c)
 		}
 	}
 
@@ -203,9 +205,9 @@ func TestClassify_BindRestoreFailedBranches(t *testing.T) {
 			t.Errorf("epoch-conflict bind-restore-failed → %T, want *ComputerAlreadyAttachedError", err)
 		}
 	}
-	// transient >=500, non-epoch → race (re-mint).
-	if c, _ := Classify(Outcome{Status: 502, ProblemType: pt, Message: "broker timeout"}); c != ClassRace {
-		t.Errorf("transient bind-restore-failed → %s, want race", c)
+	// transient >=500, non-epoch → readiness (same-envelope replay).
+	if c, _ := Classify(Outcome{Status: 502, ProblemType: pt, Message: "broker timeout"}); c != ClassReadiness {
+		t.Errorf("transient bind-restore-failed → %s, want readiness", c)
 	}
 	// <500, non-epoch → terminal BrokerUnreachableError.
 	if c, err := Classify(Outcome{Status: 409, ProblemType: pt, Message: "restore pipeline declined"}); c != ClassTerminal {

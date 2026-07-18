@@ -10,11 +10,9 @@ type Class int
 
 const (
 	// Readiness: a fresh pod isn't up yet (plain ingress 404/503, /errors/bind-in-progress,
-	// or a transport fault). Retry, DEADLINE-bound, REUSING the same envelope byte-for-byte.
+	// a transient restore failure, or a transport fault). Retry, DEADLINE-bound, REUSING
+	// the same envelope byte-for-byte.
 	ClassReadiness Class = iota
-	// Race: a pod-identity shift (stale boot id / wrong pod uid / ephem mismatch, or a
-	// transient bind-restore-failed). Retry, ATTEMPT-bound, RE-MINTING the envelope.
-	ClassRace
 	// Terminal: a typed failure — no same-pod retry. Classify also returns the typed error.
 	ClassTerminal
 )
@@ -23,8 +21,6 @@ func (c Class) String() string {
 	switch c {
 	case ClassReadiness:
 		return "readiness"
-	case ClassRace:
-		return "race"
 	default:
 		return "terminal"
 	}
@@ -41,17 +37,11 @@ type Outcome struct {
 	Message        string
 }
 
-// Race problem types (pod-identity shift → re-mint). ephem-pub-mismatch is defensive
-// (coord surfaces an ephem mismatch as hpke-decrypt-failed = terminal).
-var raceProblemTypes = map[string]bool{
-	"/errors/stale-coord-boot-id": true,
-	"/errors/wrong-pod-uid":       true,
-	"/errors/ephem-pub-mismatch":  true,
-}
-
 // Classify returns the retry class for a bind attempt. For ClassTerminal, err is the
-// typed bind error to surface; for Readiness/Race, err is nil (the caller retries per the
-// class's policy). Precedence mirrors bind-decision-table.json.
+// typed bind error to surface; for Readiness, err is nil (the caller retries the same
+// committed authorization per the class's policy). Precedence mirrors
+// bind-decision-table.json. bind-restore-no-challenge is handled by the binder because it
+// restarts the restore transaction without re-minting the attach authorization.
 func Classify(o Outcome) (Class, error) {
 	// 1. Transport fault → readiness (the pod/ingress isn't answering yet).
 	if o.TransportFault {
@@ -71,16 +61,15 @@ func Classify(o Outcome) (Class, error) {
 	switch {
 	case o.ProblemType == "/errors/bind-in-progress":
 		return ClassReadiness, nil
-	case raceProblemTypes[o.ProblemType]:
-		return ClassRace, nil
 	case o.ProblemType == "/errors/bind-restore-failed":
-		// epoch-conflict variant is terminal (another pod won the lease); a transient
-		// >=500 is a race (re-mint); otherwise broker-unreachable.
+		// The epoch-conflict variant is terminal (another pod won the lease). A
+		// transient >=500 retries the same envelope: Portal has already committed the
+		// single authorization for this sandbox, so re-minting would be invalid.
 		switch {
 		case indicatesEpochConflict(o.Message):
 			return ClassTerminal, &ComputerAlreadyAttachedError{base{o.Status, o.Message, nil}}
 		case o.Status >= 500:
-			return ClassRace, nil
+			return ClassReadiness, nil
 		default:
 			return ClassTerminal, &BrokerUnreachableError{base{o.Status, o.Message, nil}}
 		}
@@ -90,7 +79,14 @@ func Classify(o Outcome) (Class, error) {
 	switch o.ProblemType {
 	case "/errors/bind-rejected":
 		return ClassTerminal, &BindAuthError{base{o.Status, o.Message, nil}}
-	case "/errors/bind-not-configured":
+	case "/errors/bind-not-configured", "/errors/bind-lease-unenforceable":
+		// Both are structural pod/deployment misconfigurations a bind retry
+		// cannot fix — surfaced as themselves, never as a broker outage.
+		return ClassTerminal, &BindError{base{o.Status, o.Message, nil}}
+	case "/errors/stale-coord-boot-id", "/errors/wrong-pod-uid", "/errors/ephem-pub-mismatch":
+		// The committed receipt targets one immutable pod identity. A changed identity
+		// requires a fresh sandbox; it must never trigger another Portal mint for this
+		// single-use sandbox id.
 		return ClassTerminal, &BindError{base{o.Status, o.Message, nil}}
 	case "/errors/already-bound-different-cid", "/errors/pod-tainted":
 		return ClassTerminal, &PodPoisonedError{base{o.Status, o.Message, nil}}

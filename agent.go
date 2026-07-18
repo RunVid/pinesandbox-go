@@ -86,7 +86,7 @@ func (a *AgentMode) Status(ctx context.Context) (*AgentTask, error) {
 
 // Result returns the latest finished turn's outcome. While a turn is still in flight the
 // result isn't materialized: errors.Is(err, ErrTaskNotReady) ⇒ poll again. errors.Is(err,
-// ErrNoActiveTask) ⇒ no turn has run yet.
+// ErrTaskNotFound) ⇒ no turn has run yet — the session is validly idle; start a turn.
 func (a *AgentMode) Result(ctx context.Context) (*AgentResult, error) {
 	return a.s.coord.AgentResult(ctx, a.s.token, a.s.name)
 }

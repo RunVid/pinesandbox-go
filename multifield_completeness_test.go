@@ -46,6 +46,20 @@ func TestMultiFieldResponses_ConsciouslyHandled(t *testing.T) {
 		"uploadFile":         "raw: UploadFile json.RawMessage (full body)",
 		"sessionEpoch":       "raw: Epoch json.RawMessage (full body)",
 
+		// not exposed — the endpoint is deliberately absent from this SDK
+		"listAgentModelPresets": "not exposed (deliberate): internal testing surface — the " +
+			"validated resident model-preset catalog for the portal playground; spec-marked " +
+			"not part of the stable Computer contract. Add a typed catalog + " +
+			"AgentRunOptions.ModelPreset here if a Go integrator ever needs model selection.",
+		"getAgentBrowserFlags": "not exposed (deliberate): internal staff-only playground " +
+			"testing surface — the session's humanize/fill-commit browser flags for the portal " +
+			"admin playground; spec-marked x-internal, not part of the stable Computer contract. " +
+			"No Go integrator needs it.",
+		"setAgentBrowserFlags": "not exposed (deliberate): internal staff-only playground " +
+			"testing surface — the pre-first-run browser-flags config; see getAgentBrowserFlags.",
+		"getFileViewMetadata": "not exposed (deliberate): capability-bound loopback surface " +
+			"for the image-owned browser extension, not a public Computer SDK operation",
+
 		// flattened — a subset is returned on purpose (low-value metadata dropped)
 		"listSkills": "flattened: returns the skills array; generated_at is manifest " +
 			"metadata not worth a wrapper DTO (read it via GetSkill if needed)",

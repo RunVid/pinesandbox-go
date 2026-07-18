@@ -4,22 +4,26 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"regexp"
 	"time"
 )
+
+var computerIDRE = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 
 // Credentials is a Computer's durable identity: a stable id + a 32-byte state key. PERSIST
 // both to re-attach later (the key seals/unseals the Computer's checkpointed state). The
 // key is never sent in the clear — it rides the bind handshake HPKE-sealed to the coord's
 // ephemeral key.
 type Credentials struct {
-	ID  string
-	Key []byte // 32 bytes
+	ID             string
+	Key            []byte // 32 bytes
+	CaptureKeypair *CaptureKeypair
 }
 
 // String redacts the state key so a struct dump in a log can't leak it; GoString (%#v)
 // defers to it.
 func (c Credentials) String() string {
-	return fmt.Sprintf("Credentials{ID:%s Key:[%d bytes redacted]}", c.ID, len(c.Key))
+	return fmt.Sprintf("Credentials{ID:%s Key:[%d bytes redacted] CaptureKeypair:[redacted]}", c.ID, len(c.Key))
 }
 
 // GoString redacts the key under %#v.
@@ -37,16 +41,23 @@ func GenerateCredentials() (Credentials, error) {
 	if _, err := rand.Read(key); err != nil {
 		return Credentials{}, fmt.Errorf("pinesandbox: generate state key: %w", err)
 	}
-	return Credentials{ID: id, Key: key}, nil
+	kp, err := GenerateCaptureKeypair(1)
+	if err != nil {
+		return Credentials{}, err
+	}
+	return Credentials{ID: id, Key: key, CaptureKeypair: kp}, nil
 }
 
 // validateIdentity rejects a malformed Computer identity up front (fail fast) rather than
-// letting a wrong-length key seal state that a later attach can't decrypt, or an empty id
-// surface late as a bind auth error. The id may be a UUIDv7 or the caller's own stable id,
-// so only non-empty is required; the key must be exactly 32 bytes.
+// allocating a sandbox that Portal cannot attribute, or letting a wrong-length key seal
+// state that a later attach cannot decrypt. Computer ids are lowercase UUIDv7 across the
+// SDK, Portal, coordinator, and broker; the key must be exactly 32 bytes.
 func validateIdentity(id string, key []byte) error {
 	if id == "" {
 		return fmt.Errorf("pinesandbox: computer id required")
+	}
+	if !computerIDRE.MatchString(id) {
+		return fmt.Errorf("pinesandbox: computer id must be a lowercase UUIDv7")
 	}
 	if len(key) != 32 {
 		return fmt.Errorf("pinesandbox: computer key must be exactly 32 bytes, got %d", len(key))

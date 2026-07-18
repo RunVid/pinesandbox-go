@@ -8,7 +8,7 @@ go get go.pinesandbox.io/computer
 ```
 
 The import path is a vanity path (decoupled from the backing repo). Pin within a
-pool minor — `v0.3.x` targets `pine-cua-pool-v3` (the default profile).
+pool minor — `v0.3.x` targets the project's backend-managed v3 runtime policy.
 
 ### Private module setup
 
@@ -48,12 +48,29 @@ func main() {
 		log.Fatal(err)
 	}
 
-	// Provision + bind a fresh persistent Computer. PERSIST comp.ID()/comp.Key()
-	// to re-attach later (AttachComputer restores its state onto a fresh pod).
-	comp, err := client.CreateComputer(ctx, pine.AttachOptions{})
+	// Generate + PERSIST every caller-owned secret before provisioning.
+	creds, err := pine.GenerateCredentials()
 	if err != nil {
 		log.Fatal(err)
 	}
+	capture, err := pine.GenerateCaptureKeypair(1)
+	if err != nil {
+		log.Fatal(err)
+	}
+	// persist(creds.ID, creds.Key, capture.Generation, capture.PK, capture.SK)
+
+	// Provision + bind a fresh persistent Computer. AttachComputer later uses
+	// the same current keypair plus any retained prior generations.
+	comp, err := client.CreateComputer(ctx, pine.AttachOptions{
+		Credentials:    creds,
+		CaptureKeypair: capture,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	// Persist the committed authorization winner before returning work to a
+	// queue or another backend instance.
+	// persistBinding(comp.ID(), comp.BindingRevision(), comp.SandboxID(), comp.ComputerToken())
 	defer comp.Stop(ctx) // graceful: persists state on the way out
 
 	sess, err := comp.CreateSession(ctx, pine.CreateSessionOptions{Browser: true})
@@ -85,7 +102,7 @@ func main() {
 Every call is bounded by the `context` you pass — the SDK applies a 30s fallback
 only when your context has no deadline, so you extend (or shorten) any call with
 `context.WithTimeout`. Provisioning is special-cased: `CreateComputer` /
-`AttachComputer` bound the cold provision (`POST /sandboxes` + the readiness poll)
+`AttachComputer` bound the cold provision (`POST /computer-sandboxes` + readiness)
 by `AttachOptions.Timeout` (the readiness budget, default 300s), so a cold pool
 doesn't trip the 30s fallback. Raise `AttachOptions.Timeout` for an unusually cold
 pool.
@@ -96,8 +113,10 @@ The handle isn't the source of truth — your **persisted credentials** are. A
 stateless backend rebuilds the handles per request, no provisioning and no coord
 round-trip for the session:
 
-- **Computer** — persist `comp.ID()`, `comp.Key()`, `comp.SandboxID()`, and
-  `comp.ComputerToken()` (the `ct_`).
+- **Computer** — persist `comp.ID()`, `comp.Key()`, the current and retained
+  capture keypairs, `comp.BindingRevision()`, `comp.SandboxID()`, and
+  `comp.ComputerToken()` (the `ct_`). Portal is an authorization ledger, not
+  the source of truth for this integrator-owned record.
 - **Session** — persist `sess.Name()` and `sess.Token()` (the `ps_`). The `ps_` is
   minted once at `CreateSession` and the coordinator redacts it on read, so a
   session re-fetched with `comp.Session(name)` has **no** `ps_` (its drive ops
@@ -123,9 +142,11 @@ Skill authoring is asynchronous: `Session.Learn`, `Session.Teach`, and
 `Session.Refine` return the accepted author run; consume progress and its terminal
 draft through `Session.AuthorEvents`.
 
-When a token is rejected (the pod was recycled/rebound, or the idle TTL lapsed) the
-SDK surfaces a typed `*pine.RebindRequiredError` — it never silently re-mints (that
-would land a fresh pod and invalidate every `ps_`). Recover by re-attaching:
+When coord rejects a bound token, the SDK surfaces a typed
+`*pine.TokenRejectedError` — a report, not an attach instruction (`ct_` is
+binding-lifetime, so on a live pod this is `binding_auth_lost`). It never silently
+re-mints (that would land a fresh pod and invalidate every `ps_`). Reconcile, and
+recover by re-attaching **only when the sandbox is confirmed gone**:
 `AttachComputer` mints a fresh `ct_` + sessions/`ps_`; persist the new creds and retry.
 
 ## Driving the Computer with an agent
@@ -241,6 +262,14 @@ grammar is uniform `key=value` across the Go and Ruby SDKs; the Go SDK renders *
 because its data-plane client holds the gateway host, where the Ruby coordinator uses
 **`sandbox=`** because its adapter holds the sandbox id (same Computer, different handle each
 layer already has). `op` is always `<METHOD> <path>` with the query string stripped.
+Portal token/attach errors additionally expose `Code` (the stable RFC 9457 problem type)
+and optional `Reason`; both are spec-defined and safe to branch on. Raw server exceptions
+are never part of those fields.
+
+If `CreateComputer` returns `*AttachAuthorizationCommittedError`, Portal advanced the
+binding revision before coordinator bind failed. Persist `BindingRevision`, `SandboxID`,
+and the non-nil `Credentials` from that error before retrying or adopting the Computer;
+their diagnostic formatting redacts both private keys.
 
 ```go
 if _, err := sess.Agent().Run(ctx, "book the 9am slot"); err != nil {

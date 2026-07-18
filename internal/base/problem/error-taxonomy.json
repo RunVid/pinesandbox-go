@@ -77,6 +77,11 @@
       "retryable": false
     },
     {
+      "type": "/errors/file-not-found",
+      "status": 404,
+      "retryable": false
+    },
+    {
       "type": "/errors/session-busy",
       "status": 409,
       "retryable": true
@@ -232,14 +237,29 @@
       "retryable": false
     },
     {
+      "type": "/errors/bind-lease-unenforceable",
+      "status": 503,
+      "retryable": false
+    },
+    {
+      "type": "/errors/bind-state-lost",
+      "status": 503,
+      "retryable": true
+    },
+    {
+      "type": "/errors/pod-tainted",
+      "status": 503,
+      "retryable": false
+    },
+    {
       "type": "/errors/wrong-pod-uid",
       "status": 409,
-      "retryable": true
+      "retryable": false
     },
     {
       "type": "/errors/stale-coord-boot-id",
       "status": 409,
-      "retryable": true
+      "retryable": false
     },
     {
       "type": "/errors/already-bound-different-cid",
@@ -311,6 +331,18 @@
       "type": "/errors/grant-wrong-cid",
       "status": 403,
       "retryable": false
+    },
+    {
+      "type": "/errors/bind-restore-no-challenge",
+      "status": 409,
+      "retryable": false,
+      "note": "expired two-round restore transaction; restart round one with the same committed attach authorization"
+    },
+    {
+      "type": "/errors/bind-restore-contended",
+      "status": 409,
+      "retryable": false,
+      "note": "restore rechallenge generation cap exhausted - a live writer keeps advancing latest; terminal"
     }
   ]
 }

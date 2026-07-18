@@ -21,7 +21,7 @@ func TestErrorVocabulary(t *testing.T) {
 		{&PodPoisonedError{base{409, "m", cause}}, "pod poisoned"},
 		{&BrokerUnreachableError{base{503, "m", cause}}, "broker unreachable"},
 		{&BindTimeoutError{base{0, "m", cause}}, "timeout"},
-		{&RebindRequiredError{base{401, "m", cause}}, "rebind required"},
+		{&TokenRejectedError{base{401, "m", cause}}, "token rejected"},
 	}
 	for _, c := range cases {
 		s := c.err.Error()
@@ -43,12 +43,12 @@ func TestErrorVocabulary(t *testing.T) {
 	if e := NewBindError(409, "x", cause); !errors.Is(e, cause) || e.Status != 409 {
 		t.Error("NewBindError broken")
 	}
-	if e := NewRebindRequiredError(401, "x", cause); !errors.Is(e, cause) || e.Status != 401 {
-		t.Error("NewRebindRequiredError broken")
+	if e := NewTokenRejectedError(401, "x", cause); !errors.Is(e, cause) || e.Status != 401 {
+		t.Error("NewTokenRejectedError broken")
 	}
 
 	// Class.String.
-	for cls, want := range map[Class]string{ClassReadiness: "readiness", ClassRace: "race", ClassTerminal: "terminal"} {
+	for cls, want := range map[Class]string{ClassReadiness: "readiness", ClassTerminal: "terminal"} {
 		if cls.String() != want {
 			t.Errorf("Class(%d).String() = %q, want %q", cls, cls.String(), want)
 		}

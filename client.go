@@ -97,9 +97,10 @@ func NewClient(opts ClientOptions) (*Client, error) {
 	return &Client{zone: z, conn: conn}, nil
 }
 
-// CreateComputer provisions a NEW persistent Computer: a fresh UUIDv7 id + 32-byte state
-// key, registered with the portal, then bound. PERSIST computer.ID()/Key() to re-attach
-// later. Pass Credentials via opts.Credentials to reuse a pre-generated identity.
+// CreateComputer provisions a NEW persistent Computer: a fresh UUIDv7 id +
+// caller-owned state/capture keys, then a Portal-authorized bind. Portal lazily
+// creates only its minimal authorization row during that atomic attach. Persist
+// the identity, capture keypair, and returned BindingRevision before re-attach.
 func (c *Client) CreateComputer(ctx context.Context, opts AttachOptions) (*Computer, error) {
 	creds := opts.Credentials
 	if creds.ID == "" {
@@ -112,12 +113,36 @@ func (c *Client) CreateComputer(ctx context.Context, opts AttachOptions) (*Compu
 	if err := validateIdentity(creds.ID, creds.Key); err != nil {
 		return nil, err
 	}
-	if err := c.conn.attachProvider.RegisterComputer(ctx, creds.ID); err != nil {
+	comp := newComputer(creds.ID, creds.Key)
+	if opts.CaptureKeypair == nil {
+		opts.CaptureKeypair = creds.CaptureKeypair
+	}
+	if opts.CaptureKeypair == nil {
+		var err error
+		opts.CaptureKeypair, err = GenerateCaptureKeypair(1)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if err := comp.configureCaptureKeypairs(opts.CaptureKeypair, opts.PriorCaptureKeypairs); err != nil {
 		return nil, err
 	}
-	comp := newComputer(creds.ID, creds.Key)
+	// A Portal authorization can commit before the later coordinator bind
+	// fails. Keep a deep copy of every durable secret generated or selected by
+	// this create call so that error path is recoverable even though there is no
+	// Computer result to return.
+	recoveryCredentials := &Credentials{
+		ID:             creds.ID,
+		Key:            append([]byte(nil), creds.Key...),
+		CaptureKeypair: opts.CaptureKeypair.clone(),
+	}
+	// Already validated/configured above so malformed caller material cannot
+	// provision a pod. Clear the value-copy options before the
+	// public Attach path applies its direct-caller configuration hook.
+	opts.CaptureKeypair = nil
+	opts.PriorCaptureKeypairs = nil
 	if err := comp.Attach(ctx, c.conn, opts); err != nil {
-		return nil, err
+		return nil, attachClientError(comp, opts.BindingRevision, recoveryCredentials, err)
 	}
 	return comp, nil
 }
@@ -129,10 +154,35 @@ func (c *Client) AttachComputer(ctx context.Context, id string, key []byte, opts
 		return nil, err
 	}
 	comp := newComputer(id, key)
-	if err := comp.Attach(ctx, c.conn, opts); err != nil {
+	comp.bindingRevision = opts.BindingRevision
+	if err := comp.configureCaptureKeypairs(opts.CaptureKeypair, opts.PriorCaptureKeypairs); err != nil {
 		return nil, err
 	}
+	opts.CaptureKeypair = nil
+	opts.PriorCaptureKeypairs = nil
+	if err := comp.Attach(ctx, c.conn, opts); err != nil {
+		return nil, attachClientError(comp, opts.BindingRevision, nil, err)
+	}
 	return comp, nil
+}
+
+// attachClientError preserves Portal CAS state when a high-level Client call
+// cannot return its temporary Computer. Direct Computer.Attach callers retain
+// the object and can read BindingRevision themselves.
+func attachClientError(comp *Computer, initialRevision int64, credentials *Credentials, err error) error {
+	comp.mu.Lock()
+	revision := comp.bindingRevision
+	sandboxID := comp.lastAuthorizedSandboxID
+	comp.mu.Unlock()
+	if revision <= initialRevision || sandboxID == "" {
+		return err
+	}
+	return &AttachAuthorizationCommittedError{
+		BindingRevision: revision,
+		SandboxID:       sandboxID,
+		Credentials:     credentials,
+		Err:             err,
+	}
 }
 
 // AdoptExisting adopts an ALREADY-bound, still-live Computer from its persisted

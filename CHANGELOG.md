@@ -7,6 +7,66 @@ package `pinesandbox`) are documented here. The format follows
 `0.<POOL_VERSION>.<patch>`. So `require go.pinesandbox.io/computer v0.3.x`
 targets `pine-cua-pool-v3` (the compatibility contract integrators pin to).
 
+## [0.3.9] — 2026-07-18
+
+### Added
+- Required v3 asymmetric state encryption (component envelope v3): `CaptureKeypair`
+  (`GenerateCaptureKeypair`, `Fingerprint`) plus
+  `Computer.SetCaptureKeypair` / `AddPriorCaptureKeypair`. Supply the current
+  keypair through `AttachOptions.CaptureKeypair` and any retained generations
+  through `PriorCaptureKeypairs`; the high-level create/attach flows configure
+  them before provisioning. Every v3 attach submits `pk_computer`/`key_generation`, forwards the
+  portal's `key_assertion` on the bind, and runs the two-round restore
+  automatically — the SDK unwraps each component's sealed secret with the
+  matching keypair generation and answers the coordinator's
+  `restore_challenge`. Retain superseded keypair generations until their
+  state is re-sealed; a restore that needs an unregistered generation
+  fails with a typed, actionable bind error.
+- `TokenRejectedError` **replaces `RebindRequiredError` (breaking rename)**:
+  a 401 on a bound `ct_`/`ps_` is a report that the coordinator did not
+  recognize the token, **not** an instruction to re-attach — on a live,
+  current sandbox this state is `binding_auth_lost`; attach only on confirmed
+  sandbox-gone evidence. Migration is a compile-caught find/replace of the
+  type name; the `Error()` string no longer says "rebind required".
+- `ErrTaskNotFound` (`404 /errors/task-not-found`) and `ErrNoActiveTurn`
+  (`409 /errors/no-active-task`): the two idle-session sentinels matching the
+  wire pairs the coordinator actually emits. A `task-not-found` read means a
+  **valid idle session** — start a turn; never re-create the session.
+
+### Changed
+- Computer provisioning now uses the small `POST /computer-sandboxes` request;
+  image, pool, resources, and persistence/lease profile are selected by the
+  backend-owned project runtime policy rather than SDK constants.
+  Runtime-policy identity stays inside signed control-plane credentials; the
+  SDK only observes the pool-version compatibility boundary.
+- Attach uses Portal binding revisions and a stable idempotency receipt.
+  Concurrent losers return `BindingRevisionConflictError` and must reload/adopt
+  the integrator database winner. `AttachAuthorizationCommittedError` preserves
+  a Portal-committed revision when the later coordinator bind fails and, for
+  `CreateComputer`, carries the durable credentials needed to adopt or retry
+  the newly created Computer.
+- Each sandbox receives exactly one Portal attach authorization. Readiness and
+  transient restore retries replay that committed envelope; an expired restore
+  challenge restarts round one without re-minting. Pod-identity changes are
+  terminal for that sandbox and recover on a fresh sandbox.
+- Portal errors expose `Code` (the stable RFC 9457 problem type) plus optional
+  spec-defined `Reason`; raw internal exception text is not a client contract.
+- Capture-key attach options are validated as one immutable generation set
+  before the Computer is mutated or a sandbox is provisioned. Reusing a
+  generation with different key material is rejected locally.
+- `ErrNoActiveTask` is deprecated but **left frozen** at its original
+  `{404, /errors/no-active-task}` value. `APIError.Is` matches by problem-type
+  slug only, so this sentinel already matched the coordinator's real
+  `{409, /errors/no-active-task}` mutation error by slug; its gap was only that
+  it never matched a task READ on a never-run session
+  (`{404, /errors/task-not-found}`, a different slug), which `ErrTaskNotFound`
+  now fills. Migrate reads to `ErrTaskNotFound` and mutations to
+  `ErrNoActiveTurn`; the deprecated sentinel's fields are unchanged (no
+  breakage for code that inspects them).
+- Bind response `expires_at` is deprecated server-side: `ct_` is now
+  binding-lifetime (no idle expiry, no renewal). This SDK never parsed the
+  field, so no code change is needed to consume new coordinators.
+
 ## [0.3.8] — 2026-07-13
 
 ### Added

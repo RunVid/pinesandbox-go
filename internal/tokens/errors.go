@@ -21,7 +21,11 @@ type tokenBase struct {
 	RequestID string
 	Host      string
 	Op        string
-	Cause     error
+	// Code is Portal's canonical RFC 9457 `type` value. Code selects the
+	// public error contract; Reason is an optional spec-defined refinement.
+	Code   string
+	Reason string
+	Cause  error
 }
 
 func (b tokenBase) Unwrap() error { return b.Cause }
@@ -50,6 +54,8 @@ func tokenBaseFrom(msg string, ae *problem.APIError) tokenBase {
 		RequestID: ae.RequestID,
 		Host:      ae.Host,
 		Op:        ae.Op,
+		Code:      ae.ProblemType,
+		Reason:    ae.Reason,
 		Cause:     ae,
 	}
 }
@@ -94,6 +100,19 @@ func (e *AttachCredentialsError) Error() string {
 	return tokErr("attach-credentials mint failed", e.tokenBase)
 }
 
+// BindingRevisionConflictError means another attach already advanced the
+// Portal authorization revision. It is deliberately terminal: the integrator
+// must reload/adopt its winning database binding, not provision another pod.
+type BindingRevisionConflictError struct {
+	tokenBase
+	CurrentRevision  *int64
+	CurrentSandboxID string
+}
+
+func (e *BindingRevisionConflictError) Error() string {
+	return tokErr("binding revision conflict", e.tokenBase)
+}
+
 // ComputerRegistrationError: the portal refused to register the computer_id (409/422 —
 // e.g. a cross-project duplicate).
 type ComputerRegistrationError struct{ tokenBase }
@@ -102,8 +121,8 @@ func (e *ComputerRegistrationError) Error() string {
 	return tokErr("computer registration refused", e.tokenBase)
 }
 
-// UnknownComputerError: the computer_id is unknown, deleted, or cross-project (404) —
-// register it first.
+// UnknownComputerError: the computer_id is deleted or cross-project (404).
+// First attach lazily creates a missing authorization row.
 type UnknownComputerError struct{ tokenBase }
 
 func (e *UnknownComputerError) Error() string { return tokErr("unknown computer", e.tokenBase) }

@@ -54,19 +54,52 @@ func parseBindPubkey(body []byte) (*BindPubkey, error) {
 	return &BindPubkey{PodUID: w.PodUID, CoordBootID: w.CoordBootID, EphemPub: pub, FetchedAt: fetched}, nil
 }
 
-// BindResult is the pod's computer token + epoch (POST v1/coord/bind).
+// BindResult is the pod's computer token + epoch (POST v1/coord/bind) — or,
+// on an asymmetric Computer, the restore challenge the caller must answer
+// before the bind completes (RestoreChallenge non-nil, ComputerToken empty).
 type BindResult struct {
-	ComputerToken string // ct_
-	Epoch         int
+	ComputerToken    string // ct_
+	Epoch            int
+	RestoreChallenge *RestoreChallenge
+	// Portal attach authorization revision. This is SDK bookkeeping populated
+	// by binder after the coordinator response (not a coord wire field).
+	BindingRevision int64
+}
+
+// RestoreChallenge is the two-round v3 restore's round-1 payload: for each
+// asymmetric component, the sealed per-component secret plus every value
+// the HPKE open binds (computer-api.yaml RestoreChallenge).
+type RestoreChallenge struct {
+	ChallengeID string               `json:"challenge_id"`
+	Generation  int                  `json:"generation"`
+	Components  []ChallengeComponent `json:"components"`
+}
+
+// ChallengeComponent is one component's challenge material.
+type ChallengeComponent struct {
+	Component           string `json:"component"`
+	ID                  string `json:"id"`
+	AttachEpoch         int64  `json:"attach_epoch"`
+	RecipientKeyVersion int    `json:"recipient_key_version"`
+	PKFingerprint       string `json:"pk_fingerprint"`
+	HPKEEnc             string `json:"hpke_enc"`
+	HPKESealedS         string `json:"hpke_sealed_s"`
 }
 
 func parseBindResult(body []byte) (*BindResult, error) {
 	var w struct {
-		ComputerToken string `json:"computer_token"`
-		Epoch         int    `json:"epoch"`
+		ComputerToken    string            `json:"computer_token"`
+		Epoch            int               `json:"epoch"`
+		RestoreChallenge *RestoreChallenge `json:"restore_challenge"`
 	}
 	if err := json.Unmarshal(body, &w); err != nil {
 		return nil, fmt.Errorf("pinesandbox: unparseable bind result: %w", err)
+	}
+	if w.RestoreChallenge != nil {
+		if w.RestoreChallenge.ChallengeID == "" || len(w.RestoreChallenge.Components) == 0 {
+			return nil, fmt.Errorf("pinesandbox: bind restore challenge malformed")
+		}
+		return &BindResult{RestoreChallenge: w.RestoreChallenge}, nil
 	}
 	if w.ComputerToken == "" {
 		return nil, fmt.Errorf("pinesandbox: bind result missing computer_token")

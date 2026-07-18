@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"go.pinesandbox.io/computer/internal/bind"
 	"go.pinesandbox.io/computer/internal/bindhpke"
 	"go.pinesandbox.io/computer/internal/coordinator"
+	"go.pinesandbox.io/computer/internal/statehpke"
 	"go.pinesandbox.io/computer/internal/tokens"
 )
 
@@ -32,7 +34,8 @@ type fakeCoord struct {
 	pubkeyCalls  int
 	bindSteps    []bindStep
 	bindCalls    int
-	ciphertexts  []string // ciphertext seen on each Bind call
+	ciphertexts  []string                 // ciphertext seen on each Bind call
+	extras       []coordinator.BindExtras // extras seen on each Bind call
 	mu           sync.Mutex
 }
 
@@ -56,10 +59,11 @@ func (f *fakeCoord) BindPubkey(_ context.Context) (*coordinator.BindPubkey, erro
 	return &coordinator.BindPubkey{PodUID: f.podUID, CoordBootID: f.boot, EphemPub: f.kp.PublicKeyRaw()}, nil
 }
 
-func (f *fakeCoord) Bind(_ context.Context, bindToken, podUID, boot, ciphertext string) (*coordinator.BindResult, error) {
+func (f *fakeCoord) Bind(_ context.Context, bindToken, podUID, boot, ciphertext string, extras coordinator.BindExtras) (*coordinator.BindResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.ciphertexts = append(f.ciphertexts, ciphertext)
+	f.extras = append(f.extras, extras)
 	i := f.bindCalls
 	f.bindCalls++
 	if i >= len(f.bindSteps) {
@@ -90,6 +94,7 @@ type fakeMinter struct {
 	creds *tokens.AttachCredentials
 	err   error
 	calls int
+	raw   bool
 }
 
 func (f *fakeMinter) Credentials(_ context.Context, _ tokens.CredentialsRequest) (*tokens.AttachCredentials, error) {
@@ -97,7 +102,17 @@ func (f *fakeMinter) Credentials(_ context.Context, _ tokens.CredentialsRequest)
 	if f.err != nil {
 		return nil, f.err
 	}
-	return f.creds, nil
+	if f.raw || f.creds == nil {
+		return f.creds, nil
+	}
+	creds := *f.creds
+	if creds.KeyAssertion == "" {
+		creds.KeyAssertion = "ka"
+	}
+	if creds.BindingRevision == 0 {
+		creds.BindingRevision = 1
+	}
+	return &creds, nil
 }
 
 type fakeClock struct {
@@ -113,11 +128,17 @@ func (c *fakeClock) advance(d time.Duration) {
 }
 
 func baseConfig(coord *fakeCoord, minter *fakeMinter, clk *fakeClock) Config {
+	pk, sk, err := statehpke.GenerateKeypair()
+	if err != nil {
+		panic(err)
+	}
 	return Config{
 		Coord: coord, Minter: minter,
 		ComputerID: "c1", Key: []byte("0123456789abcdef0123456789abcdef"), SandboxID: "sb-1",
-		ReadyTimeout: 5 * time.Second,
-		Clock:        clk.now,
+		ReadyTimeout:    5 * time.Second,
+		CaptureKeypairs: map[int]*CaptureKeypair{1: {Generation: 1, PK: pk, SK: sk}},
+		CaptureGen:      1,
+		Clock:           clk.now,
 		// The sleeper advances the clock, so readiness retries eventually cross the deadline.
 		Sleeper: func(_ context.Context, d time.Duration) error { clk.advance(d); return nil },
 	}
@@ -150,6 +171,30 @@ func TestBind_HappyPath(t *testing.T) {
 	wantKey := base64.RawURLEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef"))
 	if p.ComputerKeyCurrent.Bytes != wantKey {
 		t.Errorf("current key bytes = %q, want %q", p.ComputerKeyCurrent.Bytes, wantKey)
+	}
+}
+
+func TestBind_CustomMinterCannotOmitV3Assertion(t *testing.T) {
+	coord := newFakeCoord(t)
+	minter := &fakeMinter{raw: true, creds: &tokens.AttachCredentials{
+		BindToken:       "bt",
+		BrokerGrant:     "bg",
+		BindingRevision: 1,
+	}}
+	clk := &fakeClock{t: time.Unix(1700000000, 0)}
+	authorizedRevision := int64(0)
+	cfg := baseConfig(coord, minter, clk)
+	cfg.OnAuthorized = func(revision int64) { authorizedRevision = revision }
+
+	_, err := Bind(context.Background(), cfg)
+	if err == nil || !strings.Contains(err.Error(), "key_assertion") {
+		t.Fatalf("err = %v, want missing key_assertion", err)
+	}
+	if authorizedRevision != 1 {
+		t.Fatalf("authorized revision = %d, want committed revision 1", authorizedRevision)
+	}
+	if coord.bindCalls != 0 {
+		t.Fatal("incomplete v3 authorization must fail before coordinator bind")
 	}
 }
 
@@ -197,10 +242,26 @@ func TestBind_ReadinessRetryReusesEnvelope(t *testing.T) {
 	}
 }
 
-func TestBind_RaceRetryReMints(t *testing.T) {
+func TestBind_PodIdentityShiftIsTerminalAndDoesNotRemint(t *testing.T) {
+	coord := newFakeCoord(t, bindStep{err: apiErr(409, "/errors/stale-coord-boot-id")})
+	minter := &fakeMinter{creds: &tokens.AttachCredentials{BindToken: "bt", BrokerGrant: "bg"}}
+	clk := &fakeClock{t: time.Unix(1700000000, 0)}
+
+	_, err := Bind(context.Background(), baseConfig(coord, minter, clk))
+	var be *bind.BindError
+	if !errors.As(err, &be) {
+		t.Fatalf("err = %T (%v), want *bind.BindError", err, err)
+	}
+	if coord.pubkeyCalls != 1 || minter.calls != 1 || coord.bindCalls != 1 {
+		t.Errorf("identity shift retried or re-minted: pubkey=%d minter=%d bind=%d, want 1/1/1",
+			coord.pubkeyCalls, minter.calls, coord.bindCalls)
+	}
+}
+
+func TestBind_TransientRestoreFailureReusesCommittedEnvelope(t *testing.T) {
 	coord := newFakeCoord(t,
-		bindStep{err: apiErr(409, "/errors/stale-coord-boot-id")}, // race → re-mint
-		bindStep{res: &coordinator.BindResult{ComputerToken: "ct_raced"}},
+		bindStep{err: &problem.APIError{Status: 503, ProblemType: "/errors/bind-restore-failed", Detail: "broker timeout"}},
+		bindStep{res: &coordinator.BindResult{ComputerToken: "ct_restored"}},
 	)
 	minter := &fakeMinter{creds: &tokens.AttachCredentials{BindToken: "bt", BrokerGrant: "bg"}}
 	clk := &fakeClock{t: time.Unix(1700000000, 0)}
@@ -209,15 +270,15 @@ func TestBind_RaceRetryReMints(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Bind: %v", err)
 	}
-	if res.ComputerToken != "ct_raced" {
+	if res.ComputerToken != "ct_restored" {
 		t.Errorf("res = %+v", res)
 	}
-	// Race re-mints: pubkey + creds fetched TWICE, fresh envelope each time.
-	if coord.pubkeyCalls != 2 || minter.calls != 2 {
-		t.Errorf("race re-mint: pubkey=%d minter=%d, want 2/2", coord.pubkeyCalls, minter.calls)
+	if minter.calls != 1 || coord.pubkeyCalls != 1 || coord.bindCalls != 2 {
+		t.Errorf("transient restore calls: pubkey=%d minter=%d bind=%d, want 1/1/2",
+			coord.pubkeyCalls, minter.calls, coord.bindCalls)
 	}
-	if coord.ciphertexts[0] == coord.ciphertexts[1] {
-		t.Error("race retry must re-mint a fresh envelope (different ciphertext)")
+	if coord.ciphertexts[0] != coord.ciphertexts[1] {
+		t.Error("transient restore retry must reuse the committed envelope")
 	}
 }
 
@@ -253,10 +314,40 @@ func TestBind_ReadinessDeadlineTimeout(t *testing.T) {
 	}
 }
 
-func TestBind_RaceExhausted(t *testing.T) {
-	steps := make([]bindStep, 5)
+func TestBind_ExpiredRestoreChallengeRestartsWithoutRemint(t *testing.T) {
+	steps := []bindStep{
+		{err: apiErr(409, "/errors/bind-restore-no-challenge")},
+		{err: apiErr(409, "/errors/bind-restore-no-challenge")},
+		{res: &coordinator.BindResult{ComputerToken: "ct_restarted"}},
+	}
+	coord := newFakeCoord(t, steps...)
+	minter := &fakeMinter{creds: &tokens.AttachCredentials{BindToken: "bt", BrokerGrant: "bg"}}
+	clk := &fakeClock{t: time.Unix(1700000000, 0)}
+	cfg := baseConfig(coord, minter, clk)
+	cfg.MaxBindAttempts = 3
+
+	res, err := Bind(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+	if res.ComputerToken != "ct_restarted" {
+		t.Errorf("res = %+v", res)
+	}
+	if minter.calls != 1 || coord.pubkeyCalls != 1 || coord.bindCalls != 3 {
+		t.Errorf("restore restart calls: pubkey=%d minter=%d bind=%d, want 1/1/3",
+			coord.pubkeyCalls, minter.calls, coord.bindCalls)
+	}
+	for i := 1; i < len(coord.ciphertexts); i++ {
+		if coord.ciphertexts[i] != coord.ciphertexts[0] {
+			t.Fatal("restore restart re-minted the committed attach authorization")
+		}
+	}
+}
+
+func TestBind_ExpiredRestoreChallengeExhausted(t *testing.T) {
+	steps := make([]bindStep, 3)
 	for i := range steps {
-		steps[i] = bindStep{err: apiErr(409, "/errors/wrong-pod-uid")} // race every time
+		steps[i] = bindStep{err: apiErr(409, "/errors/bind-restore-no-challenge")}
 	}
 	coord := newFakeCoord(t, steps...)
 	minter := &fakeMinter{creds: &tokens.AttachCredentials{BindToken: "bt", BrokerGrant: "bg"}}
@@ -269,8 +360,8 @@ func TestBind_RaceExhausted(t *testing.T) {
 	if !errors.As(err, &be) {
 		t.Fatalf("err = %T (%v), want *bind.BindError", err, err)
 	}
-	if coord.bindCalls != 2 {
-		t.Errorf("bindCalls = %d, want 2 (MaxBindAttempts)", coord.bindCalls)
+	if coord.bindCalls != 2 || minter.calls != 1 {
+		t.Errorf("calls = bind %d, mint %d; want 2/1", coord.bindCalls, minter.calls)
 	}
 }
 

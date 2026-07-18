@@ -43,6 +43,14 @@ func Info(podUID, coordBootID string) []byte {
 	return []byte("pine.bind.v1|" + podUID + "|" + coordBootID)
 }
 
+// RestoreInfo is the two-round v3 restore's round-2 domain: the
+// integrator-unwrapped component secrets sealed back to the same pod key.
+// Same suite, DISTINCT domain — a bind ciphertext can never be replayed as
+// a secrets payload or vice versa. MUST byte-match coord's RestoreInfo.
+func RestoreInfo(podUID, coordBootID string) []byte {
+	return []byte("pine.bind.restore.v1|" + podUID + "|" + coordBootID)
+}
+
 // Seal is the production sender path: encrypt `plaintext` to coord's recipient public key
 // (the 32-byte X25519 key from GET /v1/coord/bind-pubkey). Returns the wire ciphertext
 // (enc[32] || aead_ct). The production bind path passes aad=nil (empty).

@@ -31,6 +31,14 @@ func TestAttach_NewRejectsEmpty(t *testing.T) {
 	}
 }
 
+func validCredentialsRequest() CredentialsRequest {
+	return CredentialsRequest{
+		ComputerID: "c", PodUID: "p", CoordBootID: "b", SandboxID: "s",
+		PKComputer: "cGs", KeyGeneration: 1,
+		ExpectedBindingRevision: 0, IdempotencyKey: "attach-test-key",
+	}
+}
+
 func TestRegisterComputer(t *testing.T) {
 	var gotAuth, gotPath string
 	var gotBody map[string]string
@@ -69,13 +77,15 @@ func TestCredentials(t *testing.T) {
 	var gotBody map[string]any
 	s := newAttachSource(t, func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
+		if r.Header.Get("Idempotency-Key") != "attach-test-key" {
+			t.Errorf("Idempotency-Key = %q", r.Header.Get("Idempotency-Key"))
+		}
 		_ = json.NewDecoder(r.Body).Decode(&gotBody)
-		fmt.Fprint(w, `{"bind_token":"bt_1","broker_grant":"bg_1"}`)
+		fmt.Fprint(w, `{"bind_token":"bt_1","broker_grant":"bg_1","key_assertion":"ka_1","binding_revision":1}`)
 	})
-	ttl := 600
-	cr, err := s.Credentials(context.Background(), CredentialsRequest{
-		ComputerID: "c1", PodUID: "pod-1", CoordBootID: "boot-1", SandboxID: "sb-1", Profile: "pine_cua_v2", TTLSeconds: &ttl,
-	})
+	req := validCredentialsRequest()
+	req.ComputerID, req.PodUID, req.CoordBootID, req.SandboxID = "c1", "pod-1", "boot-1", "sb-1"
+	cr, err := s.Credentials(context.Background(), req)
 	if err != nil {
 		t.Fatalf("Credentials: %v", err)
 	}
@@ -85,8 +95,11 @@ func TestCredentials(t *testing.T) {
 	if gotPath != "/v1/computers/c1/attach-credentials" {
 		t.Errorf("path = %q", gotPath)
 	}
-	if gotBody["pod_uid"] != "pod-1" || gotBody["sandbox_id"] != "sb-1" || gotBody["profile"] != "pine_cua_v2" || gotBody["ttl_seconds"].(float64) != 600 {
+	if gotBody["pod_uid"] != "pod-1" || gotBody["sandbox_id"] != "sb-1" || gotBody["expected_binding_revision"].(float64) != 0 {
 		t.Errorf("body = %v", gotBody)
+	}
+	if _, ok := gotBody["profile"]; ok {
+		t.Errorf("profile leaked into attach body: %v", gotBody)
 	}
 }
 
@@ -94,9 +107,9 @@ func TestCredentials_OmitsOptional(t *testing.T) {
 	var gotBody map[string]any
 	s := newAttachSource(t, func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&gotBody)
-		fmt.Fprint(w, `{"bind_token":"b","broker_grant":"g"}`)
+		fmt.Fprint(w, `{"bind_token":"b","broker_grant":"g","key_assertion":"k","binding_revision":1}`)
 	})
-	if _, err := s.Credentials(context.Background(), CredentialsRequest{ComputerID: "c", PodUID: "p", CoordBootID: "b", SandboxID: "s"}); err != nil {
+	if _, err := s.Credentials(context.Background(), validCredentialsRequest()); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := gotBody["profile"]; ok {
@@ -112,8 +125,26 @@ func TestCredentials_404Unknown(t *testing.T) {
 		w.WriteHeader(404)
 	})
 	var e *UnknownComputerError
-	if _, err := s.Credentials(context.Background(), CredentialsRequest{ComputerID: "c", PodUID: "p", CoordBootID: "b", SandboxID: "s"}); !errors.As(err, &e) {
+	if _, err := s.Credentials(context.Background(), validCredentialsRequest()); !errors.As(err, &e) {
 		t.Fatalf("err = %T (%v), want *UnknownComputerError", err, err)
+	}
+}
+
+func TestCredentials_BindingRevisionConflictIsTerminalAndCarriesWinner(t *testing.T) {
+	s := newAttachSource(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(412)
+		fmt.Fprint(w, `{"type":"urn:pinesandbox:problem:binding-revision-conflict","status":412,"detail":"reload","reason":"binding_revision_changed","retryable":false,"current_binding_revision":7,"current_sandbox_id":"sb-winner"}`)
+	})
+	var e *BindingRevisionConflictError
+	if _, err := s.Credentials(context.Background(), validCredentialsRequest()); !errors.As(err, &e) {
+		t.Fatalf("err = %T (%v), want *BindingRevisionConflictError", err, err)
+	}
+	if e.CurrentRevision == nil || *e.CurrentRevision != 7 || e.CurrentSandboxID != "sb-winner" {
+		t.Fatalf("winner = revision %v sandbox %q", e.CurrentRevision, e.CurrentSandboxID)
+	}
+	if e.Code != "urn:pinesandbox:problem:binding-revision-conflict" || e.Reason != "binding_revision_changed" {
+		t.Fatalf("code/reason = %q/%q", e.Code, e.Reason)
 	}
 }
 
@@ -122,8 +153,21 @@ func TestCredentials_MissingFields(t *testing.T) {
 		fmt.Fprint(w, `{"bind_token":"b"}`) // missing broker_grant
 	})
 	var e *AttachCredentialsError
-	if _, err := s.Credentials(context.Background(), CredentialsRequest{ComputerID: "c", PodUID: "p", CoordBootID: "b", SandboxID: "s"}); !errors.As(err, &e) {
+	if _, err := s.Credentials(context.Background(), validCredentialsRequest()); !errors.As(err, &e) {
 		t.Fatalf("err = %T (%v), want *AttachCredentialsError", err, err)
+	}
+}
+
+func TestCredentials_PreservesPartialCommittedReceipt(t *testing.T) {
+	s := newAttachSource(t, func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"bind_token":"b","binding_revision":1}`)
+	})
+	creds, err := s.Credentials(context.Background(), validCredentialsRequest())
+	if err != nil {
+		t.Fatalf("Credentials: %v", err)
+	}
+	if creds.BindingRevision != 1 || creds.BindToken != "b" || creds.BrokerGrant != "" {
+		t.Fatalf("partial committed receipt = %+v", creds)
 	}
 }
 
@@ -133,7 +177,7 @@ func TestCredentials_MissingFields(t *testing.T) {
 func TestCredentials_403ProjectAccessDenied(t *testing.T) {
 	s := newAttachSource(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(403) })
 	var e *ProjectAccessDenied
-	if _, err := s.Credentials(context.Background(), CredentialsRequest{ComputerID: "c", PodUID: "p", CoordBootID: "b", SandboxID: "s"}); !errors.As(err, &e) {
+	if _, err := s.Credentials(context.Background(), validCredentialsRequest()); !errors.As(err, &e) {
 		t.Fatalf("err = %T (%v), want *ProjectAccessDenied", err, err)
 	} else if e.Status != 403 {
 		t.Errorf("status = %d, want 403", e.Status)
@@ -144,7 +188,7 @@ func TestCredentials_403ProjectAccessDenied(t *testing.T) {
 // specific ProjectAccessDenied (Go has no inheritance, so the two are distinct).
 func TestCredentials_403IsNotGenericAttachError(t *testing.T) {
 	s := newAttachSource(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(403) })
-	_, err := s.Credentials(context.Background(), CredentialsRequest{ComputerID: "c", PodUID: "p", CoordBootID: "b", SandboxID: "s"})
+	_, err := s.Credentials(context.Background(), validCredentialsRequest())
 	var generic *AttachCredentialsError
 	if errors.As(err, &generic) {
 		t.Errorf("403 → %T, want a distinct *ProjectAccessDenied, not *AttachCredentialsError", err)
@@ -157,7 +201,7 @@ func TestCredentials_GenericByStatus(t *testing.T) {
 	for _, status := range []int{401, 429, 500} {
 		s := newAttachSource(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(status) })
 		var e *AttachCredentialsError
-		if _, err := s.Credentials(context.Background(), CredentialsRequest{ComputerID: "c", PodUID: "p", CoordBootID: "b", SandboxID: "s"}); !errors.As(err, &e) {
+		if _, err := s.Credentials(context.Background(), validCredentialsRequest()); !errors.As(err, &e) {
 			t.Errorf("status %d → %T, want *AttachCredentialsError", status, err)
 		} else if e.Status != status {
 			t.Errorf("status = %d, want %d", e.Status, status)

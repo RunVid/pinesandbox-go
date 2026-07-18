@@ -9,7 +9,7 @@ import (
 // DelegatedConnection is the browser-safe connection envelope — the ONLY thing a server
 // hands a browser to drive a Computer's desktop. It carries NO ct_/ps_/project-JWS: only the
 // data-plane base URL, the visible session's name, the pinned spec major, and a freshly-minted
-// short-lived (≈30s) dt_ desktop token (+ its expiry). The browser cannot mint a dt_ (that
+// short-lived dt_ desktop token (+ its expiry). The browser cannot mint a dt_ (that
 // needs the server-held ct_), so the integrator re-mints server-side and refreshes the
 // envelope before each (re)connect. MarshalJSON emits the web-SDK wire shape.
 type DelegatedConnection struct {

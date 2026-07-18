@@ -58,15 +58,31 @@ func (c *Client) BindPubkey(ctx context.Context) (*BindPubkey, error) {
 	return parseBindPubkey(resp.Body)
 }
 
+// BindExtras carry the required v3 key assertion and the optional sealed
+// restore secrets used only on a two-round restore commit.
+type BindExtras struct {
+	KeyAssertion   string
+	RestoreSecrets string
+}
+
 // Bind submits the sealed bind envelope (ciphertext = enc||aead_ct, base64url by the
-// caller) echoing the pod identity, and returns the pod's ct_ + epoch.
-func (c *Client) Bind(ctx context.Context, bindToken, podUID, coordBootID, ciphertext string) (*BindResult, error) {
-	body, err := json.Marshal(map[string]string{
+// caller) echoing the pod identity, and returns the pod's ct_ + epoch — or a
+// RestoreChallenge when the Computer's state is asymmetric and the caller must unwrap
+// the per-component secrets first.
+func (c *Client) Bind(ctx context.Context, bindToken, podUID, coordBootID, ciphertext string, extras BindExtras) (*BindResult, error) {
+	fields := map[string]string{
 		"pod_uid":       podUID,
 		"coord_boot_id": coordBootID,
 		"ciphertext":    ciphertext,
 		"bind_token":    bindToken,
-	})
+	}
+	if extras.KeyAssertion != "" {
+		fields["key_assertion"] = extras.KeyAssertion
+	}
+	if extras.RestoreSecrets != "" {
+		fields["restore_secrets"] = extras.RestoreSecrets
+	}
+	body, err := json.Marshal(fields)
 	if err != nil {
 		return nil, fmt.Errorf("pinesandbox: marshal bind body: %w", err)
 	}
@@ -293,8 +309,10 @@ func (c *Client) openSSE(ctx context.Context, method, path, token string, body [
 }
 
 // respError maps a non-2xx coordinator response to a typed error: a 401 on a token'd call is
-// a *bind.RebindRequiredError (the bound ct_/ps_ lapsed — the caller must re-attach; the SDK
-// never implicitly rebinds, which would land a fresh pod and invalidate every ps_). The
+// a *bind.TokenRejectedError — a REPORT that the coordinator did not recognize the bound
+// ct_/ps_, not an instruction to re-attach. On a live current sandbox that is
+// binding_auth_lost; only confirmed sandbox-gone evidence justifies an attach, and the SDK
+// never implicitly rebinds (a fresh pod invalidates every ps_ and fences the old pod). The
 // underlying *problem.APIError is wrapped, so errors.As still reaches it. Everything else is
 // the RFC-9457 *problem.APIError. Token-less routes (bind/health/metrics) never hit the 401
 // branch. op is "<METHOD> <path>"; it + the data host stamp WHICH operation on WHICH Computer
@@ -304,7 +322,7 @@ func (c *Client) respError(status int, body []byte, requestID, token, op string)
 	ae.Host = c.Host()
 	ae.Op = op
 	if status == 401 && token != "" {
-		return bind.NewRebindRequiredError(401, "the bound token was rejected — re-attach the Computer", ae)
+		return bind.NewTokenRejectedError(401, "the bound token was rejected by the coordinator (binding_auth_lost on a live sandbox; re-attach ONLY on confirmed sandbox-gone evidence)", ae)
 	}
 	return ae
 }

@@ -47,8 +47,15 @@ func mustLoadTaxonomy() map[string]bool {
 type APIError struct {
 	Status      int    // HTTP status
 	ProblemType string // RFC-9457 `type`, e.g. "/errors/session-busy"
-	Title       string
-	Detail      string
+	// AltProblemTypes lets a SENTINEL match additional server slugs under one
+	// errors.Is target — e.g. one "no active turn" sentinel covering both the
+	// coordinator's idle-session and mid-request-race 409s. Always empty on a
+	// wire error (it carries a single ProblemType); consulted by Is only when
+	// this value is the errors.Is target.
+	AltProblemTypes []string
+	Title           string
+	Detail          string
+	Reason          string // safe, spec-defined machine reason (never an internal exception)
 	// Host + Op are the PRIMARY troubleshooting spine: WHICH Computer (the data host
 	// <sandbox>.computer.<zone>) and WHICH operation ("<METHOD> <path>") failed. They are
 	// set by the transport / coordinator layer that knows them (problem.Parse is host-
@@ -58,6 +65,10 @@ type APIError struct {
 	Op        string // "<METHOD> <path>" — WHICH operation (empty for the sentinels)
 	RequestID string // body `request_id`, else the X-Request-Id header (0C)
 	Retryable bool   // wire `retryable` (0C) when present, else the taxonomy fallback
+	// Attach authorization conflict extensions. They identify the winning
+	// integrator-side binding to reload/adopt; Portal never returns a ct_.
+	CurrentBindingRevision *int64
+	CurrentSandboxID       string
 }
 
 func (e *APIError) Error() string {
@@ -104,18 +115,32 @@ func ContextSuffix(host, op, requestID string) string {
 // match is purely "same non-empty slug", so the named sentinels live in the SDK facade.
 func (e *APIError) Is(target error) bool {
 	t, ok := target.(*APIError)
-	return ok && t.ProblemType != "" && t.ProblemType == e.ProblemType
+	if !ok || t.ProblemType == "" {
+		return false
+	}
+	if e.ProblemType == t.ProblemType {
+		return true
+	}
+	for _, alt := range t.AltProblemTypes {
+		if e.ProblemType == alt {
+			return true
+		}
+	}
+	return false
 }
 
 // wireProblem is the decoded body. Retryable is a pointer so an absent field (fall back
 // to the taxonomy) is distinguishable from an explicit false.
 type wireProblem struct {
-	Type      string `json:"type"`
-	Title     string `json:"title"`
-	Detail    string `json:"detail"`
-	Status    int    `json:"status"`
-	RequestID string `json:"request_id"`
-	Retryable *bool  `json:"retryable"`
+	Type                   string `json:"type"`
+	Title                  string `json:"title"`
+	Detail                 string `json:"detail"`
+	Status                 int    `json:"status"`
+	RequestID              string `json:"request_id"`
+	Retryable              *bool  `json:"retryable"`
+	Reason                 string `json:"reason"`
+	CurrentBindingRevision *int64 `json:"current_binding_revision"`
+	CurrentSandboxID       string `json:"current_sandbox_id"`
 }
 
 // Parse builds an *APIError from a non-2xx response: status is the HTTP status, body is
@@ -126,7 +151,9 @@ func Parse(status int, body []byte, headerRequestID string) *APIError {
 	e := &APIError{Status: status, RequestID: headerRequestID}
 	var wp wireProblem
 	if json.Unmarshal(body, &wp) == nil {
-		e.ProblemType, e.Title, e.Detail = wp.Type, wp.Title, wp.Detail
+		e.ProblemType, e.Title, e.Detail, e.Reason = wp.Type, wp.Title, wp.Detail, wp.Reason
+		e.CurrentBindingRevision = wp.CurrentBindingRevision
+		e.CurrentSandboxID = wp.CurrentSandboxID
 		if wp.RequestID != "" {
 			e.RequestID = wp.RequestID
 		}

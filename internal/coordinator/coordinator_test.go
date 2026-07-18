@@ -86,7 +86,7 @@ func TestBind(t *testing.T) {
 		fmt.Fprint(w, `{"computer_token":"ct_xyz","epoch":7}`)
 	})
 
-	res, err := c.Bind(context.Background(), "bt-1", "pod-1", "boot-1", "cipher-b64")
+	res, err := c.Bind(context.Background(), "bt-1", "pod-1", "boot-1", "cipher-b64", BindExtras{})
 	if err != nil {
 		t.Fatalf("Bind: %v", err)
 	}
@@ -273,18 +273,19 @@ func TestError_RFC9457Mapping(t *testing.T) {
 	}
 }
 
-// TestRebindRequiredOn401 verifies a token'd 401 maps to *bind.RebindRequiredError (the
-// bound ct_/ps_ lapsed — re-attach), with the underlying *problem.APIError still reachable.
-func TestRebindRequiredOn401(t *testing.T) {
+// TestTokenRejectedOn401 verifies a token'd 401 maps to *bind.TokenRejectedError (a report
+// of binding_auth_lost, never an attach instruction), with the underlying *problem.APIError
+// still reachable.
+func TestTokenRejectedOn401(t *testing.T) {
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/problem+json")
 		w.WriteHeader(401)
 		fmt.Fprint(w, `{"type":"/errors/unauthorized","status":401,"detail":"token rejected"}`)
 	})
 	_, err := c.GetSession(context.Background(), "ps_stale", "s")
-	var rr *bind.RebindRequiredError
+	var rr *bind.TokenRejectedError
 	if !errors.As(err, &rr) {
-		t.Fatalf("token'd 401 → %T (%v), want *bind.RebindRequiredError", err, err)
+		t.Fatalf("token'd 401 → %T (%v), want *bind.TokenRejectedError", err, err)
 	}
 	var ae *problem.APIError
 	if !errors.As(err, &ae) || ae.Status != 401 {
@@ -292,17 +293,17 @@ func TestRebindRequiredOn401(t *testing.T) {
 	}
 }
 
-// TestNoRebindOnTokenless401 verifies a token-LESS 401 (bind/health) stays a plain APIError —
-// rebind only applies to a bound token.
-func TestNoRebindOnTokenless401(t *testing.T) {
+// TestNoTokenRejectedOnTokenless401 verifies a token-LESS 401 (bind/health) stays a plain
+// APIError — the token-rejected class only applies to a bound token.
+func TestNoTokenRejectedOnTokenless401(t *testing.T) {
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(401)
 		fmt.Fprint(w, `{"type":"/errors/x","status":401}`)
 	})
 	_, err := c.BindPubkey(context.Background()) // token-less route
-	var rr *bind.RebindRequiredError
+	var rr *bind.TokenRejectedError
 	if errors.As(err, &rr) {
-		t.Error("token-less 401 must NOT be RebindRequiredError")
+		t.Error("token-less 401 must NOT be TokenRejectedError")
 	}
 	var ae *problem.APIError
 	if !errors.As(err, &ae) {
@@ -331,7 +332,7 @@ func TestMalformedTypedResponses(t *testing.T) {
 			return err
 		}},
 		{"bind missing computer_token", `{"epoch":1}`, func(c *Client) error {
-			_, err := c.Bind(context.Background(), "bt", "p", "b", "ct")
+			_, err := c.Bind(context.Background(), "bt", "p", "b", "ct", BindExtras{})
 			return err
 		}},
 	}

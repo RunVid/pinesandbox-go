@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -82,6 +83,30 @@ func TestCreate_SuccessAndHeaders(t *testing.T) {
 	}
 	if gotCT != "application/json" {
 		t.Errorf("Content-Type = %q", gotCT)
+	}
+}
+
+func TestCreateComputer_UsesPolicyOwnedRoute(t *testing.T) {
+	var body string
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" || r.URL.Path != "/computer-sandboxes" {
+			t.Errorf("got %s %s", r.Method, r.URL.Path)
+		}
+		raw, _ := io.ReadAll(r.Body)
+		body = string(raw)
+		w.WriteHeader(202)
+		fmt.Fprint(w, sandboxJSON)
+	}, &fakeSource{initial: "jws1"})
+
+	_, err := c.CreateComputer(context.Background(), map[string]any{
+		"timeout":  300,
+		"metadata": map[string]string{"owner": "integrator"},
+	})
+	if err != nil {
+		t.Fatalf("CreateComputer: %v", err)
+	}
+	if strings.Contains(body, "image") || strings.Contains(body, "poolRef") || strings.Contains(body, "entrypoint") {
+		t.Fatalf("runtime selection leaked into Computer create body: %s", body)
 	}
 }
 

@@ -16,7 +16,7 @@ import (
 // pin that the methods actually send these paths; this list pins them to the contract.
 var sdkRoutes = []string{
 	// control plane (sandbox-lifecycle)
-	"POST /sandboxes",
+	"POST /computer-sandboxes",
 	"GET /sandboxes/{id}",
 	"DELETE /sandboxes/{id}",
 	"POST /sandboxes/{id}/pause",

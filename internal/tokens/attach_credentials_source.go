@@ -33,10 +33,14 @@ func NewAttachCredentialsSource(client *transport.Client, apiKey string) (*Attac
 	return &AttachCredentialsSource{client: client, apiKey: apiKey}, nil
 }
 
-// AttachCredentials is the per-attach mint result.
+// AttachCredentials is the per-attach mint result. KeyAssertion is required
+// for v3: it is the portal-signed proof of which integrator key captures for
+// this Computer, forwarded VERBATIM to the coord bind.
 type AttachCredentials struct {
-	BindToken   string
-	BrokerGrant string
+	BindToken       string
+	BrokerGrant     string
+	KeyAssertion    string
+	BindingRevision int64
 }
 
 // CredentialsRequest are the coordinates for a per-attach mint.
@@ -45,8 +49,13 @@ type CredentialsRequest struct {
 	PodUID      string
 	CoordBootID string
 	SandboxID   string
-	Profile     string // optional
-	TTLSeconds  *int   // optional sizing hint
+	// PKComputer (base64url raw X25519 public key) + KeyGeneration are
+	// required by v3: the portal advances its
+	// per-Computer key floor and returns the signed key_assertion.
+	PKComputer              string
+	KeyGeneration           int
+	ExpectedBindingRevision int64
+	IdempotencyKey          string
 }
 
 // RegisterComputer registers computer_id into the portal ownership registry (idempotent
@@ -76,35 +85,57 @@ func (s *AttachCredentialsSource) Credentials(ctx context.Context, req Credentia
 	if req.ComputerID == "" || req.PodUID == "" || req.CoordBootID == "" || req.SandboxID == "" {
 		return nil, fmt.Errorf("pinesandbox: computer_id, pod_uid, coord_boot_id, sandbox_id all required")
 	}
-	body := map[string]any{"pod_uid": req.PodUID, "coord_boot_id": req.CoordBootID, "sandbox_id": req.SandboxID}
-	if req.Profile != "" {
-		body["profile"] = req.Profile
+	if req.PKComputer == "" || req.KeyGeneration <= 0 {
+		return nil, fmt.Errorf("pinesandbox: pk_computer and positive key_generation required for v3 attach")
 	}
-	if req.TTLSeconds != nil {
-		body["ttl_seconds"] = *req.TTLSeconds
+	if req.ExpectedBindingRevision < 0 || req.IdempotencyKey == "" {
+		return nil, fmt.Errorf("pinesandbox: expected binding revision and idempotency key required")
+	}
+	body := map[string]any{
+		"pod_uid": req.PodUID, "coord_boot_id": req.CoordBootID,
+		"sandbox_id":  req.SandboxID,
+		"pk_computer": req.PKComputer, "key_generation": req.KeyGeneration,
+		"expected_binding_revision": req.ExpectedBindingRevision,
 	}
 	path := registerPath + "/" + req.ComputerID + "/attach-credentials"
-	resp, err := s.post(ctx, path, body)
+	resp, err := s.postWithHeaders(ctx, path, body, map[string]string{
+		"Idempotency-Key": req.IdempotencyKey,
+	})
 	if err != nil {
 		if ae, ok := asAPIError(err); ok {
 			if ae.Status == 404 {
-				return nil, &UnknownComputerError{tokenBaseFrom(fmt.Sprintf("unknown, deleted, or cross-project computer_id %s — register it first", req.ComputerID), ae)}
+				return nil, &UnknownComputerError{tokenBaseFrom(fmt.Sprintf("unknown, deleted, or cross-project computer_id %s", req.ComputerID), ae)}
+			}
+			if ae.Status == 412 && ae.ProblemType == "urn:pinesandbox:problem:binding-revision-conflict" {
+				return nil, &BindingRevisionConflictError{
+					tokenBase:        tokenBaseFrom("reload and adopt the winning binding", ae),
+					CurrentRevision:  ae.CurrentBindingRevision,
+					CurrentSandboxID: ae.CurrentSandboxID,
+				}
 			}
 			return nil, s.generic(ae, "attach-credentials mint")
 		}
 		return nil, err
 	}
 	var out struct {
-		BindToken   string `json:"bind_token"`
-		BrokerGrant string `json:"broker_grant"`
+		BindToken       string `json:"bind_token"`
+		BrokerGrant     string `json:"broker_grant"`
+		KeyAssertion    string `json:"key_assertion"`
+		BindingRevision int64  `json:"binding_revision"`
 	}
 	if err := json.Unmarshal(resp.Body, &out); err != nil {
 		return nil, &AttachCredentialsError{s.malformedBase("attach-credentials response was not valid JSON", path, err)}
 	}
-	if out.BindToken == "" || out.BrokerGrant == "" {
-		return nil, &AttachCredentialsError{s.malformedBase("attach-credentials response missing bind_token/broker_grant", path, nil)}
+	if out.BindingRevision <= req.ExpectedBindingRevision {
+		return nil, &AttachCredentialsError{s.malformedBase("attach-credentials response missing an advancing binding revision", path, nil)}
 	}
-	return &AttachCredentials{BindToken: out.BindToken, BrokerGrant: out.BrokerGrant}, nil
+	// Once Portal returns an advancing revision, the authorization is committed.
+	// Preserve the whole receipt—even if another required field is malformed—so
+	// binder can record that revision before it rejects the incomplete v3 result.
+	return &AttachCredentials{
+		BindToken: out.BindToken, BrokerGrant: out.BrokerGrant,
+		KeyAssertion: out.KeyAssertion, BindingRevision: out.BindingRevision,
+	}, nil
 }
 
 // String is redacted: it never reveals the pk_.
@@ -113,17 +144,25 @@ func (s *AttachCredentialsSource) String() string {
 }
 
 func (s *AttachCredentialsSource) post(ctx context.Context, path string, body any) (*transport.Response, error) {
+	return s.postWithHeaders(ctx, path, body, nil)
+}
+
+func (s *AttachCredentialsSource) postWithHeaders(ctx context.Context, path string, body any, extra map[string]string) (*transport.Response, error) {
 	b, err := json.Marshal(body)
 	if err != nil {
 		return nil, fmt.Errorf("pinesandbox: marshal request: %w", err)
+	}
+	headers := map[string]string{"Authorization": "Bearer " + s.apiKey}
+	for key, value := range extra {
+		headers[key] = value
 	}
 	return s.client.Do(ctx, "POST", path, transport.Request{
 		Accept:      "application/json",
 		ContentType: "application/json",
 		Body:        b,
-		Headers:     map[string]string{"Authorization": "Bearer " + s.apiKey},
-		// register + credential/grant mints are idempotent → safe to retry on a
-		// transient connection fault (re-minting yields a fresh, harmless result).
+		Headers:     headers,
+		// Register is idempotent; attach carries a stable Idempotency-Key and
+		// Portal replays the exact receipt. Both are safe across a lost response.
 		RetryOnTransient: true,
 	})
 }

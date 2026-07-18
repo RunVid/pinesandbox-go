@@ -66,14 +66,16 @@ type BindTimeoutError struct{ base }
 
 func (e *BindTimeoutError) Error() string { return errMsg("bind readiness timeout", e.Status, e.Msg) }
 
-// RebindRequiredError: a 401 on a previously-bound ct_ — surface, NEVER implicitly rebind
-// (a rebind lands a fresh pod, invalidating every ps_). Produced by the request layer.
-type RebindRequiredError struct{ base }
+// TokenRejectedError: a 401 on a previously-bound ct_/ps_. Produced by the request layer.
+// A report, not an instruction: on a live, current sandbox this is binding_auth_lost —
+// reconcile; only confirmed sandbox-gone evidence justifies an attach. The SDK never
+// implicitly rebinds (a fresh pod invalidates every ps_ and fences the old pod's state).
+type TokenRejectedError struct{ base }
 
-func (e *RebindRequiredError) Error() string { return errMsg("rebind required", e.Status, e.Msg) }
+func (e *TokenRejectedError) Error() string { return errMsg("token rejected", e.Status, e.Msg) }
 
 // Constructors let the bind orchestrator (internal/binder) produce the errors the
-// classifier doesn't (the readiness-deadline timeout and the race-exhausted fallback)
+// classifier doesn't (the readiness-deadline timeout and restore-restart fallback)
 // without reaching the unexported base.
 
 // NewBindTimeoutError builds a BindTimeoutError (the readiness deadline elapsed).
@@ -81,13 +83,13 @@ func NewBindTimeoutError(msg string, cause error) *BindTimeoutError {
 	return &BindTimeoutError{base{Msg: msg, Cause: cause}}
 }
 
-// NewBindError builds a generic BindError (e.g. race retries exhausted).
+// NewBindError builds a generic BindError (e.g. restore restarts exhausted).
 func NewBindError(status int, msg string, cause error) *BindError {
 	return &BindError{base{Status: status, Msg: msg, Cause: cause}}
 }
 
-// NewRebindRequiredError builds a RebindRequiredError (a 401 on a previously-bound ct_/ps_).
+// NewTokenRejectedError builds a TokenRejectedError (a 401 on a previously-bound ct_/ps_).
 // cause is wrapped so callers can still errors.As to the underlying *problem.APIError.
-func NewRebindRequiredError(status int, msg string, cause error) *RebindRequiredError {
-	return &RebindRequiredError{base{Status: status, Msg: msg, Cause: cause}}
+func NewTokenRejectedError(status int, msg string, cause error) *TokenRejectedError {
+	return &TokenRejectedError{base{Status: status, Msg: msg, Cause: cause}}
 }

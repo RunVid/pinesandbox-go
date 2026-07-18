@@ -30,7 +30,33 @@ var (
 	// ErrSessionLimit (409): the Computer's concurrent-session cap is reached — close an
 	// idle/finished session (DestroySession) to free a slot, then retry CreateSession.
 	ErrSessionLimit = &problem.APIError{Status: 409, ProblemType: "/errors/session-limit"}
-	// ErrNoActiveTask (404): no task exists for this session yet (nothing to read/steer).
+	// ErrTaskNotFound (404, /errors/task-not-found): a task READ on a session that has
+	// never run a turn. This is a VALID IDLE SESSION — start a turn on it; do not treat
+	// the session as stale and never re-create it (a duplicate CreateSession hits the
+	// name-conflict 409).
+	ErrTaskNotFound = &problem.APIError{Status: 404, ProblemType: "/errors/task-not-found"}
+	// ErrNoActiveTurn (409): a task MUTATION (answer/steer/…) with no active turn to
+	// act on. The coordinator emits this as TWO slugs, both covered here: the
+	// idle-session gate `/errors/no-active-task` ("no in-flight turn"), and the
+	// mid-request race `/errors/no-active-turn` where the turn ends between the
+	// in-flight check and the broker mutation. The session and its task history are
+	// fine — there is just nothing to steer right now; start a turn with Run.
+	ErrNoActiveTurn = &problem.APIError{
+		Status:          409,
+		ProblemType:     "/errors/no-active-task",
+		AltProblemTypes: []string{"/errors/no-active-turn"},
+	}
+	// ErrNoActiveTask is the deprecated predecessor of the two sentinels above.
+	// It is FROZEN at its original {404, /errors/no-active-task} value — do not
+	// mutate the field. APIError.Is matches by problem-type slug only (status is
+	// ignored), so this sentinel already matches the coordinator's real
+	// {409, /errors/no-active-task} mutation error by slug; changing its Status
+	// would give no matching benefit and could break code that reads the
+	// sentinel's fields. The real gap it never covered — a task READ on a
+	// never-run session ({404, /errors/task-not-found}, a different slug) — is
+	// filled by ErrTaskNotFound above.
+	//
+	// Deprecated: use ErrTaskNotFound for reads and ErrNoActiveTurn for mutations.
 	ErrNoActiveTask = &problem.APIError{Status: 404, ProblemType: "/errors/no-active-task"}
 	// ErrActionNotImplemented (501): the action isn't available here (e.g. no resident agent
 	// configured on this pool — agent.Run / delegate-mode turns).
@@ -58,6 +84,30 @@ type (
 	SpecVersionMismatch = spec.MismatchError
 )
 
+// AttachAuthorizationCommittedError means Portal committed a new binding
+// revision, but the later coordinator bind did not complete. The fresh pod is
+// cleaned up best-effort. Persist BindingRevision before retrying so the next
+// attach can supersede the failed authorization instead of losing CAS state.
+// Credentials is non-nil for CreateComputer, which otherwise has no result in
+// which to return identity and capture-key material selected for the committed
+// attach. Its String and GoString forms redact secrets.
+// The underlying typed bind error remains reachable with errors.Is/errors.As.
+type AttachAuthorizationCommittedError struct {
+	BindingRevision int64
+	SandboxID       string
+	Credentials     *Credentials
+	Err             error
+}
+
+func (e *AttachAuthorizationCommittedError) Error() string {
+	return fmt.Sprintf(
+		"pinesandbox: attach authorization committed at revision %d for sandbox %s, but coordinator bind failed: %v",
+		e.BindingRevision, e.SandboxID, e.Err,
+	)
+}
+
+func (e *AttachAuthorizationCommittedError) Unwrap() error { return e.Err }
+
 // Bind handshake errors.
 type (
 	BindError                    = bind.BindError
@@ -66,19 +116,24 @@ type (
 	PodPoisonedError             = bind.PodPoisonedError
 	BrokerUnreachableError       = bind.BrokerUnreachableError
 	BindTimeoutError             = bind.BindTimeoutError
-	RebindRequiredError          = bind.RebindRequiredError
+	// TokenRejectedError: a 401 on a previously-bound ct_/ps_ — a report that the
+	// coordinator did not recognize the token, not an instruction to re-attach. On a
+	// live current sandbox this is binding_auth_lost; attach only on confirmed
+	// sandbox-gone evidence. (Renamed from RebindRequiredError in 0.3.9.)
+	TokenRejectedError = bind.TokenRejectedError
 )
 
 // Control-token + attach-credential (portal) errors.
 type (
-	ControlTokenError         = tokens.ControlTokenError
-	InvalidClientKey          = tokens.InvalidClientKey
-	InsufficientScope         = tokens.InsufficientScope
-	ProjectAccessDenied       = tokens.ProjectAccessDenied
-	RateLimited               = tokens.RateLimited
-	AttachCredentialsError    = tokens.AttachCredentialsError
-	ComputerRegistrationError = tokens.ComputerRegistrationError
-	UnknownComputerError      = tokens.UnknownComputerError
+	ControlTokenError            = tokens.ControlTokenError
+	InvalidClientKey             = tokens.InvalidClientKey
+	InsufficientScope            = tokens.InsufficientScope
+	ProjectAccessDenied          = tokens.ProjectAccessDenied
+	RateLimited                  = tokens.RateLimited
+	AttachCredentialsError       = tokens.AttachCredentialsError
+	BindingRevisionConflictError = tokens.BindingRevisionConflictError
+	ComputerRegistrationError    = tokens.ComputerRegistrationError
+	UnknownComputerError         = tokens.UnknownComputerError
 )
 
 // Control-plane (lifecycle) errors.

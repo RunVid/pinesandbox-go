@@ -43,6 +43,17 @@ func NewClient(raw *transport.Client, src TokenSource, specMajor int) *Client {
 // SandboxInfo (202 async). No blind retry — a create may have applied; only the safe
 // 401 → token-refresh is retried.
 func (c *Client) Create(ctx context.Context, body any, idempotencyKey string) (*SandboxInfo, error) {
+	return c.create(ctx, "/sandboxes", body, idempotencyKey)
+}
+
+// CreateComputer provisions a Computer sandbox. The body intentionally contains
+// only caller-owned settings; the lifecycle server expands the project's signed
+// runtime policy into image, pool, resources, entrypoint, and platform env.
+func (c *Client) CreateComputer(ctx context.Context, body any) (*SandboxInfo, error) {
+	return c.create(ctx, "/computer-sandboxes", body, "")
+}
+
+func (c *Client) create(ctx context.Context, path string, body any, idempotencyKey string) (*SandboxInfo, error) {
 	b, err := json.Marshal(body)
 	if err != nil {
 		return nil, fmt.Errorf("pinesandbox: marshal create payload: %w", err)
@@ -51,14 +62,14 @@ func (c *Client) Create(ctx context.Context, body any, idempotencyKey string) (*
 	if idempotencyKey != "" {
 		extra["Idempotency-Key"] = idempotencyKey
 	}
-	// A keyed create is safe to retry on a transient fault (the server dedupes the
-	// replay); a keyless one is NOT (a reset may have applied → double-provision).
-	resp, err := c.do(ctx, "POST", "/sandboxes", b, extra, idempotencyKey != "")
+	// No create retry: the lifecycle server does not promise Idempotency-Key
+	// deduplication, and a transport fault can happen after allocation applied.
+	resp, err := c.do(ctx, "POST", path, b, extra, false)
 	if err != nil {
 		return nil, err
 	}
 	if !okStatus(resp.Status, 200, 201, 202) {
-		return nil, statusError("POST", "/sandboxes", c.raw.Host(), resp)
+		return nil, statusError("POST", path, c.raw.Host(), resp)
 	}
 	return ParseSandboxInfo(resp.Body)
 }

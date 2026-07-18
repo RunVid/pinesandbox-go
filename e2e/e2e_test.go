@@ -146,8 +146,13 @@ func TestE2E_J2_Persistence(t *testing.T) {
 		t.Fatalf("Capture: %v", err)
 	}
 	snap := mustSnapshot(t, ctx1, comp)
-	if v, _ := snap["envelope_version"].(float64); v != 1 {
-		t.Errorf("envelope_version = %v, want 1 (KMS-wrapped envelope_v1)", snap["envelope_version"])
+	// GET /state projects the manifest's live component (per-component state
+	// layout): envelope_version 2 + component == "live".
+	if v, _ := snap["envelope_version"].(float64); v != 2 {
+		t.Errorf("envelope_version = %v, want 2 (live-component projection)", snap["envelope_version"])
+	}
+	if snap["component"] != "live" {
+		t.Errorf("component = %v, want live", snap["component"])
 	}
 	if snap["computer_id"] != id {
 		t.Errorf("snapshot computer_id = %v, want %s", snap["computer_id"], id)
