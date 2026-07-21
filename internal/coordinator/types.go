@@ -61,6 +61,10 @@ type BindResult struct {
 	ComputerToken    string // ct_
 	Epoch            int
 	RestoreChallenge *RestoreChallenge
+	// PersistenceMode is the pod's bound persistence mode as reported by the
+	// coordinator (e.g. "persistent" or "ephemeral"); empty when the coord
+	// does not report one.
+	PersistenceMode string
 	// Portal attach authorization revision. This is SDK bookkeeping populated
 	// by binder after the coordinator response (not a coord wire field).
 	BindingRevision int64
@@ -91,6 +95,7 @@ func parseBindResult(body []byte) (*BindResult, error) {
 		ComputerToken    string            `json:"computer_token"`
 		Epoch            int               `json:"epoch"`
 		RestoreChallenge *RestoreChallenge `json:"restore_challenge"`
+		PersistenceMode  string            `json:"persistence_mode"`
 	}
 	if err := json.Unmarshal(body, &w); err != nil {
 		return nil, fmt.Errorf("pinesandbox: unparseable bind result: %w", err)
@@ -99,12 +104,12 @@ func parseBindResult(body []byte) (*BindResult, error) {
 		if w.RestoreChallenge.ChallengeID == "" || len(w.RestoreChallenge.Components) == 0 {
 			return nil, fmt.Errorf("pinesandbox: bind restore challenge malformed")
 		}
-		return &BindResult{RestoreChallenge: w.RestoreChallenge}, nil
+		return &BindResult{RestoreChallenge: w.RestoreChallenge, PersistenceMode: w.PersistenceMode}, nil
 	}
 	if w.ComputerToken == "" {
 		return nil, fmt.Errorf("pinesandbox: bind result missing computer_token")
 	}
-	return &BindResult{ComputerToken: w.ComputerToken, Epoch: w.Epoch}, nil
+	return &BindResult{ComputerToken: w.ComputerToken, Epoch: w.Epoch, PersistenceMode: w.PersistenceMode}, nil
 }
 
 // Session is the per-window slice of a Computer (the create/get response). Token is the

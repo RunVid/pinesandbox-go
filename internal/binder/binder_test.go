@@ -75,6 +75,17 @@ func (f *fakeCoord) Bind(_ context.Context, bindToken, podUID, boot, ciphertext 
 // open decrypts a base64url ciphertext the binder produced, returning the plaintext.
 func (f *fakeCoord) open(t *testing.T, ciphertext string) bindPlaintext {
 	t.Helper()
+	var p bindPlaintext
+	if err := json.Unmarshal(f.openRaw(t, ciphertext), &p); err != nil {
+		t.Fatalf("plaintext not JSON: %v", err)
+	}
+	return p
+}
+
+// openRaw decrypts a base64url ciphertext the binder produced, returning the raw
+// plaintext JSON — so a test can assert on the exact set of keys present.
+func (f *fakeCoord) openRaw(t *testing.T, ciphertext string) []byte {
+	t.Helper()
 	raw, err := base64.RawURLEncoding.DecodeString(ciphertext)
 	if err != nil {
 		t.Fatalf("ciphertext not base64url: %v", err)
@@ -83,22 +94,20 @@ func (f *fakeCoord) open(t *testing.T, ciphertext string) bindPlaintext {
 	if err != nil {
 		t.Fatalf("coord could not open the envelope: %v", err)
 	}
-	var p bindPlaintext
-	if err := json.Unmarshal(pt, &p); err != nil {
-		t.Fatalf("plaintext not JSON: %v", err)
-	}
-	return p
+	return pt
 }
 
 type fakeMinter struct {
-	creds *tokens.AttachCredentials
-	err   error
-	calls int
-	raw   bool
+	creds  *tokens.AttachCredentials
+	err    error
+	calls  int
+	raw    bool
+	gotReq tokens.CredentialsRequest // the last request the binder minted with
 }
 
-func (f *fakeMinter) Credentials(_ context.Context, _ tokens.CredentialsRequest) (*tokens.AttachCredentials, error) {
+func (f *fakeMinter) Credentials(_ context.Context, req tokens.CredentialsRequest) (*tokens.AttachCredentials, error) {
 	f.calls++
+	f.gotReq = req
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -171,6 +180,62 @@ func TestBind_HappyPath(t *testing.T) {
 	wantKey := base64.RawURLEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef"))
 	if p.ComputerKeyCurrent.Bytes != wantKey {
 		t.Errorf("current key bytes = %q, want %q", p.ComputerKeyCurrent.Bytes, wantKey)
+	}
+}
+
+// TestBind_Ephemeral proves an access-lease-only attach omits every piece of
+// persistence key material: the mint request carries no pk_computer/key_generation,
+// the bind extras carry no key_assertion, and the HPKE-sealed plaintext carries
+// broker_grant WITHOUT computer_key_current. (Security-adjacent: this is the proof
+// the ephemeral path never leaks a computer key into the bind payload.)
+func TestBind_Ephemeral(t *testing.T) {
+	coord := newFakeCoord(t, bindStep{res: &coordinator.BindResult{ComputerToken: "ct_eph", Epoch: 1}})
+	// raw minter: return exactly the receipt, with NO key_assertion (ephemeral).
+	minter := &fakeMinter{raw: true, creds: &tokens.AttachCredentials{
+		BindToken: "bt", BrokerGrant: "bg", BindingRevision: 1,
+	}}
+	clk := &fakeClock{t: time.Unix(1700000000, 0)}
+
+	cfg := baseConfig(coord, minter, clk)
+	cfg.Ephemeral = true
+	cfg.Key = nil             // ephemeral binds with no computer key at all
+	cfg.CaptureKeypairs = nil // and no capture identity
+	cfg.CaptureGen = 0
+
+	res, err := Bind(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+	if res.ComputerToken != "ct_eph" {
+		t.Errorf("res = %+v", res)
+	}
+
+	// 1) Attach-credentials request omits the capture identity.
+	if minter.gotReq.PKComputer != "" || minter.gotReq.KeyGeneration != 0 {
+		t.Errorf("mint req carried capture identity: pk=%q gen=%d", minter.gotReq.PKComputer, minter.gotReq.KeyGeneration)
+	}
+	if !minter.gotReq.Ephemeral {
+		t.Error("mint req not flagged ephemeral")
+	}
+
+	// 2) The bind carries NO key_assertion.
+	if len(coord.extras) != 1 || coord.extras[0].KeyAssertion != "" {
+		t.Errorf("bind extras carried a key_assertion: %+v", coord.extras)
+	}
+
+	// 3) The sealed plaintext has broker_grant but NO computer_key_current.
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(coord.openRaw(t, coord.ciphertexts[0]), &raw); err != nil {
+		t.Fatalf("plaintext not JSON: %v", err)
+	}
+	if _, ok := raw["computer_key_current"]; ok {
+		t.Error("ephemeral plaintext leaked computer_key_current")
+	}
+	if _, ok := raw["computer_key_for_restore"]; ok {
+		t.Error("ephemeral plaintext leaked computer_key_for_restore")
+	}
+	if string(raw["broker_grant"]) != `"bg"` {
+		t.Errorf("broker_grant = %s, want \"bg\"", raw["broker_grant"])
 	}
 }
 

@@ -7,6 +7,23 @@ package `pinesandbox`) are documented here. The format follows
 `0.<POOL_VERSION>.<patch>`. So `require go.pinesandbox.io/computer v0.3.x`
 targets `pine-cua-pool-v3` (the compatibility contract integrators pin to).
 
+## [0.3.11] — 2026-07-21
+
+### Added
+- Agent TaskEvents now expose the coherent `Controller` / `ModeEpoch` control
+  snapshot and a typed `AgentEvent.ControlChange()` accessor for additive
+  `controller_changed` frames, so a task follower can track human takeover and
+  agent release without parsing raw event JSON.
+- Ephemeral persistence mode: `AttachOptions.Ephemeral` on `CreateComputer` /
+  `AttachComputer` provisions an access-lease-only Computer that persists
+  nothing. An ephemeral attach binds no capture keypair, omits
+  `pk_computer`/`key_generation` from the attach-credentials mint, carries no
+  `key_assertion`, seals only the `broker_grant` into the HPKE bind payload (no
+  `computer_key`), and `Stop` skips the pre-stop checkpoint.
+  `Computer.PersistenceMode()` surfaces the mode the coordinator echoed on the
+  bind (`"persistent"` or `"ephemeral"`). The persistent default
+  (`Ephemeral: false`) is unchanged.
+
 ## [0.3.10] — 2026-07-18
 
 ### Added

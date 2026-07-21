@@ -59,6 +59,10 @@ func TestMultiFieldResponses_ConsciouslyHandled(t *testing.T) {
 			"testing surface — the pre-first-run browser-flags config; see getAgentBrowserFlags.",
 		"getFileViewMetadata": "not exposed (deliberate): capability-bound loopback surface " +
 			"for the image-owned browser extension, not a public Computer SDK operation",
+		"getAgentEventsPage": "not exposed yet (deliberate): the paged task-history read " +
+			"(task-history contract) — first consumer is the portal transcript. " +
+			"When a Go integrator needs history paging, model {events, latest_event_id} as a " +
+			"typed page DTO; do NOT flatten (latest_event_id is the catch-up cursor).",
 
 		// flattened — a subset is returned on purpose (low-value metadata dropped)
 		"listSkills": "flattened: returns the skills array; generated_at is manifest " +

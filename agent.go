@@ -38,6 +38,9 @@ type (
 	FileRef         = coordinator.FileRef
 	Finding         = coordinator.Finding
 	AgentEvent      = coordinator.AgentEvent
+	// AgentControlChange is the typed controller_changed payload returned by
+	// AgentEvent.ControlChange().
+	AgentControlChange = coordinator.AgentControlChange
 	// AgentAsk is the typed needs_input payload — read it via AgentEvent.Ask().
 	AgentAsk = coordinator.AgentAsk
 )

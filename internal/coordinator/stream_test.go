@@ -336,7 +336,8 @@ func TestAgentEvents_StreamLostCarriesRequestID(t *testing.T) {
 func TestAgentEvents_TypedEnvelopeFields(t *testing.T) {
 	c := streamTestClient(t, 5, func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, "id: 9\ndata: {\"event_id\":9,\"type\":\"needs_input\",\"ts\":\"2026-06-12T10:00:00Z\","+
-			"\"source\":\"agent\",\"visibility\":\"user\",\"task_state\":\"paused\",\"reason\":\"needs_input\","+
+			"\"source\":\"agent\",\"visibility\":\"user\",\"controller\":\"human\",\"mode_epoch\":7,"+
+			"\"task_state\":\"paused\",\"reason\":\"needs_input\","+
 			"\"turn_attempt\":2,\"payload\":{\"prompt\":\"which seat?\"}}\n\n")
 		fmt.Fprint(w, "id: 10\ndata: {\"event_id\":10,\"type\":\"result\",\"ts\":\"garbage\",\"terminal\":true}\n\n")
 	})
@@ -362,6 +363,9 @@ func TestAgentEvents_TypedEnvelopeFields(t *testing.T) {
 	}
 	if a.Source != "agent" || a.Visibility != "user" || a.TurnAttempt != 2 {
 		t.Errorf("envelope = source=%q visibility=%q turn_attempt=%d", a.Source, a.Visibility, a.TurnAttempt)
+	}
+	if a.Controller != "human" || a.ModeEpoch != 7 {
+		t.Errorf("control snapshot = (%q,%d), want (human,7)", a.Controller, a.ModeEpoch)
 	}
 	if a.Ts == nil || a.Ts.Year() != 2026 {
 		t.Errorf("Ts = %v, want the parsed 2026 timestamp", a.Ts)

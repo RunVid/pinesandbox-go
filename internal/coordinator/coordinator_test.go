@@ -101,6 +101,19 @@ func TestBind(t *testing.T) {
 	}
 }
 
+func TestBind_SurfacesPersistenceMode(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"computer_token":"ct_eph","epoch":1,"persistence_mode":"ephemeral"}`)
+	})
+	res, err := c.Bind(context.Background(), "bt", "pod", "boot", "ct", BindExtras{})
+	if err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+	if res.PersistenceMode != "ephemeral" {
+		t.Errorf("PersistenceMode = %q, want %q", res.PersistenceMode, "ephemeral")
+	}
+}
+
 func TestCreateSession_BodyAndAuth(t *testing.T) {
 	var body map[string]any
 	var auth string

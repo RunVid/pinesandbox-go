@@ -114,14 +114,18 @@ func (c *Client) CreateComputer(ctx context.Context, opts AttachOptions) (*Compu
 		return nil, err
 	}
 	comp := newComputer(creds.ID, creds.Key)
-	if opts.CaptureKeypair == nil {
-		opts.CaptureKeypair = creds.CaptureKeypair
-	}
-	if opts.CaptureKeypair == nil {
-		var err error
-		opts.CaptureKeypair, err = GenerateCaptureKeypair(1)
-		if err != nil {
-			return nil, err
+	// An ephemeral (access-lease-only) Computer has NO capture identity: never
+	// adopt a caller-supplied keypair nor auto-generate one.
+	if !opts.Ephemeral {
+		if opts.CaptureKeypair == nil {
+			opts.CaptureKeypair = creds.CaptureKeypair
+		}
+		if opts.CaptureKeypair == nil {
+			var err error
+			opts.CaptureKeypair, err = GenerateCaptureKeypair(1)
+			if err != nil {
+				return nil, err
+			}
 		}
 	}
 	if err := comp.configureCaptureKeypairs(opts.CaptureKeypair, opts.PriorCaptureKeypairs); err != nil {

@@ -72,6 +72,12 @@ type Config struct {
 	SandboxID       string
 	BindingRevision int64
 
+	// Ephemeral binds an access lease ONLY: no persistence. The attach
+	// carries no capture keypair, mints without pk_computer/key_generation,
+	// forwards no key_assertion, and the HPKE-sealed bind payload carries the
+	// broker_grant WITHOUT any computer key material.
+	Ephemeral bool
+
 	// CaptureKeypairs (generation → keypair) + CaptureGen opt the attach
 	// into asymmetric state encryption: the CURRENT generation's pk is
 	// submitted at mint (the portal answers with the key_assertion), and
@@ -124,13 +130,13 @@ type envelope struct {
 // that held envelope.
 func Bind(ctx context.Context, cfg Config) (*coordinator.BindResult, error) {
 	cfg.defaults()
-	if len(cfg.Key) == 0 {
+	if !cfg.Ephemeral && len(cfg.Key) == 0 {
 		return nil, fmt.Errorf("pinesandbox: bind requires a computer key")
 	}
 	if cfg.BindingRevision < 0 {
 		return nil, fmt.Errorf("pinesandbox: binding revision cannot be negative")
 	}
-	if cfg.CaptureGen <= 0 {
+	if !cfg.Ephemeral && cfg.CaptureGen <= 0 {
 		return nil, fmt.Errorf("pinesandbox: v3 attach requires an asymmetric capture keypair")
 	}
 
@@ -241,12 +247,18 @@ func mintEnvelope(ctx context.Context, cfg Config) (*envelope, error) {
 			cfg.ComputerID, cfg.SandboxID, pubkey.PodUID, pubkey.CoordBootID,
 		),
 	}
-	cur, ok := cfg.CaptureKeypairs[cfg.CaptureGen]
-	if !ok {
-		return nil, fmt.Errorf("pinesandbox: current capture keypair generation %d not registered", cfg.CaptureGen)
+	if cfg.Ephemeral {
+		// Access-lease-only attach: no capture identity is submitted, so the
+		// portal mints without advancing a per-Computer key floor.
+		req.Ephemeral = true
+	} else {
+		cur, ok := cfg.CaptureKeypairs[cfg.CaptureGen]
+		if !ok {
+			return nil, fmt.Errorf("pinesandbox: current capture keypair generation %d not registered", cfg.CaptureGen)
+		}
+		req.PKComputer = b64(cur.PK)
+		req.KeyGeneration = cur.Generation
 	}
-	req.PKComputer = b64(cur.PK)
-	req.KeyGeneration = cur.Generation
 	creds, err := cfg.Minter.Credentials(ctx, req)
 	if err != nil {
 		return nil, err
@@ -259,16 +271,23 @@ func mintEnvelope(ctx context.Context, cfg Config) (*envelope, error) {
 	}
 	// Preserve the committed revision above even if a custom/in-process issuer
 	// returns an incomplete receipt. v3 must never fall through to coord without
-	// its assertion and silently behave like an older attach.
-	if creds.BindToken == "" || creds.BrokerGrant == "" || creds.KeyAssertion == "" {
+	// its assertion and silently behave like an older attach. An ephemeral
+	// attach carries no capture identity, so it never receives a key_assertion.
+	if creds.BindToken == "" || creds.BrokerGrant == "" || (!cfg.Ephemeral && creds.KeyAssertion == "") {
 		return nil, fmt.Errorf("pinesandbox: attach-credentials provider result missing bind_token/broker_grant/key_assertion")
 	}
 
-	plaintext, err := json.Marshal(bindPlaintext{
-		ComputerKeyCurrent:    wireKey{Version: CurrentKeyVersion, Bytes: b64(cfg.Key)},
-		ComputerKeyForRestore: restoreKey(cfg.PriorKeys),
-		BrokerGrant:           creds.BrokerGrant,
-	})
+	var plaintext []byte
+	if cfg.Ephemeral {
+		// Access-lease-only: seal the broker grant WITHOUT any computer key.
+		plaintext, err = json.Marshal(ephemeralPlaintext{BrokerGrant: creds.BrokerGrant})
+	} else {
+		plaintext, err = json.Marshal(bindPlaintext{
+			ComputerKeyCurrent:    wireKey{Version: CurrentKeyVersion, Bytes: b64(cfg.Key)},
+			ComputerKeyForRestore: restoreKey(cfg.PriorKeys),
+			BrokerGrant:           creds.BrokerGrant,
+		})
+	}
 	if err != nil {
 		return nil, fmt.Errorf("pinesandbox: marshal bind plaintext: %w", err)
 	}
@@ -358,6 +377,13 @@ type bindPlaintext struct {
 	ComputerKeyCurrent    wireKey  `json:"computer_key_current"`
 	ComputerKeyForRestore *wireKey `json:"computer_key_for_restore"`
 	BrokerGrant           string   `json:"broker_grant"`
+}
+
+// ephemeralPlaintext is the bind payload for an access-lease-only (ephemeral)
+// attach: it carries the broker grant but NO computer key material, so the pod
+// binds a lease without any persistence identity.
+type ephemeralPlaintext struct {
+	BrokerGrant string `json:"broker_grant"`
 }
 
 // restoreKey returns the highest-version prior key as the restore key (so a snapshot sealed

@@ -56,6 +56,10 @@ type CredentialsRequest struct {
 	KeyGeneration           int
 	ExpectedBindingRevision int64
 	IdempotencyKey          string
+	// Ephemeral mints an access-lease-only attach: no capture identity, so
+	// pk_computer/key_generation are omitted and the portal returns no
+	// key_assertion.
+	Ephemeral bool
 }
 
 // RegisterComputer registers computer_id into the portal ownership registry (idempotent
@@ -85,7 +89,7 @@ func (s *AttachCredentialsSource) Credentials(ctx context.Context, req Credentia
 	if req.ComputerID == "" || req.PodUID == "" || req.CoordBootID == "" || req.SandboxID == "" {
 		return nil, fmt.Errorf("pinesandbox: computer_id, pod_uid, coord_boot_id, sandbox_id all required")
 	}
-	if req.PKComputer == "" || req.KeyGeneration <= 0 {
+	if !req.Ephemeral && (req.PKComputer == "" || req.KeyGeneration <= 0) {
 		return nil, fmt.Errorf("pinesandbox: pk_computer and positive key_generation required for v3 attach")
 	}
 	if req.ExpectedBindingRevision < 0 || req.IdempotencyKey == "" {
@@ -93,9 +97,17 @@ func (s *AttachCredentialsSource) Credentials(ctx context.Context, req Credentia
 	}
 	body := map[string]any{
 		"pod_uid": req.PodUID, "coord_boot_id": req.CoordBootID,
-		"sandbox_id":  req.SandboxID,
-		"pk_computer": req.PKComputer, "key_generation": req.KeyGeneration,
+		"sandbox_id":                req.SandboxID,
 		"expected_binding_revision": req.ExpectedBindingRevision,
+	}
+	// An ephemeral (access-lease-only) attach submits no capture identity, so
+	// pk_computer/key_generation are omitted entirely. It signals the mode so the
+	// portal lazily creates a new Computer row as ephemeral (§14).
+	if req.Ephemeral {
+		body["persistence_mode"] = "ephemeral"
+	} else {
+		body["pk_computer"] = req.PKComputer
+		body["key_generation"] = req.KeyGeneration
 	}
 	path := registerPath + "/" + req.ComputerID + "/attach-credentials"
 	resp, err := s.postWithHeaders(ctx, path, body, map[string]string{

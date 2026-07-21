@@ -34,7 +34,7 @@ var ErrStreamLost = errors.New("pinesandbox: event stream lost (reconnect budget
 
 // AgentEvent is one agent TaskEvent (spec TaskEvent): the typed envelope + a per-type
 // Payload kept raw (the payload shapes are loose by design). Fields not modelled here
-// (usage_delta, redactions, trace_id, mode_epoch) remain available via Raw.
+// (usage_delta, redactions, trace_id) remain available via Raw.
 type AgentEvent struct {
 	SchemaVersion int
 	// EventID is the per-task monotonic seq AND the SSE resume cursor: persist it across a
@@ -48,14 +48,51 @@ type AgentEvent struct {
 	TurnID      string
 	TurnAttempt int
 	Ts          *time.Time // event timestamp; nil if absent/unparseable (a bad ts never fails the event)
-	Type        string     // status|reasoning|command|step|needs_input|usage|screenshot|result|usage.finalized
+	Type        string     // status|reasoning|command|step|needs_input|usage|screenshot|result|usage.finalized|controller_changed
 	Source      string     // agent|control|files|system
 	Visibility  string     // user|operator|debug
+	Controller  string     // agent|human|locked; empty on legacy/synthetic events
+	ModeEpoch   int64      // per-session controller ordering fence
 	Terminal    bool       // true iff this frame ends a TURN (not the persistent Task)
 	TaskState   string     // idle|running|paused — a non-terminal state transition (empty = none)
 	Reason      string     // accompanies TaskState, e.g. needs_input (the pause reason)
 	Payload     json.RawMessage
 	Raw         json.RawMessage // the full TaskEvent envelope (forward-compat escape hatch)
+}
+
+// AgentControlChange is the typed view of a controller_changed TaskEvent. The
+// top-level Controller + ModeEpoch form the authoritative per-session control
+// projection; the remaining fields describe the Computer-wide commit.
+type AgentControlChange struct {
+	Controller    string
+	ModeEpoch     int64
+	ComputerEpoch int64
+	Trigger       string
+	ChangedAt     *time.Time
+}
+
+// ControlChange returns the typed control transition when this event is a
+// controller_changed frame, else (nil, false). Unknown trigger values remain
+// intact for forward compatibility.
+func (e *AgentEvent) ControlChange() (*AgentControlChange, bool) {
+	if e == nil || e.Type != "controller_changed" || e.Controller == "" {
+		return nil, false
+	}
+	var wire struct {
+		ComputerEpoch int64  `json:"computer_epoch"`
+		Trigger       string `json:"trigger"`
+		ChangedAt     string `json:"changed_at"`
+	}
+	if err := json.Unmarshal(e.Payload, &wire); err != nil {
+		return nil, false
+	}
+	return &AgentControlChange{
+		Controller:    e.Controller,
+		ModeEpoch:     e.ModeEpoch,
+		ComputerEpoch: wire.ComputerEpoch,
+		Trigger:       wire.Trigger,
+		ChangedAt:     parseTime(wire.ChangedAt),
+	}, true
 }
 
 // AgentAsk is the typed payload of a needs_input event — the agent paused on
@@ -134,6 +171,8 @@ func decodeAgentEvent(f sse.Frame) (AgentEvent, bool) {
 		Type          string          `json:"type"`
 		Source        string          `json:"source"`
 		Visibility    string          `json:"visibility"`
+		Controller    string          `json:"controller"`
+		ModeEpoch     int64           `json:"mode_epoch"`
 		Terminal      bool            `json:"terminal"`
 		TaskState     string          `json:"task_state"`
 		Reason        string          `json:"reason"`
@@ -147,6 +186,7 @@ func decodeAgentEvent(f sse.Frame) (AgentEvent, bool) {
 		Session: w.Session, ComputerID: w.ComputerID, ThreadID: w.ThreadID,
 		TurnID: w.TurnID, TurnAttempt: w.TurnAttempt, Ts: parseTime(w.Ts),
 		Type: w.Type, Source: w.Source, Visibility: w.Visibility,
+		Controller: w.Controller, ModeEpoch: w.ModeEpoch,
 		Terminal: w.Terminal, TaskState: w.TaskState, Reason: w.Reason,
 		Payload: w.Payload, Raw: json.RawMessage(f.Data),
 	}, true

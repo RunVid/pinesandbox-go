@@ -34,6 +34,12 @@ type AttachOptions struct {
 	// integrator. Zero is correct for a never-attached/legacy Computer.
 	BindingRevision int64
 
+	// Ephemeral binds an access lease ONLY — no persistence. The attach carries
+	// no capture keypair, omits pk_computer/key_generation at mint, forwards no
+	// key_assertion, seals the bind payload WITHOUT any computer key, and skips
+	// the pre-stop checkpoint. Default (false) is the persistent attach.
+	Ephemeral bool
+
 	MaxBindAttempts  int           // default binder.DefaultMaxBindAttempts
 	BindReadyTimeout time.Duration // default binder.DefaultReadyTimeout
 }
@@ -61,6 +67,12 @@ type Computer struct {
 	sandbox       *SandboxHandle
 	coord         *coordinator.Client
 	computerToken string // ct_
+	// ephemeral records that this Computer was bound access-lease-only; Stop
+	// reads it to skip the pre-terminate checkpoint.
+	ephemeral bool
+	// persistenceMode is the coord-reported bound persistence mode from the
+	// bind response (surfaced via PersistenceMode()).
+	persistenceMode string
 }
 
 func newComputer(id string, key []byte) *Computer {
@@ -119,6 +131,15 @@ func (c *Computer) ComputerToken() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.computerToken
+}
+
+// PersistenceMode is the bound persistence mode the coordinator reported on
+// the last successful attach (e.g. "persistent" or "ephemeral"); empty if not
+// attached or the coord reported none.
+func (c *Computer) PersistenceMode() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.persistenceMode
 }
 
 // String redacts the secrets (the 32-byte state key + the ct_) so a struct dump in a log
@@ -294,7 +315,7 @@ func (c *Computer) Attach(ctx context.Context, conn *Connection, opts AttachOpti
 		return err
 	}
 	_, captureGeneration := c.captureKeypairsCopy()
-	if captureGeneration == 0 {
+	if !opts.Ephemeral && captureGeneration == 0 {
 		return fmt.Errorf("pinesandbox: v3 attach requires CaptureKeypair (persist both halves)")
 	}
 	c.mu.Lock()
@@ -344,6 +365,7 @@ func (c *Computer) Attach(ctx context.Context, conn *Connection, opts AttachOpti
 		SandboxID:       info.ID,
 		MaxBindAttempts: opts.MaxBindAttempts,
 		ReadyTimeout:    opts.BindReadyTimeout,
+		Ephemeral:       opts.Ephemeral,
 		CaptureKeypairs: binderKeypairs(captureKPs),
 		CaptureGen:      captureGen,
 		BindingRevision: bindingRevision,
@@ -361,6 +383,8 @@ func (c *Computer) Attach(ctx context.Context, conn *Connection, opts AttachOpti
 
 	c.mu.Lock()
 	c.conn, c.sandbox, c.coord, c.computerToken = conn, sandbox, coord, res.ComputerToken
+	c.ephemeral = opts.Ephemeral
+	c.persistenceMode = res.PersistenceMode
 	c.mu.Unlock()
 	return nil
 }
@@ -384,7 +408,7 @@ func (c *Computer) adopt(conn *Connection, sandboxID, computerToken, status stri
 // binding. Returns true once the Sandbox record is confirmed gone.
 func (c *Computer) Stop(ctx context.Context) (bool, error) {
 	c.mu.Lock()
-	sandbox, coord, ct := c.sandbox, c.coord, c.computerToken
+	sandbox, coord, ct, ephemeral := c.sandbox, c.coord, c.computerToken, c.ephemeral
 	c.mu.Unlock()
 	if sandbox == nil {
 		return true, nil
@@ -392,7 +416,9 @@ func (c *Computer) Stop(ctx context.Context) (bool, error) {
 	// Best-effort durable checkpoint BEFORE terminate, under the current epoch — closes the
 	// race where a fast re-attach's higher epoch fences out the old pod's SIGTERM final
 	// capture (silent state loss). The SIGTERM capture stays the net if this fails (Ruby parity).
-	if coord != nil && ct != "" {
+	// An ephemeral (access-lease-only) Computer has no persistence, so there is nothing to
+	// checkpoint.
+	if !ephemeral && coord != nil && ct != "" {
 		_, _ = coord.Capture(ctx, ct)
 	}
 	gone, err := sandbox.Terminate(ctx, defaultTerminateWait, defaultPollInterval)

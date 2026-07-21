@@ -120,6 +120,37 @@ func TestCredentials_OmitsOptional(t *testing.T) {
 	}
 }
 
+// TestCredentials_EphemeralOmitsCaptureIdentity proves an access-lease-only mint
+// sends NO pk_computer/key_generation and does not require them up front.
+func TestCredentials_EphemeralOmitsCaptureIdentity(t *testing.T) {
+	var gotBody map[string]any
+	s := newAttachSource(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		fmt.Fprint(w, `{"bind_token":"b","broker_grant":"g","binding_revision":1}`)
+	})
+	req := CredentialsRequest{
+		ComputerID: "c", PodUID: "p", CoordBootID: "b", SandboxID: "s",
+		ExpectedBindingRevision: 0, IdempotencyKey: "attach-eph-key",
+		Ephemeral: true, // no PKComputer / KeyGeneration
+	}
+	creds, err := s.Credentials(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Credentials: %v", err)
+	}
+	if creds.BindToken != "b" || creds.BrokerGrant != "g" || creds.KeyAssertion != "" {
+		t.Errorf("ephemeral creds = %+v", creds)
+	}
+	if _, ok := gotBody["pk_computer"]; ok {
+		t.Errorf("ephemeral body leaked pk_computer: %v", gotBody)
+	}
+	if _, ok := gotBody["key_generation"]; ok {
+		t.Errorf("ephemeral body leaked key_generation: %v", gotBody)
+	}
+	if gotBody["persistence_mode"] != "ephemeral" {
+		t.Errorf("ephemeral body must signal persistence_mode=ephemeral for lazy-create: %v", gotBody)
+	}
+}
+
 func TestCredentials_404Unknown(t *testing.T) {
 	s := newAttachSource(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(404)
