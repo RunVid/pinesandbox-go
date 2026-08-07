@@ -7,23 +7,11 @@ CUA browser Computer (sessions, agent, drive) from a backend.
 go get go.pinesandbox.io/computer
 ```
 
-The import path is a vanity path (decoupled from the backing repo). Pin within a
-pool minor — `v0.3.x` targets the project's backend-managed v3 runtime policy.
+The import path is a stable public vanity path. Pin the current `v0.3.x`
+compatibility line.
 
-### Private module setup
-
-The module publishes to a **private** content-mirror, so `go` must skip the public
-proxy + checksum DB and authenticate the git fetch:
-
-```sh
-go env -w GOPRIVATE=go.pinesandbox.io
-# Authenticate the mirror over your existing GitHub credentials, e.g.:
-git config --global url."git@github.com:".insteadOf "https://github.com/"
-```
-
-`GOPRIVATE` governs only the module fetch — vanity discovery
-(`go.pinesandbox.io/computer?go-get=1`) is public, so no extra setup is needed for
-the import-path resolution itself.
+The vanity module and its backing mirror are public. No `GOPRIVATE` setting,
+GitHub account, or package token is required.
 
 ## Quickstart
 
@@ -41,7 +29,7 @@ func main() {
 	ctx := context.Background()
 
 	client, err := pine.NewClient(pine.ClientOptions{
-		Endpoint: "https://staging.pinesandbox.io", // the domain your project was given
+		Endpoint: "https://pinesandbox.io",
 		APIKey:   "pk_…",                            // your project client key
 	})
 	if err != nil {
@@ -64,13 +52,17 @@ func main() {
 	comp, err := client.CreateComputer(ctx, pine.AttachOptions{
 		Credentials:    creds,
 		CaptureKeypair: capture,
+		// Optional on first attach. Country is canonical ISO 3166-1 alpha-2;
+		// omit Location to use Portal's server-owned default.
+		Location: &pine.ComputerLocation{Country: "US"},
 	})
 	if err != nil {
 		log.Fatal(err)
 	}
 	// Persist the committed authorization winner before returning work to a
 	// queue or another backend instance.
-	// persistBinding(comp.ID(), comp.BindingRevision(), comp.SandboxID(), comp.ComputerToken())
+	// persistBinding(comp.ID(), comp.BindingRevision(), comp.Location(),
+	//     comp.SandboxID(), comp.ComputerToken())
 	defer comp.Stop(ctx) // graceful: persists state on the way out
 
 	sess, err := comp.CreateSession(ctx, pine.CreateSessionOptions{Browser: true})
@@ -103,9 +95,9 @@ Every call is bounded by the `context` you pass — the SDK applies a 30s fallba
 only when your context has no deadline, so you extend (or shorten) any call with
 `context.WithTimeout`. Provisioning is special-cased: `CreateComputer` /
 `AttachComputer` bound the cold provision (`POST /computer-sandboxes` + readiness)
-by `AttachOptions.Timeout` (the readiness budget, default 300s), so a cold pool
-doesn't trip the 30s fallback. Raise `AttachOptions.Timeout` for an unusually cold
-pool.
+by `AttachOptions.Timeout` (the readiness budget, default 300s), so slow
+provisioning doesn't trip the 30s fallback. Raise `AttachOptions.Timeout` when
+capacity takes longer to become ready.
 
 ## Stateless reuse (multi-instance / restarted backends)
 
@@ -183,7 +175,7 @@ for ev, err := range ag.Events(ctx, "") {
 			_, _ = ag.AnswerAsk(ctx, ask, answer(ask.Question)) // no id plumbing
 		}
 	case pine.EventResult:
-		res, _ := ag.Result(ctx) // TerminalReason, Summary, Usage, Artifacts, Findings
+		res, _ := ag.Result(ctx) // TerminalReason, Summary, Usage, Artifacts; Author on skill-author tasks
 		if res.TerminalReason == pine.TerminalCompleted {
 			log.Printf("done: %s", res.Summary)
 		}
@@ -232,7 +224,7 @@ with your own `ComputerUse` calls, or vice-versa.
 
 `Session.Delegate(ctx)` mints a browser-safe envelope (the Computer's host + a
 short-lived `dt_` desktop token, **nothing privileged**). Hand it to the browser
-and the web SDK (`@runvid/computer-web`) renders the live desktop for a human to
+and the web SDK (`@pinesandbox/computer-web`) renders the live desktop for a human to
 watch or take control:
 
 ```go

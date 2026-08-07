@@ -36,7 +36,7 @@ type (
 	AgentDuration   = coordinator.AgentDuration
 	AgentCost       = coordinator.AgentCost
 	FileRef         = coordinator.FileRef
-	Finding         = coordinator.Finding
+	AuthorResult    = coordinator.AuthorResult
 	AgentEvent      = coordinator.AgentEvent
 	// AgentControlChange is the typed controller_changed payload returned by
 	// AgentEvent.ControlChange().
@@ -47,7 +47,7 @@ type (
 
 // Run starts a turn toward goal; returns the session's Task (running for this turn).
 // errors.Is(err, ErrSessionBusy) ⇒ a turn is already active; errors.Is(err,
-// ErrActionNotImplemented) ⇒ no resident agent is configured on this pool.
+// ErrActionNotImplemented) ⇒ no resident agent is configured in this environment.
 func (a *AgentMode) Run(ctx context.Context, goal string, opts RunOptions) (*AgentTask, error) {
 	return a.s.coord.AgentRun(ctx, a.s.computerToken(), a.s.name, goal, opts)
 }

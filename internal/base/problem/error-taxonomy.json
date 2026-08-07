@@ -107,6 +107,11 @@
       "retryable": false
     },
     {
+      "type": "/errors/session-teardown-failed",
+      "status": 503,
+      "retryable": true
+    },
+    {
       "type": "/errors/desktop-bind-failed",
       "status": 502,
       "retryable": true
@@ -284,6 +289,11 @@
     {
       "type": "/errors/bind-in-progress",
       "status": 409,
+      "retryable": true
+    },
+    {
+      "type": "/errors/egress-activation-failed",
+      "status": 503,
       "retryable": true
     },
     {

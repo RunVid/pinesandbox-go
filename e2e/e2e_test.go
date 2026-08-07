@@ -71,7 +71,9 @@ func TestE2E_J1_Lifecycle(t *testing.T) {
 	ctx, cancel := newCtx(t)
 	defer cancel()
 
-	comp, err := c.CreateComputer(ctx, pine.AttachOptions{})
+	comp, err := c.CreateComputer(ctx, pine.AttachOptions{
+		Location: &pine.ComputerLocation{Country: "US"},
+	})
 	if err != nil {
 		t.Fatalf("CreateComputer: %v", err)
 	}
@@ -79,6 +81,9 @@ func TestE2E_J1_Lifecycle(t *testing.T) {
 
 	if !strings.HasPrefix(comp.ComputerToken(), "ct_") {
 		t.Errorf("computer token = %q, want a ct_", comp.ComputerToken())
+	}
+	if location := comp.Location(); location == nil || location.Country != "US" {
+		t.Errorf("computer location = %+v, want US", location)
 	}
 
 	sess := driveALittle(t, ctx, comp, "cold")
@@ -134,11 +139,15 @@ func TestE2E_J2_Persistence(t *testing.T) {
 	// Phase 1 — cold attach, drive real state, force a durable checkpoint.
 	ctx1, cancel1 := newCtx(t)
 	defer cancel1()
-	comp, err := c.CreateComputer(ctx1, pine.AttachOptions{})
+	credentials, err := pine.GenerateCredentials()
+	if err != nil {
+		t.Fatalf("GenerateCredentials: %v", err)
+	}
+	comp, err := c.CreateComputer(ctx1, pine.AttachOptions{Credentials: credentials})
 	if err != nil {
 		t.Fatalf("CreateComputer: %v", err)
 	}
-	id, key := comp.ID(), comp.Key()
+	bindingRevision := comp.BindingRevision()
 
 	driveALittle(t, ctx1, comp, "persist")
 	if _, err := comp.Capture(ctx1); err != nil {
@@ -146,16 +155,15 @@ func TestE2E_J2_Persistence(t *testing.T) {
 		t.Fatalf("Capture: %v", err)
 	}
 	snap := mustSnapshot(t, ctx1, comp)
-	// GET /state projects the manifest's live component (per-component state
-	// layout): envelope_version 2 + component == "live".
-	if v, _ := snap["envelope_version"].(float64); v != 2 {
-		t.Errorf("envelope_version = %v, want 2 (live-component projection)", snap["envelope_version"])
+	// Persistent Computers default to the asymmetric capture-key envelope.
+	if v, _ := snap["envelope_version"].(float64); v != 3 {
+		t.Errorf("envelope_version = %v, want 3 (asymmetric live-component projection)", snap["envelope_version"])
 	}
 	if snap["component"] != "live" {
 		t.Errorf("component = %v, want live", snap["component"])
 	}
-	if snap["computer_id"] != id {
-		t.Errorf("snapshot computer_id = %v, want %s", snap["computer_id"], id)
+	if snap["computer_id"] != credentials.ID {
+		t.Errorf("snapshot computer_id = %v, want %s", snap["computer_id"], credentials.ID)
 	}
 	if size, _ := snap["size_bytes"].(float64); size <= 0 {
 		t.Errorf("size_bytes = %v, want > 0", snap["size_bytes"])
@@ -168,10 +176,14 @@ func TestE2E_J2_Persistence(t *testing.T) {
 		t.Fatalf("Stop: %v", err)
 	}
 
-	// Phase 2 — re-attach the SAME id+key onto a fresh pod. A successful bind == restore.
+	// Phase 2 — re-attach with the persisted identity, capture keypair, and
+	// binding revision onto a fresh pod. A successful bind == restore.
 	ctx2, cancel2 := newCtx(t)
 	defer cancel2()
-	re, err := c.AttachComputer(ctx2, id, key, pine.AttachOptions{})
+	re, err := c.AttachComputer(ctx2, credentials.ID, credentials.Key, pine.AttachOptions{
+		BindingRevision: bindingRevision,
+		CaptureKeypair:  credentials.CaptureKeypair,
+	})
 	if err != nil {
 		t.Fatalf("re-attach (restore) failed: %v", err)
 	}
@@ -180,8 +192,8 @@ func TestE2E_J2_Persistence(t *testing.T) {
 		t.Errorf("re-attach token = %q, want a ct_", re.ComputerToken())
 	}
 	latest := mustSnapshot(t, ctx2, re)
-	if latest["computer_id"] != id {
-		t.Errorf("post-restore snapshot computer_id = %v, want %s", latest["computer_id"], id)
+	if latest["computer_id"] != credentials.ID {
+		t.Errorf("post-restore snapshot computer_id = %v, want %s", latest["computer_id"], credentials.ID)
 	}
 	if _, err := re.Stop(ctx2); err != nil {
 		t.Fatalf("Stop (re-attached): %v", err)
@@ -271,7 +283,8 @@ func TestE2E_J3_Files(t *testing.T) {
 	_, _ = comp.Stop(ctx)
 }
 
-// J4 (optional) — a delegate-mode agent turn. Skips cleanly where no resident agent is
+// J4 (optional) — a delegate-mode agent turn whose caller-facing file is
+// retrieved through the public SDK. Skips cleanly where no resident agent is
 // configured (the run returns a 501/not-implemented).
 func TestE2E_J4_Agent(t *testing.T) {
 	c := newClient(t)
@@ -285,19 +298,25 @@ func TestE2E_J4_Agent(t *testing.T) {
 	defer teardown(comp)
 	sess := driveALittle(t, ctx, comp, "agent")
 
-	if _, err := sess.Agent().Run(ctx, "Confirm the page title contains \"Example\".", pine.RunOptions{}); err != nil {
+	const artifactName = "agent-result.txt"
+	const artifactBody = "PINE_SDK_AGENT_ARTIFACT_OK"
+	goal := "Confirm the page title contains \"Example\". Then create " + artifactName +
+		" in your working directory with the exact bytes \"" + artifactBody +
+		"\" and no trailing newline (use printf, not echo), then complete the task with " +
+		artifactName + " as an output artifact."
+	_, err = sess.Agent().Run(ctx, goal, pine.RunOptions{})
+	if err != nil {
 		var ae *pine.APIError
 		if errors.As(err, &ae) && (ae.Status == 501 || ae.Status == 404) {
-			t.Skipf("resident agent not configured here (run → %d); J4 needs PINE_MODEL_* on the pool", ae.Status)
+			t.Skipf("resident agent not configured here (run → %d); J4 needs PINE_MODEL_* in the environment", ae.Status)
 		}
 		t.Fatalf("agent.Run: %v", err)
 	}
-
 	// The Task is persistent (delegate mode); its `state` cycles idle→running→idle per turn.
 	// The turn's OUTCOME is in /agent/result (TaskResult.terminal_reason). Poll the result
 	// until this turn produces a terminal_reason — the outcome assertion (not the wire shape).
 	deadline := time.Now().Add(5 * time.Minute)
-	var reason string
+	var result *pine.AgentResult
 	for {
 		res, err := sess.Agent().Result(ctx)
 		if err != nil {
@@ -317,10 +336,11 @@ func TestE2E_J4_Agent(t *testing.T) {
 		if len(res.Raw) == 0 {
 			t.Fatal("agent.Result: typed result has an empty Raw escape hatch")
 		}
-		if reason = res.TerminalReason; reason != "" {
+		if res.TerminalReason != "" {
 			if res.Status == "" {
-				t.Errorf("terminal result %q has empty status", reason)
+				t.Errorf("terminal result %q has empty status", res.TerminalReason)
 			}
+			result = res
 			break
 		}
 		// Cross-check the Task state stays a valid enum (idle/running/paused).
@@ -334,7 +354,72 @@ func TestE2E_J4_Agent(t *testing.T) {
 		}
 		time.Sleep(5 * time.Second)
 	}
-	t.Logf("agent turn terminal_reason=%q", reason)
+	if result.TerminalReason != pine.TerminalCompleted {
+		t.Fatalf("agent turn terminal_reason=%q, want %q; summary=%q", result.TerminalReason, pine.TerminalCompleted, result.Summary)
+	}
+	if result.Status != "ok" {
+		t.Fatalf("agent turn status=%q, want ok; summary=%q", result.Status, result.Summary)
+	}
+	var resultFile *pine.FileRef
+	for i := range result.Artifacts {
+		if result.Artifacts[i].RelativePath == artifactName {
+			resultFile = &result.Artifacts[i]
+			break
+		}
+	}
+	if resultFile == nil {
+		t.Fatalf("agent result did not declare %s; artifacts=%+v summary=%q", artifactName, result.Artifacts, result.Summary)
+	}
+	if resultFile.Root != "workdir" || resultFile.SHA256 == "" {
+		t.Fatalf("agent result file metadata = %+v, want a hashed workdir FileRef", resultFile)
+	}
+	workdirBytes, err := sess.ReadFile(ctx, resultFile.RelativePath)
+	if err != nil {
+		t.Fatalf("ReadFile(%s): %v", resultFile.RelativePath, err)
+	}
+	if string(workdirBytes) != artifactBody {
+		t.Fatalf("ReadFile(%s) = %q, want exact agent output %q", resultFile.RelativePath, workdirBytes, artifactBody)
+	}
+
+	artifacts, err := sess.ListArtifacts(ctx, "")
+	if err != nil {
+		t.Fatalf("ListArtifacts: %v", err)
+	}
+	var durable *pine.Artifact
+	for _, artifact := range artifacts {
+		if artifact.CreatedBy == "agent" && artifact.Filename == artifactName {
+			durable = artifact
+			break
+		}
+	}
+	if durable == nil {
+		t.Fatalf("agent did not register artifact %s; artifacts=%+v", artifactName, artifacts)
+	}
+	if durable.TurnID == "" || durable.SHA256 != resultFile.SHA256 {
+		t.Fatalf("durable artifact metadata = %+v, want nonempty turn_id and sha256=%s", durable, resultFile.SHA256)
+	}
+	turnArtifacts, err := sess.ListArtifacts(ctx, durable.TurnID)
+	if err != nil {
+		t.Fatalf("ListArtifacts(turn %s): %v", durable.TurnID, err)
+	}
+	var filtered *pine.Artifact
+	for _, artifact := range turnArtifacts {
+		if artifact.ID == durable.ID {
+			filtered = artifact
+			break
+		}
+	}
+	if filtered == nil {
+		t.Fatalf("turn %s artifacts do not include %s; artifacts=%+v", durable.TurnID, durable.ID, turnArtifacts)
+	}
+	durableBytes, err := sess.ReadArtifact(ctx, durable.ID)
+	if err != nil {
+		t.Fatalf("ReadArtifact(%s): %v", durable.ID, err)
+	}
+	if string(durableBytes) != artifactBody {
+		t.Fatalf("ReadArtifact(%s) = %q, want exact agent output %q", durable.ID, durableBytes, artifactBody)
+	}
+	t.Logf("agent turn completed and SDK retrieved %s from result + artifact registry", artifactName)
 	_, _ = comp.Stop(ctx)
 }
 
@@ -358,7 +443,7 @@ func TestE2E_J5_AgentEventStream(t *testing.T) {
 	if _, err := sess.Agent().Run(ctx, "Confirm the page title contains \"Example\".", pine.RunOptions{}); err != nil {
 		var ae *pine.APIError
 		if errors.As(err, &ae) && (ae.Status == 501 || ae.Status == 404) {
-			t.Skipf("resident agent not configured here (run → %d); J5 needs PINE_MODEL_* on the pool", ae.Status)
+			t.Skipf("resident agent not configured here (run → %d); J5 needs PINE_MODEL_* in the environment", ae.Status)
 		}
 		t.Fatalf("agent.Run: %v", err)
 	}
@@ -423,7 +508,7 @@ func TestE2E_J5_AgentEventStream(t *testing.T) {
 
 // mustSnapshot polls LatestSnapshot until present, failing loud past the budget (the
 // capture/persistence chain didn't land — never skip-as-green). PINE_CHECKPOINT_WAIT /
-// _POLL tune the window (a freshly-rolled pool's first capture can lag).
+// _POLL tune the window (a newly deployed environment's first capture can lag).
 func mustSnapshot(t *testing.T, ctx context.Context, comp *pine.Computer) map[string]any {
 	t.Helper()
 	wait := envDuration("PINE_CHECKPOINT_WAIT", 360*time.Second)
@@ -627,7 +712,7 @@ func TestE2E_J8_EscapeBattery(t *testing.T) {
 
 	// One round-trip; every attack runs as the session UID. The script prints
 	// labelled markers we assert on, then best-effort removes any litter a
-	// successful (unpatched) attack would leave on the shared pool volume.
+	// successful (unpatched) attack would leave on the shared runtime volume.
 	const attack = `
 echo "WHOAMI=$(id -u)"
 echo "A1_RC=$(mkdir -p /var/lib/sandbox/sessions/J8-SQUAT/files 2>/dev/null; echo $?)"

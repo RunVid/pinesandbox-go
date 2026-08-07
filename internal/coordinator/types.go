@@ -51,7 +51,9 @@ func parseBindPubkey(body []byte) (*BindPubkey, error) {
 		t := time.Unix(w.FetchedAt, 0).UTC()
 		fetched = &t
 	}
-	return &BindPubkey{PodUID: w.PodUID, CoordBootID: w.CoordBootID, EphemPub: pub, FetchedAt: fetched}, nil
+	return &BindPubkey{
+		PodUID: w.PodUID, CoordBootID: w.CoordBootID, EphemPub: pub, FetchedAt: fetched,
+	}, nil
 }
 
 // BindResult is the pod's computer token + epoch (POST v1/coord/bind) — or,

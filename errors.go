@@ -67,7 +67,7 @@ var (
 	// Deprecated: use ErrTaskNotFound for reads and ErrNoActiveTurn for mutations.
 	ErrNoActiveTask = &problem.APIError{Status: 404, ProblemType: "/errors/no-active-task"}
 	// ErrActionNotImplemented (501): the action isn't available here (e.g. no resident agent
-	// configured on this pool — agent.Run / delegate-mode turns).
+	// configured in this environment — agent.Run / delegate-mode turns).
 	ErrActionNotImplemented = &problem.APIError{Status: 501, ProblemType: "/errors/action-not-implemented"}
 	// ErrLeaseExpired (403): the access lease lapsed and the portal DEFINITIVELY refused a
 	// refresh — the project is revoked / out of credits. Control is cut (reads stay open);
@@ -151,6 +151,7 @@ type (
 	ProjectAccessDenied          = tokens.ProjectAccessDenied
 	RateLimited                  = tokens.RateLimited
 	AttachCredentialsError       = tokens.AttachCredentialsError
+	LocationDiscoveryError       = tokens.LocationDiscoveryError
 	BindingRevisionConflictError = tokens.BindingRevisionConflictError
 	ComputerRegistrationError    = tokens.ComputerRegistrationError
 	UnknownComputerError         = tokens.UnknownComputerError

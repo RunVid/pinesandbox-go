@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 
 	"go.pinesandbox.io/computer/internal/base/problem"
 	"go.pinesandbox.io/computer/internal/base/transport"
@@ -20,7 +21,10 @@ type AttachCredentialsSource struct {
 	apiKey string
 }
 
-const registerPath = "/v1/computers"
+const (
+	registerPath  = "/v1/computers"
+	locationsPath = "/v1/locations"
+)
 
 // NewAttachCredentialsSource builds a source posting to client (the portal/control host).
 func NewAttachCredentialsSource(client *transport.Client, apiKey string) (*AttachCredentialsSource, error) {
@@ -37,10 +41,31 @@ func NewAttachCredentialsSource(client *transport.Client, apiKey string) (*Attac
 // for v3: it is the portal-signed proof of which integrator key captures for
 // this Computer, forwarded VERBATIM to the coord bind.
 type AttachCredentials struct {
-	BindToken       string
-	BrokerGrant     string
-	KeyAssertion    string
-	BindingRevision int64
+	BindToken                   string
+	BrokerGrant                 string
+	BindTokenExpiresAt          string
+	BrokerGrantExpiresAt        string
+	KeyAssertion                string
+	BindingRevision             int64
+	Location                    *ComputerLocation
+	UsageReporterGrant          string
+	UsageReporterGrantExpiresAt string
+	UsageReporterID             string
+}
+
+// ComputerLocation is the Portal wire representation of the country intent
+// for one live sandbox binding. The public facade owns its own type so this
+// internal transport package does not leak through the SDK API.
+type ComputerLocation struct {
+	Country string `json:"country"`
+}
+
+// AvailableLocations is the Portal discovery result. Locations is the
+// inventory-backed catalog at read time; DefaultLocation is the server-owned
+// omission default and can temporarily be absent from Locations.
+type AvailableLocations struct {
+	Locations       []ComputerLocation `json:"locations"`
+	DefaultLocation ComputerLocation   `json:"default_location"`
 }
 
 // CredentialsRequest are the coordinates for a per-attach mint.
@@ -56,6 +81,7 @@ type CredentialsRequest struct {
 	KeyGeneration           int
 	ExpectedBindingRevision int64
 	IdempotencyKey          string
+	Location                *ComputerLocation
 	// Ephemeral mints an access-lease-only attach: no capture identity, so
 	// pk_computer/key_generation are omitted and the portal returns no
 	// key_assertion.
@@ -64,11 +90,18 @@ type CredentialsRequest struct {
 
 // RegisterComputer registers computer_id into the portal ownership registry (idempotent
 // for the same project; 409/422 for a cross-project duplicate).
-func (s *AttachCredentialsSource) RegisterComputer(ctx context.Context, computerID string) error {
+func (s *AttachCredentialsSource) RegisterComputer(ctx context.Context, computerID string, location *ComputerLocation) error {
 	if computerID == "" {
 		return fmt.Errorf("pinesandbox: computer_id required")
 	}
-	_, err := s.post(ctx, registerPath, map[string]string{"computer_id": computerID})
+	if err := validateLocation(location); err != nil {
+		return err
+	}
+	body := struct {
+		ComputerID string            `json:"computer_id"`
+		Location   *ComputerLocation `json:"location,omitempty"`
+	}{ComputerID: computerID, Location: location}
+	_, err := s.post(ctx, registerPath, body)
 	if err == nil {
 		return nil
 	}
@@ -84,6 +117,47 @@ func (s *AttachCredentialsSource) RegisterComputer(ctx context.Context, computer
 	}
 }
 
+// AvailableLocations returns the project-visible country intents currently
+// backed by enabled serving inventory. Runtime route qualification still occurs
+// independently when the Computer binds.
+func (s *AttachCredentialsSource) AvailableLocations(ctx context.Context) (*AvailableLocations, error) {
+	resp, err := s.client.Do(ctx, http.MethodGet, locationsPath, transport.Request{
+		Headers: map[string]string{"Authorization": "Bearer " + s.apiKey},
+	})
+	if err != nil {
+		ae, ok := asAPIError(err)
+		if !ok {
+			return nil, err
+		}
+		if ae.Status == http.StatusForbidden {
+			return nil, &ProjectAccessDenied{tokenBaseFrom("project or key may not discover locations", ae)}
+		}
+		return nil, &LocationDiscoveryError{tokenBaseFrom("portal location discovery failed", ae)}
+	}
+
+	var out AvailableLocations
+	if err := json.Unmarshal(resp.Body, &out); err != nil {
+		return nil, s.malformedLocations("location discovery response was not valid JSON", err)
+	}
+	if out.Locations == nil {
+		return nil, s.malformedLocations("location discovery response omitted locations", nil)
+	}
+	if err := validateLocation(&out.DefaultLocation); err != nil {
+		return nil, s.malformedLocations("location discovery response had an invalid default_location", err)
+	}
+	seen := make(map[string]struct{}, len(out.Locations))
+	for i := range out.Locations {
+		if err := validateLocation(&out.Locations[i]); err != nil {
+			return nil, s.malformedLocations("location discovery response had an invalid location", err)
+		}
+		if _, duplicate := seen[out.Locations[i].Country]; duplicate {
+			return nil, s.malformedLocations("location discovery response had a duplicate location", nil)
+		}
+		seen[out.Locations[i].Country] = struct{}{}
+	}
+	return &out, nil
+}
+
 // Credentials mints the per-attach bind_token + broker_grant for one pod + boot.
 func (s *AttachCredentialsSource) Credentials(ctx context.Context, req CredentialsRequest) (*AttachCredentials, error) {
 	if req.ComputerID == "" || req.PodUID == "" || req.CoordBootID == "" || req.SandboxID == "" {
@@ -95,19 +169,22 @@ func (s *AttachCredentialsSource) Credentials(ctx context.Context, req Credentia
 	if req.ExpectedBindingRevision < 0 || req.IdempotencyKey == "" {
 		return nil, fmt.Errorf("pinesandbox: expected binding revision and idempotency key required")
 	}
-	body := map[string]any{
-		"pod_uid": req.PodUID, "coord_boot_id": req.CoordBootID,
-		"sandbox_id":                req.SandboxID,
-		"expected_binding_revision": req.ExpectedBindingRevision,
+	if err := validateLocation(req.Location); err != nil {
+		return nil, err
+	}
+	body := credentialsRequestWire{
+		PodUID: req.PodUID, CoordBootID: req.CoordBootID,
+		SandboxID: req.SandboxID, ExpectedBindingRevision: req.ExpectedBindingRevision,
+		Location: req.Location,
 	}
 	// An ephemeral (access-lease-only) attach submits no capture identity, so
 	// pk_computer/key_generation are omitted entirely. It signals the mode so the
 	// portal lazily creates a new Computer row as ephemeral (§14).
 	if req.Ephemeral {
-		body["persistence_mode"] = "ephemeral"
+		body.PersistenceMode = "ephemeral"
 	} else {
-		body["pk_computer"] = req.PKComputer
-		body["key_generation"] = req.KeyGeneration
+		body.PKComputer = req.PKComputer
+		body.KeyGeneration = req.KeyGeneration
 	}
 	path := registerPath + "/" + req.ComputerID + "/attach-credentials"
 	resp, err := s.postWithHeaders(ctx, path, body, map[string]string{
@@ -129,12 +206,7 @@ func (s *AttachCredentialsSource) Credentials(ctx context.Context, req Credentia
 		}
 		return nil, err
 	}
-	var out struct {
-		BindToken       string `json:"bind_token"`
-		BrokerGrant     string `json:"broker_grant"`
-		KeyAssertion    string `json:"key_assertion"`
-		BindingRevision int64  `json:"binding_revision"`
-	}
+	var out attachCredentialsWire
 	if err := json.Unmarshal(resp.Body, &out); err != nil {
 		return nil, &AttachCredentialsError{s.malformedBase("attach-credentials response was not valid JSON", path, err)}
 	}
@@ -146,8 +218,52 @@ func (s *AttachCredentialsSource) Credentials(ctx context.Context, req Credentia
 	// binder can record that revision before it rejects the incomplete v3 result.
 	return &AttachCredentials{
 		BindToken: out.BindToken, BrokerGrant: out.BrokerGrant,
-		KeyAssertion: out.KeyAssertion, BindingRevision: out.BindingRevision,
+		BindTokenExpiresAt: out.BindTokenExpiresAt, BrokerGrantExpiresAt: out.BrokerGrantExpiresAt,
+		KeyAssertion: out.KeyAssertion, BindingRevision: out.BindingRevision, Location: out.Location,
+		UsageReporterGrant:          out.UsageReporterGrant,
+		UsageReporterGrantExpiresAt: out.UsageReporterGrantExpiresAt,
+		UsageReporterID:             out.UsageReporterID,
 	}, nil
+}
+
+// These exact wire structs are intentionally reflected by
+// schema_conformance_test.go against the spec-generated contract artifact.
+// Optional fields still belong here: a Portal contract addition must be an
+// explicit SDK decision rather than silently passing because the old SDK's
+// field set happened to remain a subset.
+type credentialsRequestWire struct {
+	PodUID                  string            `json:"pod_uid"`
+	CoordBootID             string            `json:"coord_boot_id"`
+	SandboxID               string            `json:"sandbox_id"`
+	PKComputer              string            `json:"pk_computer,omitempty"`
+	KeyGeneration           int               `json:"key_generation,omitempty"`
+	ExpectedBindingRevision int64             `json:"expected_binding_revision"`
+	PersistenceMode         string            `json:"persistence_mode,omitempty"`
+	Location                *ComputerLocation `json:"location,omitempty"`
+}
+
+type attachCredentialsWire struct {
+	BindToken                   string            `json:"bind_token"`
+	BrokerGrant                 string            `json:"broker_grant"`
+	BindTokenExpiresAt          string            `json:"bind_token_expires_at"`
+	BrokerGrantExpiresAt        string            `json:"broker_grant_expires_at"`
+	KeyAssertion                string            `json:"key_assertion"`
+	BindingRevision             int64             `json:"binding_revision"`
+	Location                    *ComputerLocation `json:"location"`
+	UsageReporterGrant          string            `json:"usage_reporter_grant"`
+	UsageReporterGrantExpiresAt string            `json:"usage_reporter_grant_expires_at"`
+	UsageReporterID             string            `json:"usage_reporter_id"`
+}
+
+func validateLocation(location *ComputerLocation) error {
+	if location == nil {
+		return nil
+	}
+	country := location.Country
+	if len(country) != 2 || country[0] < 'A' || country[0] > 'Z' || country[1] < 'A' || country[1] > 'Z' {
+		return fmt.Errorf("pinesandbox: location country must be canonical ISO 3166-1 alpha-2 uppercase (for example US)")
+	}
+	return nil
 }
 
 // String is redacted: it never reveals the pk_.
@@ -203,6 +319,13 @@ func (s *AttachCredentialsSource) generic(ae *problem.APIError, op string) error
 // wrap, but the known operation (path) + host still name WHICH portal call this was.
 func (s *AttachCredentialsSource) malformedBase(msg, path string, cause error) tokenBase {
 	return tokenBase{Msg: msg, Status: 200, Host: s.client.Host(), Op: transport.Operation("POST", path), Cause: cause}
+}
+
+func (s *AttachCredentialsSource) malformedLocations(msg string, cause error) error {
+	return &LocationDiscoveryError{tokenBase{
+		Msg: msg, Status: 200, Host: s.client.Host(),
+		Op: transport.Operation(http.MethodGet, locationsPath), Cause: cause,
+	}}
 }
 
 func asAPIError(err error) (*problem.APIError, bool) {

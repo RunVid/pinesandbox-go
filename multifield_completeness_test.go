@@ -59,6 +59,8 @@ func TestMultiFieldResponses_ConsciouslyHandled(t *testing.T) {
 			"testing surface — the pre-first-run browser-flags config; see getAgentBrowserFlags.",
 		"getFileViewMetadata": "not exposed (deliberate): capability-bound loopback surface " +
 			"for the image-owned browser extension, not a public Computer SDK operation",
+		"createSessionExternalToolGrant": "not exposed (deliberate): session capability-bound " +
+			"grant for an in-Computer external tool, not a public Computer SDK operation",
 		"getAgentEventsPage": "not exposed yet (deliberate): the paged task-history read " +
 			"(task-history contract) — first consumer is the portal transcript. " +
 			"When a Go integrator needs history paging, model {events, latest_event_id} as a " +

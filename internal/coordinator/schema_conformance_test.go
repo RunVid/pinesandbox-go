@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -79,5 +80,28 @@ func TestSchemaConformance(t *testing.T) {
 	for _, c := range cases {
 		typ := reflect.TypeOf(c.v)
 		assertSubset(t, fmt.Sprintf("%T", c.v), jsonFieldNames(typ), c.schema, schemas)
+	}
+}
+
+func TestBindCapabilityRequirednessMatchesSpec(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("..", "..", "..", "contract", "computer-schema-required.json"))
+	if err != nil {
+		t.Skipf("required-field artifact not present (mirror build): %v", err)
+	}
+	var required map[string][]string
+	if err := json.Unmarshal(b, &required); err != nil {
+		t.Fatalf("parse required-field artifact: %v", err)
+	}
+	cases := map[string][]string{
+		"BindPubkey":  {"coord_boot_id", "ephem_pub_x25519", "fetched_at", "pod_uid"},
+		"BindRequest": {"bind_token", "ciphertext", "coord_boot_id", "pod_uid"},
+	}
+	for schema, got := range cases {
+		want := required[schema]
+		slices.Sort(got)
+		slices.Sort(want)
+		if !slices.Equal(got, want) {
+			t.Errorf("%s required fields = %v, want spec %v", schema, got, want)
+		}
 	}
 }

@@ -48,7 +48,7 @@ type AgentEvent struct {
 	TurnID      string
 	TurnAttempt int
 	Ts          *time.Time // event timestamp; nil if absent/unparseable (a bad ts never fails the event)
-	Type        string     // status|reasoning|command|step|needs_input|usage|screenshot|result|usage.finalized|controller_changed
+	Type        string     // status|input|reasoning|command|step|needs_input|usage|screenshot|result|usage.finalized|controller_changed
 	Source      string     // agent|control|files|system
 	Visibility  string     // user|operator|debug
 	Controller  string     // agent|human|locked; empty on legacy/synthetic events

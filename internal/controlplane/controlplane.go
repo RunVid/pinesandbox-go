@@ -48,7 +48,7 @@ func (c *Client) Create(ctx context.Context, body any, idempotencyKey string) (*
 
 // CreateComputer provisions a Computer sandbox. The body intentionally contains
 // only caller-owned settings; the lifecycle server expands the project's signed
-// runtime policy into image, pool, resources, entrypoint, and platform env.
+// runtime policy into the operator-managed platform configuration.
 func (c *Client) CreateComputer(ctx context.Context, body any) (*SandboxInfo, error) {
 	return c.create(ctx, "/computer-sandboxes", body, "")
 }

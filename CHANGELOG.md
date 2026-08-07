@@ -2,10 +2,41 @@
 
 All notable changes to the Pine Computer Go SDK (`go.pinesandbox.io/computer`,
 package `pinesandbox`) are documented here. The format follows
-[Keep a Changelog](https://keepachangelog.com/), and the SDK uses
-**pool-version-aware semver**: in the 0.x phase, version is
-`0.<POOL_VERSION>.<patch>`. So `require go.pinesandbox.io/computer v0.3.x`
-targets `pine-cua-pool-v3` (the compatibility contract integrators pin to).
+[Keep a Changelog](https://keepachangelog.com/). The current beta compatibility
+line is `v0.3.x`; review release notes before adopting a new minor version.
+
+## [0.3.12] — 2026-08-07
+
+### Added
+- `EventInput` identifies accepted run, answer, and steer input in the durable
+  agent event stream, allowing replaying clients to reconstruct the ordered
+  task transcript.
+- `RunOptions.Secrets` / `SteerOptions.Secrets` deliver caller-supplied
+  credentials/configuration to the session secrets file (`$SESSION_SECRETS`) instead of
+  model-visible text: the agent references values as `$NAME`, so literals never
+  enter the task transcript, events, or logs. Ephemeral (pod-scoped; re-send
+  after re-attach); see the spec's `SessionSecrets` schema for naming rules.
+- Computer create/attach accepts `AttachOptions.Location` with a canonical
+  ISO 3166-1 alpha-2 country intent. The option is authorized through Portal
+  rather than lifecycle pod configuration, and `Computer.Location()` exposes
+  the effective binding location returned by Portal. A later attach may select
+  another admitted country after the Computer is stopped or killed.
+- `Client.AvailableLocations` returns the project-authenticated, inventory-backed
+  country catalog and the server-owned default without exposing proxy pools.
+
+### Changed
+- Installation documentation now reflects the already-public
+  `go.pinesandbox.io/computer` vanity module; `GOPRIVATE` and GitHub
+  authentication are not required.
+- Portal attach request/response wire structs now use exact spec-conformance
+  gates, so an added or renamed Portal field cannot silently leave the Go SDK
+  behind while ordinary compilation remains green.
+- `AgentResult.Summary` is the standalone source of truth for the actual goal
+  outcome; the normal terminal envelope remains `ok/completed`.
+- Replace the unused generic `Finding` / `AgentResult.Findings` surface with the
+  optional typed `AgentResult.Author` payload used only by skill-author tasks.
+  Older SDK releases still decode new result JSON because `findings` is optional
+  in their Go structs and unknown `author` fields are ignored.
 
 ## [0.3.11] — 2026-07-21
 
@@ -59,11 +90,9 @@ targets `pine-cua-pool-v3` (the compatibility contract integrators pin to).
   **valid idle session** — start a turn; never re-create the session.
 
 ### Changed
-- Computer provisioning now uses the small `POST /computer-sandboxes` request;
-  image, pool, resources, and persistence/lease profile are selected by the
-  backend-owned project runtime policy rather than SDK constants.
-  Runtime-policy identity stays inside signed control-plane credentials; the
-  SDK only observes the pool-version compatibility boundary.
+- Computer provisioning now uses the smaller `POST /computer-sandboxes`
+  request. Deployment and resource selection are backend-managed rather than
+  client-selected.
 - Attach uses Portal binding revisions and a stable idempotency receipt.
   Concurrent losers return `BindingRevisionConflictError` and must reload/adopt
   the integrator database winner. `AttachAuthorizationCommittedError` preserves
@@ -113,8 +142,8 @@ targets `pine-cua-pool-v3` (the compatibility contract integrators pin to).
   no `context` deadline, so a caller's deadline is honored instead of clipped to
   30s; and attach bounds the whole provision (`POST /sandboxes` + readiness poll)
   by `AttachOptions.Timeout` (the readiness budget, default 300s). Pass a longer
-  `AttachOptions.Timeout`, or a longer `context` deadline, for an unusually cold
-  pool — other calls keep the 30s default.
+  `AttachOptions.Timeout`, or a longer `context` deadline, for unusually slow
+  provisioning — other calls keep the 30s default.
 
 ## [0.3.7] — 2026-07-07
 
@@ -313,5 +342,3 @@ targets `pine-cua-pool-v3` (the compatibility contract integrators pin to).
 - Drift gates wired into CI: CG-1 version identity, CG-4 route conformance, and
   wire-type schema conformance (the OpenAPI-3.1 codegen replacement — see the
   design doc §14.3).
-
-[Unreleased]: https://github.com/RunVid/PineSandbox/commits/computer-skills

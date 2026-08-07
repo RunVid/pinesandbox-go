@@ -91,7 +91,7 @@ func TestAgentCancelResetTaskResult(t *testing.T) {
 		case r.URL.Path == "/v1/sessions/s/agent" && r.Method == "GET":
 			fmt.Fprint(w, `{"task_id":"t1","state":"running","goal":"buy milk"}`)
 		case r.URL.Path == "/v1/sessions/s/agent/result" && r.Method == "GET":
-			fmt.Fprint(w, `{"status":"ok","terminal_reason":"completed","summary":"done","artifacts":[],"findings":[],"usage":{"llm":{"input_tokens":30,"output_tokens":12,"cache_read_tokens":0,"cache_write_tokens":0,"total_tokens":42},"duration":{"total_ms":10,"active_ms":10},"cost":{"currency":"USD","total":0,"llm":0,"compute":null}}}`)
+			fmt.Fprint(w, `{"status":"ok","terminal_reason":"completed","summary":"done","artifacts":[],"usage":{"llm":{"input_tokens":30,"output_tokens":12,"cache_read_tokens":0,"cache_write_tokens":0,"total_tokens":42},"duration":{"total_ms":10,"active_ms":10},"cost":{"currency":"USD","total":0,"llm":0,"compute":null}}}`)
 		default:
 			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 		}
@@ -136,10 +136,10 @@ func TestAgentTask_TolerantTimestamps(t *testing.T) {
 }
 
 // TestAgentResult_TolerantArtifactTimestamp: a bad artifact modified_at must not drop the
-// whole terminal outcome (summary/findings/usage) over one cosmetic field.
+// whole terminal outcome (summary/usage) over one cosmetic field.
 func TestAgentResult_TolerantArtifactTimestamp(t *testing.T) {
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, `{"status":"ok","terminal_reason":"completed","summary":"done","findings":[],"usage":{"llm":{"input_tokens":1,"output_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"total_tokens":1},"duration":{"total_ms":0,"active_ms":0},"cost":{"currency":"USD","total":0,"llm":0,"compute":null}},"artifacts":[{"root":"workdir","relative_path":"a.txt","content_type":"text/plain","size":3,"sha256":"x","modified_at":""}]}`)
+		fmt.Fprint(w, `{"status":"ok","terminal_reason":"completed","summary":"done","usage":{"llm":{"input_tokens":1,"output_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"total_tokens":1},"duration":{"total_ms":0,"active_ms":0},"cost":{"currency":"USD","total":0,"llm":0,"compute":null}},"artifacts":[{"root":"workdir","relative_path":"a.txt","content_type":"text/plain","size":3,"sha256":"x","modified_at":""}]}`)
 	})
 	res, err := c.AgentResult(context.Background(), "ps_", "s")
 	if err != nil {
@@ -150,6 +150,32 @@ func TestAgentResult_TolerantArtifactTimestamp(t *testing.T) {
 	}
 	if res.Artifacts[0].ModifiedAt != nil {
 		t.Errorf("empty artifact modified_at should parse to nil, got %v", res.Artifacts[0].ModifiedAt)
+	}
+}
+
+func TestAgentResult_AuthorPayloadAndLegacyDecodeCompatibility(t *testing.T) {
+	raw := []byte(`{"status":"ok","terminal_reason":"draft_registered","summary":"draft saved","artifacts":[],"author":{"draft":{"name":"book-x","version":2}},"usage":{}}`)
+	res, err := parseAgentResult(raw)
+	if err != nil {
+		t.Fatalf("parse typed author result: %v", err)
+	}
+	if res.Author == nil || !strings.Contains(string(res.Author.Draft), `"name":"book-x"`) {
+		t.Fatalf("author payload = %+v, want draft metadata", res.Author)
+	}
+
+	// v0.3-era SDKs decoded TaskResult with encoding/json and a findings field.
+	// Missing findings and the additive author object must remain parseable.
+	var legacy struct {
+		Status         string            `json:"status"`
+		TerminalReason string            `json:"terminal_reason"`
+		Summary        string            `json:"summary"`
+		Findings       []json.RawMessage `json:"findings"`
+	}
+	if err := json.Unmarshal(raw, &legacy); err != nil {
+		t.Fatalf("legacy SDK shape cannot decode the new result: %v", err)
+	}
+	if legacy.Status != "ok" || legacy.TerminalReason != "draft_registered" || legacy.Findings != nil {
+		t.Fatalf("legacy decode drift: %+v", legacy)
 	}
 }
 

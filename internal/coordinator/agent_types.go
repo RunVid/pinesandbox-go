@@ -20,7 +20,8 @@ import (
 
 // AgentUsage is a turn's structured usage (spec Task.usage / TaskResult.usage):
 // the Pine-normalized token split, the turn duration (active excludes
-// human-wait), and the priced cost. Decoded directly, so it keeps json tags.
+// human-wait), and the customer-facing rated charge. Decoded directly,
+// so it keeps json tags.
 type AgentUsage struct {
 	LLM      AgentTokenUsage `json:"llm"`
 	Duration AgentDuration   `json:"duration"`
@@ -44,9 +45,10 @@ type AgentDuration struct {
 	ActiveMs int64 `json:"active_ms"`
 }
 
-// AgentCost is the priced LLM cost in USD. Total and LLM are nil when the model
-// is un-carded (cost unknown, never a guessed 0); Compute is nil until a
-// per-second compute rate exists (Total == LLM meanwhile).
+// AgentCost is the public customer-facing rated charge. It is not Pine's
+// provider cost or an account invoice. Total and LLM are nil only when the
+// project's customer rate card cannot price the observation; Compute is
+// currently nil.
 type AgentCost struct {
 	Currency string   `json:"currency"`
 	Total    *float64 `json:"total"`
@@ -54,12 +56,12 @@ type AgentCost struct {
 	Compute  *float64 `json:"compute"`
 }
 
-// Finding is a structured key/value a Task surfaced (spec TaskResult.findings item).
-// Value + Provenance are arbitrary JSON (kept raw). (Decoded directly, keeps json tags.)
-type Finding struct {
-	Key        string          `json:"key"`
-	Value      json.RawMessage `json:"value"`
-	Provenance json.RawMessage `json:"provenance,omitempty"`
+// AuthorResult is present only for skill-author tasks. Draft is a LearnedSkillMeta
+// object kept raw so the SDK does not couple ordinary task results to skill types.
+type AuthorResult struct {
+	Draft     json.RawMessage `json:"draft,omitempty"`
+	Questions []string        `json:"questions,omitempty"`
+	HandoffID string          `json:"handoff_id,omitempty"`
 }
 
 // FileRef is a validated, path-jailed reference to a file a Task produced (spec
@@ -96,15 +98,15 @@ type AgentTask struct {
 	Raw           json.RawMessage // the full wire object (forward-compat escape hatch)
 }
 
-// AgentResult is a turn's terminal outcome (spec TaskResult). Status is
-// ok|partial|failed; TerminalReason is the fine-grained WHY (completed, error,
-// budget, canceled, …) — tolerate unknown values. Returned by result.
+// AgentResult is a turn's terminal handoff (spec TaskResult). Status and
+// TerminalReason describe how the turn ended; Summary states the actual goal
+// outcome and must be read even for ok/completed. Unknown values are tolerated.
 type AgentResult struct {
 	Status         string
 	TerminalReason string
 	Summary        string
 	Artifacts      []FileRef
-	Findings       []Finding
+	Author         *AuthorResult
 	Usage          AgentUsage
 	Raw            json.RawMessage
 }
@@ -172,7 +174,7 @@ type agentResultWire struct {
 	TerminalReason string        `json:"terminal_reason"`
 	Summary        string        `json:"summary"`
 	Artifacts      []fileRefWire `json:"artifacts"`
-	Findings       []Finding     `json:"findings"`
+	Author         *AuthorResult `json:"author,omitempty"`
 	Usage          AgentUsage    `json:"usage"`
 }
 
@@ -181,7 +183,7 @@ func (w *agentResultWire) toAgentResult() *AgentResult {
 		Status:         w.Status,
 		TerminalReason: w.TerminalReason,
 		Summary:        w.Summary,
-		Findings:       w.Findings,
+		Author:         w.Author,
 		Usage:          w.Usage,
 		Artifacts:      make([]FileRef, 0, len(w.Artifacts)),
 	}

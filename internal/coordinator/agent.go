@@ -16,10 +16,14 @@ import (
 
 // AgentRunOptions are the optional run knobs. Context/Constraints are arbitrary JSON
 // (object or string); Skills is a name list. A nil field is omitted from the body.
+// Env is caller-supplied credentials/configuration delivered to the session env
+// file ($SESSION_SECRETS), never model-visible text — see the spec's SessionSecrets schema
+// for naming rules and lifecycle (ephemeral; re-send after re-attach).
 type AgentRunOptions struct {
 	Context     any
 	Skills      []string
 	Constraints any
+	Secrets     map[string]string
 }
 
 // AgentRun starts a turn (delegate mode — one persistent Task per session). Returns the
@@ -35,13 +39,19 @@ func (c *Client) AgentRun(ctx context.Context, token, name, goal string, opts Ag
 	if opts.Constraints != nil {
 		body["constraints"] = opts.Constraints
 	}
+	if len(opts.Secrets) > 0 {
+		body["secrets"] = opts.Secrets
+	}
 	return c.postAgentTask(ctx, c.agentPath(name, "/run"), token, body)
 }
 
-// AgentSteerOptions optionally pin the steer to a turn (concurrency guard).
+// AgentSteerOptions optionally pin the steer to a turn (concurrency guard)
+// and/or deliver secrets (same SessionSecrets contract as AgentRunOptions.Secrets —
+// merged into the session secrets file before the steer is delivered).
 type AgentSteerOptions struct {
 	ExpectedTurnID string // omitted when empty
 	TurnAttempt    *int   // omitted when nil
+	Secrets        map[string]string
 }
 
 // AgentSteer injects guidance into the running turn. Returns the updated Task.
@@ -52,6 +62,9 @@ func (c *Client) AgentSteer(ctx context.Context, token, name, text string, opts 
 	}
 	if opts.TurnAttempt != nil {
 		body["turn_attempt"] = *opts.TurnAttempt
+	}
+	if len(opts.Secrets) > 0 {
+		body["secrets"] = opts.Secrets
 	}
 	return c.postAgentTask(ctx, c.agentPath(name, "/steer"), token, body)
 }

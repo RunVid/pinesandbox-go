@@ -21,7 +21,8 @@
    "problem_types": [
     "/errors/sandbox-not-found",
     "/errors/sandbox-not-ready",
-    "/errors/bind-in-progress"
+    "/errors/bind-in-progress",
+    "/errors/egress-activation-failed"
    ],
    "conditional": [
     {

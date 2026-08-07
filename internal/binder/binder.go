@@ -71,6 +71,7 @@ type Config struct {
 	PriorKeys       map[int][]byte // version → bytes; the max version seeds computer_key_for_restore
 	SandboxID       string
 	BindingRevision int64
+	Location        *tokens.ComputerLocation
 
 	// Ephemeral binds an access lease ONLY: no persistence. The attach
 	// carries no capture keypair, mints without pk_computer/key_generation,
@@ -95,6 +96,9 @@ type Config struct {
 	// Called immediately after Portal commits an attach authorization. The
 	// caller persists the revision even if the later coordinator bind fails.
 	OnAuthorized func(revision int64)
+	// Called with Portal's effective binding location when the receipt
+	// includes it. Custom/in-process legacy minters may omit it.
+	OnLocation func(location tokens.ComputerLocation)
 }
 
 func (c *Config) defaults() {
@@ -170,7 +174,10 @@ func Bind(ctx context.Context, cfg Config) (*coordinator.BindResult, error) {
 		}
 
 		res, err := cfg.Coord.Bind(ctx, env.bindToken, env.podUID, env.coordBootID, env.ciphertext,
-			coordinator.BindExtras{KeyAssertion: env.keyAssertion, RestoreSecrets: env.restoreSecrets})
+			coordinator.BindExtras{
+				KeyAssertion:   env.keyAssertion,
+				RestoreSecrets: env.restoreSecrets,
+			})
 		if err == nil {
 			if res.RestoreChallenge == nil {
 				res.BindingRevision = env.bindingRevision
@@ -243,6 +250,7 @@ func mintEnvelope(ctx context.Context, cfg Config) (*envelope, error) {
 	req := tokens.CredentialsRequest{
 		ComputerID: cfg.ComputerID, PodUID: pubkey.PodUID, CoordBootID: pubkey.CoordBootID,
 		SandboxID: cfg.SandboxID, ExpectedBindingRevision: cfg.BindingRevision,
+		Location: cfg.Location,
 		IdempotencyKey: attachIdempotencyKey(
 			cfg.ComputerID, cfg.SandboxID, pubkey.PodUID, pubkey.CoordBootID,
 		),
@@ -269,23 +277,47 @@ func mintEnvelope(ctx context.Context, cfg Config) (*envelope, error) {
 	if cfg.OnAuthorized != nil {
 		cfg.OnAuthorized(creds.BindingRevision)
 	}
+	if creds.Location != nil {
+		if err := validateLocation(creds.Location); err != nil {
+			return nil, err
+		}
+		if cfg.Location != nil && creds.Location.Country != cfg.Location.Country {
+			return nil, fmt.Errorf(
+				"pinesandbox: attach-credentials provider returned location %q instead of requested %q",
+				creds.Location.Country, cfg.Location.Country,
+			)
+		}
+		if cfg.OnLocation != nil {
+			cfg.OnLocation(*creds.Location)
+		}
+	}
 	// Preserve the committed revision above even if a custom/in-process issuer
 	// returns an incomplete receipt. v3 must never fall through to coord without
 	// its assertion and silently behave like an older attach. An ephemeral
 	// attach carries no capture identity, so it never receives a key_assertion.
-	if creds.BindToken == "" || creds.BrokerGrant == "" || (!cfg.Ephemeral && creds.KeyAssertion == "") {
+	if creds.BindToken == "" || creds.BrokerGrant == "" ||
+		(!cfg.Ephemeral && creds.KeyAssertion == "") {
 		return nil, fmt.Errorf("pinesandbox: attach-credentials provider result missing bind_token/broker_grant/key_assertion")
+	}
+	if (creds.UsageReporterGrant == "") != (creds.UsageReporterID == "") {
+		return nil, fmt.Errorf("pinesandbox: attach-credentials provider returned an incomplete usage reporter credential")
 	}
 
 	var plaintext []byte
 	if cfg.Ephemeral {
 		// Access-lease-only: seal the broker grant WITHOUT any computer key.
-		plaintext, err = json.Marshal(ephemeralPlaintext{BrokerGrant: creds.BrokerGrant})
+		plaintext, err = json.Marshal(ephemeralPlaintext{
+			BrokerGrant:        creds.BrokerGrant,
+			UsageReporterGrant: creds.UsageReporterGrant,
+			UsageReporterID:    creds.UsageReporterID,
+		})
 	} else {
 		plaintext, err = json.Marshal(bindPlaintext{
 			ComputerKeyCurrent:    wireKey{Version: CurrentKeyVersion, Bytes: b64(cfg.Key)},
 			ComputerKeyForRestore: restoreKey(cfg.PriorKeys),
 			BrokerGrant:           creds.BrokerGrant,
+			UsageReporterGrant:    creds.UsageReporterGrant,
+			UsageReporterID:       creds.UsageReporterID,
 		})
 	}
 	if err != nil {
@@ -304,6 +336,14 @@ func mintEnvelope(ctx context.Context, cfg Config) (*envelope, error) {
 		bindingRevision: creds.BindingRevision,
 		ephemPub:        pubkey.EphemPub,
 	}, nil
+}
+
+func validateLocation(location *tokens.ComputerLocation) error {
+	country := location.Country
+	if len(country) != 2 || country[0] < 'A' || country[0] > 'Z' || country[1] < 'A' || country[1] > 'Z' {
+		return fmt.Errorf("pinesandbox: attach-credentials provider returned a non-canonical country")
+	}
+	return nil
 }
 
 func attachIdempotencyKey(computerID, sandboxID, podUID, coordBootID string) string {
@@ -377,13 +417,17 @@ type bindPlaintext struct {
 	ComputerKeyCurrent    wireKey  `json:"computer_key_current"`
 	ComputerKeyForRestore *wireKey `json:"computer_key_for_restore"`
 	BrokerGrant           string   `json:"broker_grant"`
+	UsageReporterGrant    string   `json:"usage_reporter_grant,omitempty"`
+	UsageReporterID       string   `json:"usage_reporter_id,omitempty"`
 }
 
 // ephemeralPlaintext is the bind payload for an access-lease-only (ephemeral)
 // attach: it carries the broker grant but NO computer key material, so the pod
 // binds a lease without any persistence identity.
 type ephemeralPlaintext struct {
-	BrokerGrant string `json:"broker_grant"`
+	BrokerGrant        string `json:"broker_grant"`
+	UsageReporterGrant string `json:"usage_reporter_grant,omitempty"`
+	UsageReporterID    string `json:"usage_reporter_id,omitempty"`
 }
 
 // restoreKey returns the highest-version prior key as the restore key (so a snapshot sealed

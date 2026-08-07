@@ -46,7 +46,7 @@ func (h *SandboxHandle) ID() string { return h.id }
 
 // WaitUntilRunning blocks until the pod reports Running, returning *SandboxFailedError on a
 // terminal state or *ReadyTimeoutError if it never becomes Ready within timeout. A
-// create-time Running status (warm-pool claim) skips the first poll.
+// create-time Running status (a prewarmed Computer) skips the first poll.
 func (h *SandboxHandle) WaitUntilRunning(ctx context.Context, timeout, interval time.Duration) error {
 	if h.status == statusRunning {
 		return nil

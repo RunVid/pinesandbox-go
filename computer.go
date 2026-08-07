@@ -10,12 +10,21 @@ import (
 	"go.pinesandbox.io/computer/internal/bind"
 	"go.pinesandbox.io/computer/internal/binder"
 	"go.pinesandbox.io/computer/internal/coordinator"
+	"go.pinesandbox.io/computer/internal/tokens"
 )
 
 // CurrentKeyVersion is the version stamped on the current state key (rotation only).
 const CurrentKeyVersion = binder.CurrentKeyVersion
 
 const defaultAttachTimeout = 300 * time.Second
+
+// ComputerLocation is the geographic intent for one Computer binding.
+// Country is canonical ISO 3166-1 alpha-2 uppercase (for example "US").
+// Portal owns the supported-country catalog; the SDK only validates the fixed
+// standard and forwards it during attach authorization.
+type ComputerLocation struct {
+	Country string `json:"country"`
+}
 
 // AttachOptions configures CreateComputer / AttachComputer / Computer.Attach.
 type AttachOptions struct {
@@ -30,6 +39,10 @@ type AttachOptions struct {
 	Timeout  time.Duration // sandbox TTL + readiness wait, default 300s
 	PodEnv   map[string]string
 	Metadata map[string]string
+	// Location is optional. Portal applies its server-owned default for a new
+	// Computer; later attaches retain the last location when omitted and may
+	// replace it after Stop or Kill.
+	Location *ComputerLocation
 	// BindingRevision is the last Portal attach revision persisted by the
 	// integrator. Zero is correct for a never-attached/legacy Computer.
 	BindingRevision int64
@@ -57,6 +70,7 @@ type Computer struct {
 	captureKeypairs map[int]*CaptureKeypair
 	captureGen      int
 	bindingRevision int64
+	location        *ComputerLocation
 	// lastAuthorizedSandboxID is set only after Portal commits an attach
 	// authorization. Client uses it to add recovery context when the later
 	// coordinator bind fails and the Computer itself cannot be returned.
@@ -89,6 +103,25 @@ func cloneKey(k []byte) []byte {
 	return append([]byte(nil), k...)
 }
 
+func cloneLocation(location *ComputerLocation) *ComputerLocation {
+	if location == nil {
+		return nil
+	}
+	copy := *location
+	return &copy
+}
+
+func validateLocation(location *ComputerLocation) error {
+	if location == nil {
+		return nil
+	}
+	country := location.Country
+	if len(country) != 2 || country[0] < 'A' || country[0] > 'Z' || country[1] < 'A' || country[1] > 'Z' {
+		return fmt.Errorf("pinesandbox: Location.Country must be canonical ISO 3166-1 alpha-2 uppercase (for example US)")
+	}
+	return nil
+}
+
 // ID is the Computer's stable id.
 func (c *Computer) ID() string { return c.id }
 
@@ -102,6 +135,14 @@ func (c *Computer) BindingRevision() int64 {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.bindingRevision
+}
+
+// Location returns the effective location committed by Portal for the latest
+// binding, or nil until an attach receipt reports it. The returned value is a copy.
+func (c *Computer) Location() *ComputerLocation {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return cloneLocation(c.location)
 }
 
 // CaptureKeypair returns a defensive copy of the current asymmetric keypair.
@@ -311,6 +352,9 @@ func (c *Computer) Attach(ctx context.Context, conn *Connection, opts AttachOpti
 	if opts.BindingRevision < 0 {
 		return fmt.Errorf("pinesandbox: BindingRevision must be non-negative")
 	}
+	if err := validateLocation(opts.Location); err != nil {
+		return err
+	}
 	if err := c.configureCaptureKeypairs(opts.CaptureKeypair, opts.PriorCaptureKeypairs); err != nil {
 		return err
 	}
@@ -326,6 +370,7 @@ func (c *Computer) Attach(ctx context.Context, conn *Connection, opts AttachOpti
 		return fmt.Errorf("pinesandbox: binding revision %d conflicts with Computer revision %d", opts.BindingRevision, c.bindingRevision)
 	}
 	bindingRevision := c.bindingRevision
+	requestedLocation := cloneLocation(opts.Location)
 	c.mu.Unlock()
 	timeout := opts.Timeout
 	if timeout <= 0 {
@@ -363,6 +408,7 @@ func (c *Computer) Attach(ctx context.Context, conn *Connection, opts AttachOpti
 		Key:             c.key,
 		PriorKeys:       c.priorKeysCopy(),
 		SandboxID:       info.ID,
+		Location:        tokenLocation(requestedLocation),
 		MaxBindAttempts: opts.MaxBindAttempts,
 		ReadyTimeout:    opts.BindReadyTimeout,
 		Ephemeral:       opts.Ephemeral,
@@ -373,6 +419,11 @@ func (c *Computer) Attach(ctx context.Context, conn *Connection, opts AttachOpti
 			c.mu.Lock()
 			c.bindingRevision = revision
 			c.lastAuthorizedSandboxID = info.ID
+			c.mu.Unlock()
+		},
+		OnLocation: func(location tokens.ComputerLocation) {
+			c.mu.Lock()
+			c.location = &ComputerLocation{Country: location.Country}
 			c.mu.Unlock()
 		},
 	})
@@ -387,6 +438,13 @@ func (c *Computer) Attach(ctx context.Context, conn *Connection, opts AttachOpti
 	c.persistenceMode = res.PersistenceMode
 	c.mu.Unlock()
 	return nil
+}
+
+func tokenLocation(location *ComputerLocation) *tokens.ComputerLocation {
+	if location == nil {
+		return nil
+	}
+	return &tokens.ComputerLocation{Country: location.Country}
 }
 
 // adopt wires an already-bound, still-live pod (no provision, no bind).

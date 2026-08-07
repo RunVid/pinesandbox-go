@@ -78,9 +78,9 @@ func (e *InsufficientScope) Error() string {
 	return tokErr("insufficient client-key scope", e.tokenBase)
 }
 
-// ProjectAccessDenied: the pk_ was accepted but the project/computer is not allowed to
-// mint attach credentials or broker grants (403) — disabled project, missing scope, or
-// disallowed computer status.
+// ProjectAccessDenied: the pk_ was accepted but the project/computer is not
+// allowed to use the requested Portal operation (403) — disabled project,
+// missing scope, or disallowed computer status.
 type ProjectAccessDenied struct{ tokenBase }
 
 func (e *ProjectAccessDenied) Error() string {
@@ -98,6 +98,15 @@ type AttachCredentialsError struct{ tokenBase }
 
 func (e *AttachCredentialsError) Error() string {
 	return tokErr("attach-credentials mint failed", e.tokenBase)
+}
+
+// LocationDiscoveryError is a failed read of the project's available Computer
+// locations. It is separate from attach minting because discovery is useful
+// before a caller creates or attaches any Computer.
+type LocationDiscoveryError struct{ tokenBase }
+
+func (e *LocationDiscoveryError) Error() string {
+	return tokErr("location discovery failed", e.tokenBase)
 }
 
 // BindingRevisionConflictError means another attach already advanced the

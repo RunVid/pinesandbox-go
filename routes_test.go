@@ -23,6 +23,7 @@ var sdkRoutes = []string{
 	"POST /sandboxes/{id}/resume",
 	// portal (control token + attach credentials)
 	"POST /v1/control-token",
+	"GET /v1/locations",
 	"POST /v1/computers",
 	"POST /v1/computers/{id}/attach-credentials",
 	// coordinator: bind + admin

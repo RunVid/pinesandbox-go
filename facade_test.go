@@ -44,6 +44,26 @@ func buildTestConnection(t *testing.T, controlURL, coordURL string) *Connection 
 	}
 }
 
+func TestClientAvailableLocations(t *testing.T) {
+	portal := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/locations" {
+			t.Errorf("request = %s %s", r.Method, r.URL.Path)
+		}
+		fmt.Fprint(w, `{"locations":[{"country":"SG"}],"default_location":{"country":"US"}}`)
+	}))
+	defer portal.Close()
+
+	client := &Client{conn: buildTestConnection(t, portal.URL, portal.URL)}
+	result, err := client.AvailableLocations(context.Background())
+	if err != nil {
+		t.Fatalf("AvailableLocations: %v", err)
+	}
+	if len(result.Locations) != 1 || result.Locations[0].Country != "SG" ||
+		result.DefaultLocation.Country != "US" {
+		t.Fatalf("result = %+v", result)
+	}
+}
+
 // TestAttachEndToEnd drives the whole stack: create → atomic attach mint → bind handshake
 // (real HPKE seal, opened by the coord) → create session (ct_) → agent.Run (ct_) →
 // drive.Observe (ps_). It asserts the bind plaintext shape and the ct_/ps_ token routing.
@@ -61,6 +81,7 @@ func TestAttachEndToEnd(t *testing.T) {
 	var openedBrokerGrant string
 	var attachPK string
 	var attachGeneration int
+	var attachCountry string
 	var bindKeyAssertion string
 	var agentAuth, observeAuth, createAuth string
 
@@ -70,21 +91,32 @@ func TestAttachEndToEnd(t *testing.T) {
 			w.WriteHeader(201)
 			fmt.Fprint(w, `{"computer_id":"c1"}`)
 		case r.Method == "POST" && r.URL.Path == "/computer-sandboxes":
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode sandbox create request: %v", err)
+			}
+			if _, ok := body["location"]; ok {
+				t.Errorf("location leaked into lifecycle provisioning: %v", body)
+			}
 			w.WriteHeader(202)
 			fmt.Fprint(w, `{"id":"sb-1","status":{"state":"Running"}}`)
 		case r.Method == "POST" && r.URL.Path == "/v1/computers/c1/attach-credentials":
 			var body struct {
 				PKComputer    string `json:"pk_computer"`
 				KeyGeneration int    `json:"key_generation"`
+				Location      struct {
+					Country string `json:"country"`
+				} `json:"location"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				t.Errorf("decode attach-credentials request: %v", err)
 			}
 			attachPK, attachGeneration = body.PKComputer, body.KeyGeneration
+			attachCountry = body.Location.Country
 			if r.Header.Get("Idempotency-Key") == "" {
 				t.Error("attach request omitted Idempotency-Key")
 			}
-			fmt.Fprint(w, `{"bind_token":"bt_1","broker_grant":"bg_1","key_assertion":"ka_1","binding_revision":1}`)
+			fmt.Fprint(w, `{"bind_token":"bt_1","broker_grant":"bg_1","key_assertion":"ka_1","binding_revision":1,"location":{"country":"US"}}`)
 		default:
 			t.Errorf("controlSrv: unexpected %s %s", r.Method, r.URL.Path)
 			w.WriteHeader(500)
@@ -143,7 +175,10 @@ func TestAttachEndToEnd(t *testing.T) {
 	ctx := context.Background()
 
 	comp := newComputer("c1", []byte("0123456789abcdef0123456789abcdef"))
-	if err := comp.Attach(ctx, conn, AttachOptions{CaptureKeypair: captureKP}); err != nil {
+	if err := comp.Attach(ctx, conn, AttachOptions{
+		CaptureKeypair: captureKP,
+		Location:       &ComputerLocation{Country: "US"},
+	}); err != nil {
 		t.Fatalf("Attach: %v", err)
 	}
 	if comp.ComputerToken() != ct || comp.SandboxID() != "sb-1" {
@@ -154,6 +189,12 @@ func TestAttachEndToEnd(t *testing.T) {
 	}
 	if attachGeneration != captureKP.Generation || attachPK != base64.RawURLEncoding.EncodeToString(captureKP.PK) {
 		t.Errorf("attach capture identity: generation=%d pk=%q", attachGeneration, attachPK)
+	}
+	if attachCountry != "US" {
+		t.Errorf("attach location country = %q, want US", attachCountry)
+	}
+	if location := comp.Location(); location == nil || location.Country != "US" {
+		t.Errorf("Computer.Location() = %+v, want US", location)
 	}
 	if bindKeyAssertion != "ka_1" {
 		t.Errorf("bind key_assertion = %q, want ka_1", bindKeyAssertion)
@@ -198,6 +239,91 @@ func TestAttachEndToEnd(t *testing.T) {
 	}
 	if observeAuth != ps {
 		t.Errorf("drive.Observe auth = %q, want ps_ (%q) — drive is session-scoped", observeAuth, ps)
+	}
+}
+
+func TestAttachLocationCanChangeAfterKillAndIsRetainedWhenOmitted(t *testing.T) {
+	kp, err := bindhpke.GenerateKeypair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var createCount, revision int
+	var requestedCountries []string
+	serverCountry := "US"
+
+	controlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "POST" && r.URL.Path == "/computer-sandboxes":
+			createCount++
+			fmt.Fprintf(w, `{"id":"sb-%d","status":{"state":"Running"}}`, createCount)
+		case r.Method == "DELETE" && strings.HasPrefix(r.URL.Path, "/sandboxes/sb-"):
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == "POST" && strings.HasPrefix(r.URL.Path, "/v1/computers/") && strings.HasSuffix(r.URL.Path, "/attach-credentials"):
+			var body struct {
+				Location *ComputerLocation `json:"location"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode attach request: %v", err)
+			}
+			if body.Location != nil {
+				serverCountry = body.Location.Country
+				requestedCountries = append(requestedCountries, body.Location.Country)
+			} else {
+				requestedCountries = append(requestedCountries, "<omitted>")
+			}
+			revision++
+			fmt.Fprintf(w, `{"bind_token":"bt","broker_grant":"bg","binding_revision":%d,"location":{"country":%q}}`, revision, serverCountry)
+		default:
+			t.Errorf("controlSrv: unexpected %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+	}))
+	defer controlSrv.Close()
+
+	coordSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/coord/bind-pubkey":
+			fmt.Fprintf(w, `{"pod_uid":"pod-1","coord_boot_id":"boot-1","ephem_pub_x25519":%q}`,
+				base64.RawURLEncoding.EncodeToString(kp.PublicKeyRaw()))
+		case "/v1/coord/bind":
+			fmt.Fprint(w, `{"computer_token":"ct","epoch":1}`)
+		default:
+			t.Errorf("coordSrv: unexpected %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+	}))
+	defer coordSrv.Close()
+
+	ctx := context.Background()
+	comp := newComputer("c1", []byte("0123456789abcdef0123456789abcdef"))
+	conn := buildTestConnection(t, controlSrv.URL, coordSrv.URL)
+
+	if err := comp.Attach(ctx, conn, AttachOptions{Ephemeral: true}); err != nil {
+		t.Fatalf("first Attach: %v", err)
+	}
+	if !comp.Kill(ctx) {
+		t.Fatal("first Kill failed")
+	}
+	if err := comp.Attach(ctx, conn, AttachOptions{
+		Ephemeral: true,
+		Location:  &ComputerLocation{Country: "SG"},
+	}); err != nil {
+		t.Fatalf("SG Attach: %v", err)
+	}
+	if location := comp.Location(); location == nil || location.Country != "SG" {
+		t.Fatalf("location after SG attach = %+v, want SG", location)
+	}
+	if !comp.Kill(ctx) {
+		t.Fatal("second Kill failed")
+	}
+	if err := comp.Attach(ctx, conn, AttachOptions{Ephemeral: true}); err != nil {
+		t.Fatalf("retained-location Attach: %v", err)
+	}
+	if location := comp.Location(); location == nil || location.Country != "SG" {
+		t.Fatalf("retained location = %+v, want SG", location)
+	}
+	if got, want := strings.Join(requestedCountries, ","), "<omitted>,SG,<omitted>"; got != want {
+		t.Fatalf("requested countries = %q, want %q", got, want)
 	}
 }
 
@@ -376,6 +502,30 @@ func TestCreateComputer_RejectsInvalidIDBeforeProvisioning(t *testing.T) {
 	}
 	if coordRequests != 0 {
 		t.Fatalf("invalid Computer id made %d coordinator requests, want 0", coordRequests)
+	}
+}
+
+func TestCreateComputerRejectsNonCanonicalLocationBeforeProvisioning(t *testing.T) {
+	controlRequests := 0
+	controlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		controlRequests++
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer controlSrv.Close()
+	coordSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer coordSrv.Close()
+
+	client := &Client{conn: buildTestConnection(t, controlSrv.URL, coordSrv.URL)}
+	_, err := client.CreateComputer(context.Background(), AttachOptions{
+		Location: &ComputerLocation{Country: "us"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "ISO 3166-1") {
+		t.Fatalf("CreateComputer error = %v, want canonical country validation", err)
+	}
+	if controlRequests != 0 {
+		t.Fatalf("invalid location made %d control-plane requests, want 0", controlRequests)
 	}
 }
 

@@ -41,14 +41,14 @@ func validCredentialsRequest() CredentialsRequest {
 
 func TestRegisterComputer(t *testing.T) {
 	var gotAuth, gotPath string
-	var gotBody map[string]string
+	var gotBody map[string]any
 	s := newAttachSource(t, func(w http.ResponseWriter, r *http.Request) {
 		gotAuth, gotPath = r.Header.Get("Authorization"), r.URL.Path
 		_ = json.NewDecoder(r.Body).Decode(&gotBody)
 		w.WriteHeader(201)
 		fmt.Fprint(w, `{"computer_id":"c1"}`)
 	})
-	if err := s.RegisterComputer(context.Background(), "c1"); err != nil {
+	if err := s.RegisterComputer(context.Background(), "c1", &ComputerLocation{Country: "US"}); err != nil {
 		t.Fatalf("RegisterComputer: %v", err)
 	}
 	if gotAuth != "Bearer pk_test" || gotPath != "/v1/computers" {
@@ -56,6 +56,9 @@ func TestRegisterComputer(t *testing.T) {
 	}
 	if gotBody["computer_id"] != "c1" {
 		t.Errorf("body = %v", gotBody)
+	}
+	if gotBody["location"].(map[string]any)["country"] != "US" {
+		t.Errorf("location = %v", gotBody["location"])
 	}
 }
 
@@ -65,10 +68,40 @@ func TestRegisterComputer_Conflict(t *testing.T) {
 		fmt.Fprint(w, `{"message":"owned by another project"}`)
 	})
 	var e *ComputerRegistrationError
-	if err := s.RegisterComputer(context.Background(), "c1"); !errors.As(err, &e) {
+	if err := s.RegisterComputer(context.Background(), "c1", nil); !errors.As(err, &e) {
 		t.Fatalf("err = %T (%v), want *ComputerRegistrationError", err, err)
 	} else if e.Status != 409 {
 		t.Errorf("status = %d", e.Status)
+	}
+}
+
+func TestAvailableLocations(t *testing.T) {
+	var gotAuth string
+	s := newAttachSource(t, func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/locations" {
+			t.Errorf("request = %s %s", r.Method, r.URL.Path)
+		}
+		fmt.Fprint(w, `{"locations":[{"country":"SG"},{"country":"US"}],"default_location":{"country":"US"}}`)
+	})
+
+	result, err := s.AvailableLocations(context.Background())
+	if err != nil {
+		t.Fatalf("AvailableLocations: %v", err)
+	}
+	if gotAuth != "Bearer pk_test" || len(result.Locations) != 2 ||
+		result.Locations[0].Country != "SG" || result.DefaultLocation.Country != "US" {
+		t.Fatalf("auth=%q result=%+v", gotAuth, result)
+	}
+}
+
+func TestAvailableLocationsRejectsMalformedResponse(t *testing.T) {
+	s := newAttachSource(t, func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"locations":[{"country":"sg"}],"default_location":{"country":"US"}}`)
+	})
+	var discovery *LocationDiscoveryError
+	if _, err := s.AvailableLocations(context.Background()); !errors.As(err, &discovery) {
+		t.Fatalf("err = %T (%v), want *LocationDiscoveryError", err, err)
 	}
 }
 
@@ -81,10 +114,11 @@ func TestCredentials(t *testing.T) {
 			t.Errorf("Idempotency-Key = %q", r.Header.Get("Idempotency-Key"))
 		}
 		_ = json.NewDecoder(r.Body).Decode(&gotBody)
-		fmt.Fprint(w, `{"bind_token":"bt_1","broker_grant":"bg_1","key_assertion":"ka_1","binding_revision":1}`)
+		fmt.Fprint(w, `{"bind_token":"bt_1","broker_grant":"bg_1","key_assertion":"ka_1","binding_revision":1,"usage_reporter_grant":"urg_1","usage_reporter_grant_expires_at":"2026-08-05T12:00:00Z","usage_reporter_id":"ure_0123456789abcdef","location":{"country":"US"}}`)
 	})
 	req := validCredentialsRequest()
 	req.ComputerID, req.PodUID, req.CoordBootID, req.SandboxID = "c1", "pod-1", "boot-1", "sb-1"
+	req.Location = &ComputerLocation{Country: "US"}
 	cr, err := s.Credentials(context.Background(), req)
 	if err != nil {
 		t.Fatalf("Credentials: %v", err)
@@ -92,14 +126,54 @@ func TestCredentials(t *testing.T) {
 	if cr.BindToken != "bt_1" || cr.BrokerGrant != "bg_1" {
 		t.Errorf("creds = %+v", cr)
 	}
+	if cr.UsageReporterGrant != "urg_1" ||
+		cr.UsageReporterGrantExpiresAt != "2026-08-05T12:00:00Z" ||
+		cr.UsageReporterID != "ure_0123456789abcdef" {
+		t.Errorf("reporter creds = %+v", cr)
+	}
+	if cr.Location == nil || cr.Location.Country != "US" {
+		t.Errorf("creds location = %+v", cr.Location)
+	}
 	if gotPath != "/v1/computers/c1/attach-credentials" {
 		t.Errorf("path = %q", gotPath)
 	}
 	if gotBody["pod_uid"] != "pod-1" || gotBody["sandbox_id"] != "sb-1" || gotBody["expected_binding_revision"].(float64) != 0 {
 		t.Errorf("body = %v", gotBody)
 	}
+	if gotBody["location"].(map[string]any)["country"] != "US" {
+		t.Errorf("location = %v", gotBody["location"])
+	}
 	if _, ok := gotBody["profile"]; ok {
 		t.Errorf("profile leaked into attach body: %v", gotBody)
+	}
+}
+
+func TestCredentialsRejectsNonCanonicalCountryBeforeNetwork(t *testing.T) {
+	called := false
+	s := newAttachSource(t, func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	req := validCredentialsRequest()
+	req.Location = &ComputerLocation{Country: "us"}
+	if _, err := s.Credentials(context.Background(), req); err == nil {
+		t.Fatal("Credentials accepted a non-canonical lowercase country")
+	}
+	if called {
+		t.Fatal("Credentials contacted Portal before validating location")
+	}
+}
+
+func TestCredentialsPreservesNonCanonicalCountryForCommittedReceiptValidation(t *testing.T) {
+	s := newAttachSource(t, func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"bind_token":"b","broker_grant":"g","key_assertion":"k","binding_revision":1,"location":{"country":"us"}}`)
+	})
+	creds, err := s.Credentials(context.Background(), validCredentialsRequest())
+	if err != nil {
+		t.Fatalf("Credentials: %v", err)
+	}
+	if creds.BindingRevision != 1 || creds.Location == nil || creds.Location.Country != "us" {
+		t.Fatalf("committed receipt = %+v", creds)
 	}
 }
 

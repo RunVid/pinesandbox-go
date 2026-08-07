@@ -45,7 +45,10 @@ func newFakeCoord(t *testing.T, steps ...bindStep) *fakeCoord {
 	if err != nil {
 		t.Fatalf("keypair: %v", err)
 	}
-	return &fakeCoord{kp: kp, podUID: "pod-1", boot: "boot-1", bindSteps: steps}
+	return &fakeCoord{
+		kp: kp, podUID: "pod-1", boot: "boot-1",
+		bindSteps: steps,
+	}
 }
 
 func (f *fakeCoord) BindPubkey(_ context.Context) (*coordinator.BindPubkey, error) {
@@ -56,7 +59,9 @@ func (f *fakeCoord) BindPubkey(_ context.Context) (*coordinator.BindPubkey, erro
 	if i < len(f.pubkeyErrs) && f.pubkeyErrs[i] != nil {
 		return nil, f.pubkeyErrs[i]
 	}
-	return &coordinator.BindPubkey{PodUID: f.podUID, CoordBootID: f.boot, EphemPub: f.kp.PublicKeyRaw()}, nil
+	return &coordinator.BindPubkey{
+		PodUID: f.podUID, CoordBootID: f.boot, EphemPub: f.kp.PublicKeyRaw(),
+	}, nil
 }
 
 func (f *fakeCoord) Bind(_ context.Context, bindToken, podUID, boot, ciphertext string, extras coordinator.BindExtras) (*coordinator.BindResult, error) {
@@ -183,6 +188,25 @@ func TestBind_HappyPath(t *testing.T) {
 	}
 }
 
+func TestBind_InvalidCommittedLocationStillRecordsRevision(t *testing.T) {
+	coord := newFakeCoord(t)
+	minter := &fakeMinter{raw: true, creds: &tokens.AttachCredentials{
+		BindToken: "bt", BrokerGrant: "bg", KeyAssertion: "ka",
+		BindingRevision: 1, Location: &tokens.ComputerLocation{Country: "us"},
+	}}
+	clk := &fakeClock{t: time.Unix(1700000000, 0)}
+	cfg := baseConfig(coord, minter, clk)
+	committedRevision := int64(0)
+	cfg.OnAuthorized = func(revision int64) { committedRevision = revision }
+
+	if _, err := Bind(context.Background(), cfg); err == nil {
+		t.Fatal("Bind accepted a non-canonical committed location")
+	}
+	if committedRevision != 1 {
+		t.Fatalf("committed revision = %d, want 1", committedRevision)
+	}
+}
+
 // TestBind_Ephemeral proves an access-lease-only attach omits every piece of
 // persistence key material: the mint request carries no pk_computer/key_generation,
 // the bind extras carry no key_assertion, and the HPKE-sealed plaintext carries
@@ -236,6 +260,38 @@ func TestBind_Ephemeral(t *testing.T) {
 	}
 	if string(raw["broker_grant"]) != `"bg"` {
 		t.Errorf("broker_grant = %s, want \"bg\"", raw["broker_grant"])
+	}
+}
+
+func TestBind_SealsUsageReporterCredentialAsAnOpaquePair(t *testing.T) {
+	coord := newFakeCoord(t, bindStep{res: &coordinator.BindResult{ComputerToken: "ct"}})
+	minter := &fakeMinter{raw: true, creds: &tokens.AttachCredentials{
+		BindToken: "bt", BrokerGrant: "bg", KeyAssertion: "ka", BindingRevision: 1,
+		UsageReporterGrant: "reporter.jws.value", UsageReporterID: "ure_0123456789abcdef",
+	}}
+	cfg := baseConfig(coord, minter, &fakeClock{t: time.Unix(1700000000, 0)})
+	if _, err := Bind(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
+	plaintext := coord.open(t, coord.ciphertexts[0])
+	if plaintext.UsageReporterGrant != "reporter.jws.value" ||
+		plaintext.UsageReporterID != "ure_0123456789abcdef" {
+		t.Fatalf("reporter credential not preserved in bind plaintext: %+v", plaintext)
+	}
+}
+
+func TestBind_RejectsIncompleteUsageReporterCredential(t *testing.T) {
+	coord := newFakeCoord(t)
+	minter := &fakeMinter{raw: true, creds: &tokens.AttachCredentials{
+		BindToken: "bt", BrokerGrant: "bg", KeyAssertion: "ka", BindingRevision: 1,
+		UsageReporterGrant: "reporter.jws.value",
+	}}
+	cfg := baseConfig(coord, minter, &fakeClock{t: time.Unix(1700000000, 0)})
+	if _, err := Bind(context.Background(), cfg); err == nil || !strings.Contains(err.Error(), "incomplete usage reporter") {
+		t.Fatalf("err = %v, want incomplete reporter credential", err)
+	}
+	if coord.bindCalls != 0 {
+		t.Fatal("incomplete reporter credential reached coordinator bind")
 	}
 }
 

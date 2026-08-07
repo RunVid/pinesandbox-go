@@ -9,6 +9,7 @@ package pinesandbox
 // Agent event kinds — AgentEvent.Type (spec TaskEvent.type).
 const (
 	EventStatus         = "status"
+	EventInput          = "input" // caller-authored run, answer, or steer — see AgentEvent.Payload
 	EventReasoning      = "reasoning"
 	EventCommand        = "command"
 	EventStep           = "step"
