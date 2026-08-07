@@ -299,25 +299,15 @@ func mintEnvelope(ctx context.Context, cfg Config) (*envelope, error) {
 		(!cfg.Ephemeral && creds.KeyAssertion == "") {
 		return nil, fmt.Errorf("pinesandbox: attach-credentials provider result missing bind_token/broker_grant/key_assertion")
 	}
-	if (creds.UsageReporterGrant == "") != (creds.UsageReporterID == "") {
-		return nil, fmt.Errorf("pinesandbox: attach-credentials provider returned an incomplete usage reporter credential")
-	}
-
 	var plaintext []byte
 	if cfg.Ephemeral {
 		// Access-lease-only: seal the broker grant WITHOUT any computer key.
-		plaintext, err = json.Marshal(ephemeralPlaintext{
-			BrokerGrant:        creds.BrokerGrant,
-			UsageReporterGrant: creds.UsageReporterGrant,
-			UsageReporterID:    creds.UsageReporterID,
-		})
+		plaintext, err = json.Marshal(ephemeralPlaintext{BrokerGrant: creds.BrokerGrant})
 	} else {
 		plaintext, err = json.Marshal(bindPlaintext{
 			ComputerKeyCurrent:    wireKey{Version: CurrentKeyVersion, Bytes: b64(cfg.Key)},
 			ComputerKeyForRestore: restoreKey(cfg.PriorKeys),
 			BrokerGrant:           creds.BrokerGrant,
-			UsageReporterGrant:    creds.UsageReporterGrant,
-			UsageReporterID:       creds.UsageReporterID,
 		})
 	}
 	if err != nil {
@@ -413,21 +403,21 @@ type wireKey struct {
 	Bytes   string `json:"bytes"`
 }
 
+// bindPlaintext seals ONLY what the integrator custodies and Portal must never
+// hold. Platform-internal credentials deliberately do not appear here: routing
+// one through this payload made metering depend on the SDK version a customer
+// had pinned, so the coordinator now obtains those over its own internal rail.
 type bindPlaintext struct {
 	ComputerKeyCurrent    wireKey  `json:"computer_key_current"`
 	ComputerKeyForRestore *wireKey `json:"computer_key_for_restore"`
 	BrokerGrant           string   `json:"broker_grant"`
-	UsageReporterGrant    string   `json:"usage_reporter_grant,omitempty"`
-	UsageReporterID       string   `json:"usage_reporter_id,omitempty"`
 }
 
 // ephemeralPlaintext is the bind payload for an access-lease-only (ephemeral)
 // attach: it carries the broker grant but NO computer key material, so the pod
 // binds a lease without any persistence identity.
 type ephemeralPlaintext struct {
-	BrokerGrant        string `json:"broker_grant"`
-	UsageReporterGrant string `json:"usage_reporter_grant,omitempty"`
-	UsageReporterID    string `json:"usage_reporter_id,omitempty"`
+	BrokerGrant string `json:"broker_grant"`
 }
 
 // restoreKey returns the highest-version prior key as the restore key (so a snapshot sealed

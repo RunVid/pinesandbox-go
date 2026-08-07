@@ -126,11 +126,6 @@ func TestCredentials(t *testing.T) {
 	if cr.BindToken != "bt_1" || cr.BrokerGrant != "bg_1" {
 		t.Errorf("creds = %+v", cr)
 	}
-	if cr.UsageReporterGrant != "urg_1" ||
-		cr.UsageReporterGrantExpiresAt != "2026-08-05T12:00:00Z" ||
-		cr.UsageReporterID != "ure_0123456789abcdef" {
-		t.Errorf("reporter creds = %+v", cr)
-	}
 	if cr.Location == nil || cr.Location.Country != "US" {
 		t.Errorf("creds location = %+v", cr.Location)
 	}

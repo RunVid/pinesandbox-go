@@ -5,6 +5,20 @@ package `pinesandbox`) are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/). The current beta compatibility
 line is `v0.3.x`; review release notes before adopting a new minor version.
 
+## [0.3.13] — 2026-08-07
+
+### Fixed
+- `Bind` no longer seals the coordinator's usage-reporter credential into the
+  HPKE bind payload, and `AttachCredentials` no longer carries
+  `UsageReporterGrant` / `UsageReporterGrantExpiresAt` / `UsageReporterID`. That
+  credential is minted for the platform's own use, so routing it through the SDK
+  made metering depend on the SDK version an integrator had pinned — a release
+  that predated the fields could not attach at all against a metered runtime. The
+  coordinator now obtains it over its own internal channel. No integrator action
+  is required; custom `AttachCredentialsSource` implementations that still
+  populate those fields keep compiling only if they drop them, since the struct
+  fields are gone.
+
 ## [0.3.12] — 2026-08-07
 
 ### Added

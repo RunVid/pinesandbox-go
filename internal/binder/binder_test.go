@@ -263,35 +263,32 @@ func TestBind_Ephemeral(t *testing.T) {
 	}
 }
 
-func TestBind_SealsUsageReporterCredentialAsAnOpaquePair(t *testing.T) {
+// The sealed payload carries ONLY what the integrator custodies. Platform
+// accounting credentials must never appear here: putting one in this payload is
+// what made metering depend on the customer's pinned SDK version, so an SDK that
+// predated the field could not bind at all.
+func TestBind_SealsNoPlatformAccountingCredential(t *testing.T) {
 	coord := newFakeCoord(t, bindStep{res: &coordinator.BindResult{ComputerToken: "ct"}})
 	minter := &fakeMinter{raw: true, creds: &tokens.AttachCredentials{
 		BindToken: "bt", BrokerGrant: "bg", KeyAssertion: "ka", BindingRevision: 1,
-		UsageReporterGrant: "reporter.jws.value", UsageReporterID: "ure_0123456789abcdef",
 	}}
 	cfg := baseConfig(coord, minter, &fakeClock{t: time.Unix(1700000000, 0)})
 	if _, err := Bind(context.Background(), cfg); err != nil {
 		t.Fatal(err)
 	}
-	plaintext := coord.open(t, coord.ciphertexts[0])
-	if plaintext.UsageReporterGrant != "reporter.jws.value" ||
-		plaintext.UsageReporterID != "ure_0123456789abcdef" {
-		t.Fatalf("reporter credential not preserved in bind plaintext: %+v", plaintext)
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(coord.openRaw(t, coord.ciphertexts[0]), &raw); err != nil {
+		t.Fatal(err)
 	}
-}
-
-func TestBind_RejectsIncompleteUsageReporterCredential(t *testing.T) {
-	coord := newFakeCoord(t)
-	minter := &fakeMinter{raw: true, creds: &tokens.AttachCredentials{
-		BindToken: "bt", BrokerGrant: "bg", KeyAssertion: "ka", BindingRevision: 1,
-		UsageReporterGrant: "reporter.jws.value",
-	}}
-	cfg := baseConfig(coord, minter, &fakeClock{t: time.Unix(1700000000, 0)})
-	if _, err := Bind(context.Background(), cfg); err == nil || !strings.Contains(err.Error(), "incomplete usage reporter") {
-		t.Fatalf("err = %v, want incomplete reporter credential", err)
+	for _, key := range []string{"usage_reporter_grant", "usage_reporter_id"} {
+		if _, ok := raw[key]; ok {
+			t.Errorf("bind plaintext leaked platform credential %q", key)
+		}
 	}
-	if coord.bindCalls != 0 {
-		t.Fatal("incomplete reporter credential reached coordinator bind")
+	for _, key := range []string{"computer_key_current", "broker_grant"} {
+		if _, ok := raw[key]; !ok {
+			t.Errorf("bind plaintext is missing integrator-owned %q", key)
+		}
 	}
 }
 

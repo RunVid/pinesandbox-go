@@ -41,16 +41,13 @@ func NewAttachCredentialsSource(client *transport.Client, apiKey string) (*Attac
 // for v3: it is the portal-signed proof of which integrator key captures for
 // this Computer, forwarded VERBATIM to the coord bind.
 type AttachCredentials struct {
-	BindToken                   string
-	BrokerGrant                 string
-	BindTokenExpiresAt          string
-	BrokerGrantExpiresAt        string
-	KeyAssertion                string
-	BindingRevision             int64
-	Location                    *ComputerLocation
-	UsageReporterGrant          string
-	UsageReporterGrantExpiresAt string
-	UsageReporterID             string
+	BindToken            string
+	BrokerGrant          string
+	BindTokenExpiresAt   string
+	BrokerGrantExpiresAt string
+	KeyAssertion         string
+	BindingRevision      int64
+	Location             *ComputerLocation
 }
 
 // ComputerLocation is the Portal wire representation of the country intent
@@ -220,9 +217,6 @@ func (s *AttachCredentialsSource) Credentials(ctx context.Context, req Credentia
 		BindToken: out.BindToken, BrokerGrant: out.BrokerGrant,
 		BindTokenExpiresAt: out.BindTokenExpiresAt, BrokerGrantExpiresAt: out.BrokerGrantExpiresAt,
 		KeyAssertion: out.KeyAssertion, BindingRevision: out.BindingRevision, Location: out.Location,
-		UsageReporterGrant:          out.UsageReporterGrant,
-		UsageReporterGrantExpiresAt: out.UsageReporterGrantExpiresAt,
-		UsageReporterID:             out.UsageReporterID,
 	}, nil
 }
 
@@ -243,16 +237,13 @@ type credentialsRequestWire struct {
 }
 
 type attachCredentialsWire struct {
-	BindToken                   string            `json:"bind_token"`
-	BrokerGrant                 string            `json:"broker_grant"`
-	BindTokenExpiresAt          string            `json:"bind_token_expires_at"`
-	BrokerGrantExpiresAt        string            `json:"broker_grant_expires_at"`
-	KeyAssertion                string            `json:"key_assertion"`
-	BindingRevision             int64             `json:"binding_revision"`
-	Location                    *ComputerLocation `json:"location"`
-	UsageReporterGrant          string            `json:"usage_reporter_grant"`
-	UsageReporterGrantExpiresAt string            `json:"usage_reporter_grant_expires_at"`
-	UsageReporterID             string            `json:"usage_reporter_id"`
+	BindToken            string            `json:"bind_token"`
+	BrokerGrant          string            `json:"broker_grant"`
+	BindTokenExpiresAt   string            `json:"bind_token_expires_at"`
+	BrokerGrantExpiresAt string            `json:"broker_grant_expires_at"`
+	KeyAssertion         string            `json:"key_assertion"`
+	BindingRevision      int64             `json:"binding_revision"`
+	Location             *ComputerLocation `json:"location"`
 }
 
 func validateLocation(location *ComputerLocation) error {
