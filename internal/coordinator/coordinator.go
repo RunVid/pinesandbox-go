@@ -318,7 +318,7 @@ func (c *Client) openSSE(ctx context.Context, method, path, token string, body [
 // /errors/sandbox-not-found response becomes SandboxGoneError for every buffered and
 // streaming data-plane operation; attach still classifies its wrapped APIError as a
 // phase-specific readiness signal. Everything else remains the RFC-9457
-// *problem.APIError. Token-less routes (bind/health/metrics) never hit the 401 branch. op
+// *problem.APIError. Token-less routes (bind/health) never hit the 401 branch. op
 // is "<METHOD> <path>"; it + the data host stamp WHICH operation on WHICH Computer failed
 // (the primary spine) onto the typed error, so a generic handler is self-describing.
 func (c *Client) respError(status int, body []byte, requestID, token, op string) error {

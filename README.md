@@ -89,15 +89,38 @@ func main() {
 }
 ```
 
+`Stop` confirms a stopped-browser save before requesting sandbox deletion.
+A `*pine.StopSaveError` retains the source binding: retry stop on the same
+handle. A coordinator restart can leave the save outcome unknown; `Kill` is the
+explicit choice to accept possible unsaved-state loss. Ordinary best-effort
+shutdown capture may still run; this is not a rollback. Ephemeral Computers skip
+saving. A control-plane 404 before or during finish confirms the runtime is
+already stopped; no coordinator acknowledgment is required from a missing
+runtime. This does not prove its final save succeeded. Resume restores the latest
+committed broker state. Presence checks have a 5s budget; unavailable checks do
+not count as absence. Stop covers cookies, learned skills, compatible localStorage and already-durable
+passkeys; session files, tabs, page memory and IndexedDB are outside this contract.
+Deploy a runtime supporting stop before upgrading clients.
+
+`Stop` and `Kill` keep the Computer's identity and saved state. `Computer.Delete`
+(or `Client.DeleteComputer(ctx, id)`) ends both permanently: a live sandbox is
+killed first, the id is refused for every later attach, saved state is purged
+after 24 hours, and the id is never reusable. Deleting an unknown, already-deleted,
+or other project's id also succeeds. There is no undelete.
+
 ## Timeouts
 
-Every call is bounded by the `context` you pass — the SDK applies a 30s fallback
-only when your context has no deadline, so you extend (or shorten) any call with
-`context.WithTimeout`. Provisioning is special-cased: `CreateComputer` /
-`AttachComputer` bound the cold provision (`POST /computer-sandboxes` + readiness)
-by `AttachOptions.Timeout` (the readiness budget, default 300s), so slow
-provisioning doesn't trip the 30s fallback. Raise `AttachOptions.Timeout` when
-capacity takes longer to become ready.
+`AttachOptions.Timeout` sets the sandbox lifetime. `ReadyTimeout` separately
+bounds allocation plus pod readiness; `BindReadyTimeout` bounds the following
+bind. The caller's context can shorten either wait. Defaults and cleanup
+semantics are defined in the [attach timeout contract](../../../specs/computer-api.yaml).
+For example, `Timeout: 8 * time.Hour` keeps a long-lived Computer while
+`ReadyTimeout: 2 * time.Minute` limits waiting for capacity.
+
+Ordinary requests use a 30s fallback when the caller's context has no deadline.
+Failed attach cleanup uses its own 30s context so cancellation does not prevent
+deleting a known allocation. This cleanup may extend the time until attach
+returns; it is best-effort and does not recover allocations after a process crash.
 
 ## Stateless reuse (multi-instance / restarted backends)
 
@@ -125,6 +148,10 @@ sess.CreateTab(ctx, "https://example.com", "")     // drive   → ps_
 sess.TakeControl(ctx)                               // control → ct_ (WithForce() to override)
 sess.Agent().Run(ctx, goal, pine.RunOptions{})      // agent   → ct_
 ```
+
+Persist the binding's ephemeral setting too. For an ephemeral Computer, pass
+`pine.AdoptOptions{Ephemeral: true}` as the last `AdoptExisting` argument so
+`Stop` continues to skip persistence. Omission means persistent.
 
 Tokens split by tier: **`ct_` is the operator surface** — control lease, agent +
 skills-authoring mutations, lifecycle; **`ps_` is the session's own drive + reads**.

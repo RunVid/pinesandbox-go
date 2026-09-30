@@ -11,6 +11,7 @@ import (
 
 func TestSkills_ServedAndVersions(t *testing.T) {
 	var activateBody map[string]any
+	var enabledBody map[string]any
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/v1/skills" && r.Method == "GET":
@@ -30,6 +31,11 @@ func TestSkills_ServedAndVersions(t *testing.T) {
 			_, _ = io.WriteString(w, `{"active":2}`)
 		case r.URL.Path == "/v1/skills/book-flight/deactivate":
 			_, _ = io.WriteString(w, `{"active":null}`)
+		case r.URL.Path == "/v1/skills/pdf/enabled" && r.Method == "PUT":
+			_ = json.NewDecoder(r.Body).Decode(&enabledBody)
+			_, _ = io.WriteString(w, `{"skill":{"name":"pdf","enabled":false},"changed":true}`)
+		case r.URL.Path == "/v1/capabilities" && r.Method == "GET":
+			_, _ = io.WriteString(w, `{"features":[{"id":"media.generate","state":"enabled"}],"limits":[]}`)
 		case r.URL.Path == "/v1/skills/book-flight/versions/1" && r.Method == "DELETE":
 			_, _ = io.WriteString(w, `{"deleted":1}`)
 		default:
@@ -72,6 +78,15 @@ func TestSkills_ServedAndVersions(t *testing.T) {
 	}
 	if _, err := c.DeleteSkillVersion(ctx, "ct_", "book-flight", "1"); err != nil {
 		t.Fatalf("DeleteSkillVersion: %v", err)
+	}
+	if r, err := c.SetSkillEnabled(ctx, "ct_", "pdf", false); err != nil || !contains(string(r), `"changed":true`) {
+		t.Fatalf("SetSkillEnabled = %s, %v", r, err)
+	}
+	if enabled, ok := enabledBody["enabled"].(bool); !ok || enabled {
+		t.Errorf("enabled body = %v, want {enabled:false}", enabledBody)
+	}
+	if m, err := c.Capabilities(ctx, "ct_"); err != nil || !contains(string(m), "media.generate") {
+		t.Fatalf("Capabilities = %s, %v", m, err)
 	}
 }
 

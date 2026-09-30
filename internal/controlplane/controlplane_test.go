@@ -245,6 +245,46 @@ func TestErrorMapping(t *testing.T) {
 	}
 }
 
+// TestCreateComputer_CapacityExceeded: a 429 COMPUTER_CAPACITY_EXCEEDED is a typed,
+// errors.Is-able refusal sent exactly once — create never retries it — while an unrelated
+// 429 stays a generic ControlPlaneError.
+func TestCreateComputer_CapacityExceeded(t *testing.T) {
+	for _, tc := range []struct {
+		code     string
+		capacity bool
+	}{{"COMPUTER_CAPACITY_EXCEEDED", true}, {"RATE_LIMITED", false}} {
+		t.Run(tc.code, func(t *testing.T) {
+			calls := 0
+			c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				w.WriteHeader(429)
+				fmt.Fprintf(w, `{"code":%q,"message":"This project is at its limit of 2 concurrent Computers."}`, tc.code)
+			}, &fakeSource{initial: "jws1"})
+			_, err := c.CreateComputer(context.Background(), map[string]any{"timeout": 300})
+			if got := errors.Is(err, ErrCapacityExceeded); got != tc.capacity {
+				t.Fatalf("errors.Is(ErrCapacityExceeded) = %v for %T (%v)", got, err, err)
+			}
+			if tc.capacity {
+				var ce *CapacityExceededError
+				if !errors.As(err, &ce) || ce.Status != 429 || ce.Code != tc.code {
+					t.Fatalf("err = %#v, want *CapacityExceededError{429, %s}", err, tc.code)
+				}
+				if !strings.Contains(err.Error(), "limit of 2 concurrent Computers") {
+					t.Errorf("message = %q", err.Error())
+				}
+			} else {
+				var ge *ControlPlaneError
+				if !errors.As(err, &ge) || ge.Code != tc.code {
+					t.Fatalf("err = %#v, want *ControlPlaneError with code %s", err, tc.code)
+				}
+			}
+			if calls != 1 {
+				t.Errorf("create sent %d times, want 1", calls)
+			}
+		})
+	}
+}
+
 // TestErrorCarriesResourceContext: a control-plane failure is self-describing — the error
 // string names WHICH host, WHICH operation (`GET /sandboxes/<id>`), and the request id.
 func TestErrorCarriesResourceContext(t *testing.T) {

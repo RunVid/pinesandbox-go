@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"go.pinesandbox.io/computer/internal/base/transport"
@@ -98,6 +100,9 @@ func TestAttachEndToEnd(t *testing.T) {
 			if _, ok := body["location"]; ok {
 				t.Errorf("location leaked into lifecycle provisioning: %v", body)
 			}
+			if _, ok := body["env"]; ok {
+				t.Errorf("unsupported environment sent during provisioning: %v", body)
+			}
 			w.WriteHeader(202)
 			fmt.Fprint(w, `{"id":"sb-1","status":{"state":"Running"}}`)
 		case r.Method == "POST" && r.URL.Path == "/v1/computers/c1/attach-credentials":
@@ -177,6 +182,7 @@ func TestAttachEndToEnd(t *testing.T) {
 	comp := newComputer("c1", []byte("0123456789abcdef0123456789abcdef"))
 	if err := comp.Attach(ctx, conn, AttachOptions{
 		CaptureKeypair: captureKP,
+		PodEnv:         map[string]string{},
 		Location:       &ComputerLocation{Country: "US"},
 	}); err != nil {
 		t.Fatalf("Attach: %v", err)
@@ -239,6 +245,22 @@ func TestAttachEndToEnd(t *testing.T) {
 	}
 	if observeAuth != ps {
 		t.Errorf("drive.Observe auth = %q, want ps_ (%q) — drive is session-scoped", observeAuth, ps)
+	}
+}
+
+func TestAttachRejectsPodEnvBeforeProvisioning(t *testing.T) {
+	for _, key := range []string{"CUSTOM", "PINE_RUNTIME_POLICY", "opensandbox_port"} {
+		t.Run(key, func(t *testing.T) {
+			comp := newComputer("c1", make([]byte, 32))
+			// A rejected option must not use the connection or mint bind credentials.
+			err := comp.Attach(context.Background(), nil, AttachOptions{
+				Ephemeral: true,
+				PodEnv:    map[string]string{key: "override"},
+			})
+			if err == nil || !strings.Contains(err.Error(), "PodEnv is unsupported") {
+				t.Fatalf("Attach error = %v, want local PodEnv rejection", err)
+			}
+		})
 	}
 }
 
@@ -541,19 +563,23 @@ func TestComputer_NotAttached(t *testing.T) {
 	}
 }
 
-// TestStop_CapturesThenTerminates verifies Stop takes a durable checkpoint BEFORE deleting
+// TestStop_SavesThenTerminates verifies Stop confirms a stopped-browser save BEFORE deleting
 // the pod (closes the epoch race that silently loses state).
-func TestStop_CapturesThenTerminates(t *testing.T) {
+func TestStop_SavesThenTerminates(t *testing.T) {
 	var captured, destroyed bool
 	controlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == "DELETE" && r.URL.Path == "/sandboxes/sb-1":
 			if !captured {
-				t.Error("pod deleted BEFORE the pre-terminate checkpoint")
+				t.Error("pod deleted BEFORE the save confirmation")
 			}
 			destroyed = true
 			w.WriteHeader(204)
 		case r.Method == "GET" && r.URL.Path == "/sandboxes/sb-1":
+			if !destroyed {
+				fmt.Fprint(w, `{"id":"sb-1","status":{"state":"Running"}}`)
+				return
+			}
 			w.Header().Set("Content-Type", "application/problem+json")
 			w.WriteHeader(404) // confirm-gone
 			fmt.Fprint(w, `{"type":"/errors/not-found","status":404}`)
@@ -563,12 +589,12 @@ func TestStop_CapturesThenTerminates(t *testing.T) {
 	}))
 	defer controlSrv.Close()
 	coordSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/v1/coord/capture" {
+		if r.URL.Path == "/v1/coord/finish" {
 			if r.Header.Get("X-Pine-Auth") != "ct_x" {
 				t.Errorf("capture auth = %q, want ct_x", r.Header.Get("X-Pine-Auth"))
 			}
 			captured = true
-			fmt.Fprint(w, `{"snapshot_id":"snap-1"}`)
+			fmt.Fprint(w, `{"saved":true}`)
 			return
 		}
 		w.WriteHeader(500)
@@ -592,12 +618,25 @@ func TestStop_CapturesThenTerminates(t *testing.T) {
 	}
 }
 
-func TestStop_UnconfirmedTerminationRetainsBinding(t *testing.T) {
+func TestStop_UnconfirmedDeletionCanRetryWithoutTheCoordinator(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var deleted, deletionStarted atomic.Bool
+	var saves atomic.Int32
 	controlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == "DELETE" && r.URL.Path == "/sandboxes/sb-1":
+		switch r.Method {
+		case "DELETE":
+			deletionStarted.Store(true)
 			w.WriteHeader(204)
-		case r.Method == "GET" && r.URL.Path == "/sandboxes/sb-1":
+		case "GET":
+			if deleted.Load() {
+				w.WriteHeader(404)
+				fmt.Fprint(w, `{"type":"/errors/not-found","status":404}`)
+				return
+			}
+			if deletionStarted.Load() {
+				cancel() // the first caller loses its deletion confirmation
+			}
 			fmt.Fprint(w, `{"id":"sb-1","status":{"state":"Running"}}`)
 		default:
 			w.WriteHeader(500)
@@ -605,27 +644,141 @@ func TestStop_UnconfirmedTerminationRetainsBinding(t *testing.T) {
 	}))
 	defer controlSrv.Close()
 	coordSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/v1/coord/capture" {
-			fmt.Fprint(w, `{"snapshot_id":"snap-1"}`)
-			return
-		}
-		w.WriteHeader(500)
+		saves.Add(1)
+		fmt.Fprint(w, `{"saved":true}`)
 	}))
 	defer coordSrv.Close()
-
-	conn := buildTestConnection(t, controlSrv.URL, coordSrv.URL)
 	comp := newComputer("c1", make([]byte, 32))
-	if err := comp.adopt(conn, "sb-1", "ct_x", "running"); err != nil {
+	if err := comp.adopt(buildTestConnection(t, controlSrv.URL, coordSrv.URL), "sb-1", "ct_x", "running"); err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
 	gone, err := comp.Stop(ctx)
-	if gone || err == nil {
-		t.Fatalf("Stop = gone %v, err %v; want unconfirmed error", gone, err)
+	if gone || err == nil || saves.Load() != 1 {
+		t.Fatalf("first stop = %v, %v; saves=%d", gone, err, saves.Load())
 	}
 	if comp.SandboxID() != "sb-1" || comp.ComputerToken() != "ct_x" {
-		t.Fatal("failed stop cleared the old binding")
+		t.Fatal("unconfirmed deletion cleared the old binding")
+	}
+	coordSrv.Close()
+	deleted.Store(true)
+	gone, err = comp.Stop(context.Background())
+	if !gone || err != nil || comp.SandboxID() != "" {
+		t.Fatalf("retry stop = %v, %v; binding=%q", gone, err, comp.SandboxID())
+	}
+}
+
+func TestStop_MissingSaveAcknowledgmentNeverDeletes(t *testing.T) {
+	for _, body := range []string{`{}`, `{"saved":false}`, `{"saved":"true"}`} {
+		t.Run(body, func(t *testing.T) {
+			controlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet {
+					t.Error("deletion requested after unconfirmed save")
+				}
+				w.WriteHeader(500)
+			}))
+			defer controlSrv.Close()
+			coordSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, body) }))
+			defer coordSrv.Close()
+			comp := newComputer("c1", make([]byte, 32))
+			if err := comp.adopt(buildTestConnection(t, controlSrv.URL, coordSrv.URL), "sb-1", "ct_x", "running"); err != nil {
+				t.Fatal(err)
+			}
+			gone, err := comp.Stop(context.Background())
+			var saveErr *StopSaveError
+			if gone || !errors.As(err, &saveErr) {
+				t.Fatalf("stop = %v, %v", gone, err)
+			}
+			if comp.SandboxID() != "sb-1" || comp.ComputerToken() != "ct_x" {
+				t.Fatal("source binding lost")
+			}
+		})
+	}
+}
+
+func TestAdoptExisting_StopPreservesPersistenceMode(t *testing.T) {
+	for _, ephemeral := range []bool{false, true} {
+		t.Run(fmt.Sprintf("ephemeral=%v", ephemeral), func(t *testing.T) {
+			var saves atomic.Int32
+			var deleted atomic.Bool
+			controlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodDelete {
+					deleted.Store(true)
+					w.WriteHeader(http.StatusNoContent)
+				} else if deleted.Load() {
+					w.WriteHeader(http.StatusNotFound)
+				} else {
+					fmt.Fprint(w, `{"id":"sb-1","status":{"state":"Running"}}`)
+				}
+			}))
+			defer controlSrv.Close()
+			coordSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				saves.Add(1)
+				fmt.Fprint(w, `{"saved":true}`)
+			}))
+			defer coordSrv.Close()
+			client := &Client{conn: buildTestConnection(t, controlSrv.URL, coordSrv.URL)}
+			creds, err := GenerateCredentials()
+			if err != nil {
+				t.Fatal(err)
+			}
+			var options []AdoptOptions
+			if ephemeral {
+				options = append(options, AdoptOptions{Ephemeral: true})
+			}
+			comp, err := client.AdoptExisting(context.Background(), creds.ID, creds.Key, "sb-1", "ct_x", options...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			gone, err := comp.Stop(context.Background())
+			if err != nil || !gone {
+				t.Fatalf("stop = %v, %v", gone, err)
+			}
+			wantSaves := int32(1)
+			if ephemeral {
+				wantSaves = 0
+			}
+			if saves.Load() != wantSaves {
+				t.Fatalf("saves=%d want=%d", saves.Load(), wantSaves)
+			}
+		})
+	}
+}
+
+func TestStop_RuntimeDisappearance(t *testing.T) {
+	for _, duringFinish := range []bool{false, true} {
+		t.Run(fmt.Sprintf("during_finish=%v", duringFinish), func(t *testing.T) {
+			var gone atomic.Bool
+			gone.Store(!duringFinish)
+			var saves atomic.Int32
+			controlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet {
+					t.Error("must not delete an absent runtime")
+				}
+				if gone.Load() {
+					w.WriteHeader(404)
+					return
+				}
+				fmt.Fprint(w, `{"id":"sb-1","status":{"state":"Running"}}`)
+			}))
+			defer controlSrv.Close()
+			coordSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				saves.Add(1)
+				gone.Store(true)
+				w.WriteHeader(503)
+			}))
+			defer coordSrv.Close()
+			comp := newComputer("c1", make([]byte, 32))
+			if err := comp.adopt(buildTestConnection(t, controlSrv.URL, coordSrv.URL), "sb-1", "ct_x", "running"); err != nil {
+				t.Fatal(err)
+			}
+			stopped, err := comp.Stop(context.Background())
+			if !stopped || err != nil || comp.SandboxID() != "" {
+				t.Fatalf("Stop = %v, %v, binding=%q", stopped, err, comp.SandboxID())
+			}
+			if !duringFinish && saves.Load() != 0 {
+				t.Fatal("contacted a dead coordinator")
+			}
+		})
 	}
 }
 
@@ -701,5 +854,142 @@ func TestAddPriorKey_RejectsCurrentVersion(t *testing.T) {
 	}
 	if err := c.AddPriorKey(0, make([]byte, 32)); err != nil {
 		t.Errorf("AddPriorKey(0): %v", err)
+	}
+}
+
+func TestClientDeleteComputer(t *testing.T) {
+	var calls atomic.Int32
+	portal := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete || r.URL.Path != "/v1/computers/c1" {
+			t.Errorf("request = %s %s", r.Method, r.URL.Path)
+		}
+		if calls.Add(1) == 3 {
+			w.Header().Set("Content-Type", "application/problem+json")
+			w.WriteHeader(http.StatusUnauthorized)
+			fmt.Fprint(w, `{"type":"INVALID_API_KEY","status":401}`)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer portal.Close()
+
+	client := &Client{conn: buildTestConnection(t, portal.URL, portal.URL)}
+	for i := 0; i < 2; i++ {
+		if err := client.DeleteComputer(context.Background(), "c1"); err != nil {
+			t.Fatalf("DeleteComputer #%d: %v", i+1, err)
+		}
+	}
+	err := client.DeleteComputer(context.Background(), "c1")
+	var ae *AttachCredentialsError
+	if !errors.As(err, &ae) || ae.Status != 401 {
+		t.Fatalf("err = %T (%v), want *AttachCredentialsError 401", err, err)
+	}
+	if strings.Contains(err.Error(), "pk_test") {
+		t.Errorf("error leaked the pk_: %v", err)
+	}
+}
+
+func TestComputerDelete_KillsLiveSandboxThenDeletes(t *testing.T) {
+	var mu sync.Mutex
+	var order []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		order = append(order, r.Method+" "+r.URL.Path)
+		mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+	coordSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("delete must not save through the coordinator: %s %s", r.Method, r.URL.Path)
+	}))
+	defer coordSrv.Close()
+
+	client := &Client{conn: buildTestConnection(t, srv.URL, coordSrv.URL)}
+	creds, err := GenerateCredentials()
+	if err != nil {
+		t.Fatal(err)
+	}
+	comp, err := client.AdoptExisting(context.Background(), creds.ID, creds.Key, "sb-1", "ct_x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := comp.Delete(context.Background()); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	want := []string{"DELETE /sandboxes/sb-1", "DELETE /v1/computers/" + creds.ID}
+	mu.Lock()
+	defer mu.Unlock()
+	if strings.Join(order, ",") != strings.Join(want, ",") {
+		t.Fatalf("order = %v, want %v", order, want)
+	}
+	if comp.SandboxID() != "" {
+		t.Errorf("binding retained after delete: %q", comp.SandboxID())
+	}
+}
+
+func TestComputerDelete_KillFailureDoesNotBlockDelete(t *testing.T) {
+	var portalDeletes atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/sandboxes/") {
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprint(w, `{"code":"BAD","message":"nope"}`)
+			return
+		}
+		portalDeletes.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+	client := &Client{conn: buildTestConnection(t, srv.URL, srv.URL)}
+	creds, err := GenerateCredentials()
+	if err != nil {
+		t.Fatal(err)
+	}
+	comp, err := client.AdoptExisting(context.Background(), creds.ID, creds.Key, "sb-1", "ct_x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := comp.Delete(context.Background()); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if portalDeletes.Load() != 1 {
+		t.Fatalf("portal deletes = %d, want 1", portalDeletes.Load())
+	}
+}
+
+func TestComputerDelete_PortalErrorKeepsTypedError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/v1/computers/") {
+			w.Header().Set("Content-Type", "application/problem+json")
+			w.WriteHeader(http.StatusForbidden)
+			fmt.Fprint(w, `{"type":"INSUFFICIENT_SCOPE","status":403}`)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+	client := &Client{conn: buildTestConnection(t, srv.URL, srv.URL)}
+	creds, err := GenerateCredentials()
+	if err != nil {
+		t.Fatal(err)
+	}
+	comp, err := client.AdoptExisting(context.Background(), creds.ID, creds.Key, "sb-1", "ct_x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = comp.Delete(context.Background())
+	var denied *ProjectAccessDenied
+	if !errors.As(err, &denied) || denied.Status != 403 {
+		t.Fatalf("err = %T (%v), want *ProjectAccessDenied", err, err)
+	}
+}
+
+func TestComputerDelete_RequiresConnection(t *testing.T) {
+	creds, err := GenerateCredentials()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := newComputer(creds.ID, creds.Key).Delete(context.Background()); err == nil ||
+		!strings.Contains(err.Error(), "Client.DeleteComputer") {
+		t.Fatalf("err = %v, want a pointer at Client.DeleteComputer", err)
 	}
 }

@@ -9,6 +9,7 @@ package controlplane
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"go.pinesandbox.io/computer/internal/base/problem"
@@ -21,6 +22,7 @@ import (
 // once via the shared ContextSuffix, matching the coordinator/token error shape.
 type cpBase struct {
 	Status    int
+	Code      string // the body's machine `code`, when present
 	Msg       string
 	Body      string // the raw response body, for support/debugging
 	Host      string
@@ -76,6 +78,21 @@ type ServerError struct{ cpBase }
 
 func (e *ServerError) Error() string { return cpErr(e.cpBase) }
 
+// ErrCapacityExceeded is the errors.Is target for a create refused because the project is at
+// its concurrent Computer limit (429 COMPUTER_CAPACITY_EXCEEDED). Nothing was provisioned; the
+// SDK does not retry — capacity frees only when another of the project's Computers stops.
+var ErrCapacityExceeded = errors.New("pinesandbox: project is at its concurrent Computer limit")
+
+// capacityExceededCode is the lifecycle server's machine code for ErrCapacityExceeded.
+const capacityExceededCode = "COMPUTER_CAPACITY_EXCEEDED"
+
+// CapacityExceededError: 429 COMPUTER_CAPACITY_EXCEEDED — errors.Is(err, ErrCapacityExceeded).
+type CapacityExceededError struct{ cpBase }
+
+func (e *CapacityExceededError) Error() string { return cpErr(e.cpBase) }
+
+func (e *CapacityExceededError) Is(target error) bool { return target == ErrCapacityExceeded }
+
 // statusError maps a non-OK control-plane response to a typed error, mirroring the Ruby
 // raise_for_status!. method/path/host/the X-Request-Id header stamp the resource spine (WHICH
 // operation on WHICH host, plus the precision handle) so a create/get/destroy/pause/resume
@@ -83,6 +100,7 @@ func (e *ServerError) Error() string { return cpErr(e.cpBase) }
 func statusError(method, path, host string, resp *transport.Response) error {
 	b := cpBase{
 		Status:    resp.Status,
+		Code:      statusCode(resp.Body),
 		Msg:       statusMessage(resp.Status, resp.Body),
 		Body:      string(resp.Body),
 		Host:      host,
@@ -103,11 +121,24 @@ func statusError(method, path, host string, resp *transport.Response) error {
 		return &ConflictError{b}
 	case status == 422:
 		return &UnprocessableEntityError{b}
+	case status == 429 && b.Code == capacityExceededCode:
+		return &CapacityExceededError{b}
 	case status >= 500 && status <= 599:
 		return &ServerError{b}
 	default:
 		return &ControlPlaneError{b}
 	}
+}
+
+// statusCode returns the {code,message} body's machine code, or "" when absent.
+func statusCode(body []byte) string {
+	var m struct {
+		Code string `json:"code"`
+	}
+	if json.Unmarshal(body, &m) != nil {
+		return ""
+	}
+	return m.Code
 }
 
 // statusMessage surfaces whichever message field is present: control-plane errors are

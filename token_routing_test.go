@@ -19,7 +19,7 @@ import (
 //     handoffs) + the skills-authoring lifecycle (learn/teach/refine/author/cancel + its
 //     event stream) + desktop-token mint → the Computer's ct_ (the operator surface)
 //   - session-scoped reads + drive + files/artifacts/tabs + control/notify → ps_
-//   - health/metrics → token-less
+//   - health → token-less
 //
 // The expected token for each route is the COORD's contract, not the SDK's: it
 // must match RouteClass in components/session-coordinator/pkg/server/route_classify.go
@@ -127,15 +127,21 @@ func TestFacade_TokenRouting_Comprehensive(t *testing.T) {
 	_, _ = comp.GetSkillVersion(ctx, "sk1", "1")
 	_, _ = comp.ActivateSkill(ctx, "sk1", "1")
 	_, _ = comp.DeactivateSkill(ctx, "sk1")
+	_, _ = comp.SetSkillEnabled(ctx, "sk1", false)
+	_, _ = comp.Capabilities(ctx)
 	_, _ = comp.DeleteSkillVersion(ctx, "sk1", "1")
 	_, _ = comp.LatestSnapshot(ctx)
 	_, _ = comp.Capture(ctx)
 	_, _ = comp.ListOrphanDownloads(ctx)
 	_, _ = comp.ClaimOrphanDownload(ctx, "g1", "s1", "")
 	_ = comp.DiscardOrphanDownload(ctx, "g1")
+	_, _ = comp.ListPasskeys(ctx)
+	_ = comp.DeletePasskey(ctx, "cred")
+	_, _ = comp.PendingPasskeyCeremonies(ctx)
+	_ = comp.ApprovePasskeyCeremony(ctx, "pwc_abc")
+	_ = sess.DeclarePasskeyIntent(ctx, "example.com")
 	// token-less
 	_, _ = comp.Health(ctx)
-	_, _ = comp.Metrics(ctx)
 
 	expect := map[string]string{
 		// ps_ (session-scoped)
@@ -180,27 +186,33 @@ func TestFacade_TokenRouting_Comprehensive(t *testing.T) {
 		"POST /v1/sessions/s1/agent/reset":   ct,
 		"POST /v1/sessions/s1/desktop-token": ct,
 		// ct_ (Computer-level)
-		"POST /sessions":                   ct,
-		"GET /sessions/s1":                 ct,
-		"GET /sessions":                    ct,
-		"DELETE /sessions/s2":              ct,
-		"GET /v1/skills":                   ct,
-		"GET /v1/skills/sk1":               ct,
-		"GET /v1/skills/drafts":            ct,
-		"GET /v1/skills/versions":          ct,
-		"GET /v1/skills/sk1/versions":      ct,
-		"GET /v1/skills/sk1/versions/1":    ct,
-		"POST /v1/skills/sk1/activate":     ct,
-		"POST /v1/skills/sk1/deactivate":   ct,
-		"DELETE /v1/skills/sk1/versions/1": ct,
-		"GET /state":                       ct,
-		"POST /v1/coord/capture":           ct,
-		"GET /downloads/orphans":           ct,
-		"POST /downloads/orphans/g1/claim": ct,
-		"DELETE /downloads/orphans/g1":     ct,
+		"POST /sessions":                        ct,
+		"GET /sessions/s1":                      ct,
+		"GET /sessions":                         ct,
+		"DELETE /sessions/s2":                   ct,
+		"GET /v1/skills":                        ct,
+		"GET /v1/skills/sk1":                    ct,
+		"GET /v1/skills/drafts":                 ct,
+		"GET /v1/skills/versions":               ct,
+		"GET /v1/skills/sk1/versions":           ct,
+		"GET /v1/skills/sk1/versions/1":         ct,
+		"POST /v1/skills/sk1/activate":          ct,
+		"POST /v1/skills/sk1/deactivate":        ct,
+		"PUT /v1/skills/sk1/enabled":            ct,
+		"GET /v1/capabilities":                  ct,
+		"DELETE /v1/skills/sk1/versions/1":      ct,
+		"GET /state":                            ct,
+		"POST /v1/coord/capture":                ct,
+		"GET /downloads/orphans":                ct,
+		"POST /downloads/orphans/g1/claim":      ct,
+		"DELETE /downloads/orphans/g1":          ct,
+		"GET /v1/passkeys":                      ct,
+		"DELETE /v1/passkeys/cred":              ct,
+		"GET /v1/passkeys/ceremonies":           ct,
+		"POST /v1/passkeys/ceremonies/pwc_abc":  ct,
+		"POST /v1/sessions/s1/passkeys/intents": ps,
 		// token-less
-		"GET /health":  "",
-		"GET /metrics": "",
+		"GET /health": "",
 	}
 
 	mu.Lock()

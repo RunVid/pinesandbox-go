@@ -5,6 +5,75 @@ package `pinesandbox`) are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/). The current beta compatibility
 line is `v0.3.x`; review release notes before adopting a new minor version.
 
+## [0.3.14] — 2026-09-30
+
+### Fixed
+
+- Graceful stop waits for the complete browser-state save before sandbox deletion. Save failures retain the source binding and raise `StopSaveError`. An already-absent runtime is stopped without a save acknowledgment; start/attach restores the latest committed state.
+- The stop deletion budget now includes DELETE, confirmation requests, retries and polling sleeps. Expiry retains the source handle with deletion unconfirmed; caller cancellation remains an error.
+- `AdoptExisting` accepts `AdoptOptions{Ephemeral: true}` to preserve save-skipping stop behavior when reconstructing an ephemeral binding.
+- Retry classification recognizes runtime initialization and approved-skill
+  publication outages when an older response omits the wire retry hint.
+- Expiry of the SDK-owned readiness budget now surfaces as `*ReadyTimeoutError`
+  (`errors.As`) rather than `context.DeadlineExceeded` or a transport timeout;
+  caller cancellation still surfaces as `context.Canceled`.
+- Create/attach now uses `AttachOptions.ReadyTimeout` (default 300s) for
+  allocation and pod readiness. `Timeout` only sets sandbox lifetime; bind
+  keeps its separate budget. Set `ReadyTimeout` explicitly when capacity
+  needs longer. Failed attach cleanup now uses an independent bounded context
+  so an expired deadline or caller cancellation cannot suppress allocation
+  deletion.
+
+### Changed
+- `GetSkill` returns skills authored on the Computer and the `computer-agent` role guide. Pine's other skills stay listed with their name and description, and requesting their content now fails with 403.
+- Computer attach rejects nonempty `AttachOptions.PodEnv` locally before
+  provisioning. Leave the deprecated field nil or empty; environment overrides
+  cannot configure an already-started Computer runtime.
+- Session browser metadata no longer exposes a raw Chrome DevTools WebSocket
+  URL. Browser automation remains available through Pine's session-scoped
+  Computer commands; CDP is an image-owned runtime transport.
+
+### Removed
+- The deprecated `Computer.Metrics` helper. Coordinator metrics are an
+  image-owned observability surface, not a Computer SDK endpoint.
+
+### Added
+
+- `Client.DeleteComputer(ctx, id)` and `Computer.Delete(ctx)` permanently
+  delete a Computer via Portal `DELETE /v1/computers/{id}`. `Computer.Delete`
+  kills a live sandbox first. Idempotent and non-disclosing: unknown,
+  already-deleted, and other projects' ids return nil. A malformed id returns
+  the new `*ComputerDeletionError`; 403 returns `*ProjectAccessDenied`; 401,
+  429 and 5xx return `*AttachCredentialsError`. Saved state is purged after
+  24 hours and the id is never accepted again.
+- `Computer.SetSkillEnabled` switches one of Pine's standard or feature skills
+  (for example `pdf`) on or off for the agent processes the Computer starts
+  next; the switch is saved with the Computer's state (not on an ephemeral
+  binding). A running agent keeps its catalog until its session's agent is
+  reset. `ListSkills` entries now carry `origin`, `class`, `enabled`, and
+  `disabled_reason`.
+- `Computer.Capabilities` returns the capability manifest: each product
+  feature with its state for the Computer's binding (`enabled`,
+  `not_entitled`, `not_configured`) and the limits the Computer enforces.
+- `ErrCapacityExceeded` (`errors.Is`) and `*CapacityExceededError` (`errors.As`)
+  report a create/attach refused because the project is at its concurrent
+  Computer limit (HTTP 429, `COMPUTER_CAPACITY_EXCEEDED`). Nothing was
+  provisioned and the SDK does not retry. Control-plane errors now also carry
+  the server's machine `Code`.
+- `ComputerLocation{Mode: "direct"}` selects browser internet access without
+  a regional upstream proxy. Country and Direct are mutually exclusive.
+- Computer-scoped custodial passkey management: typed list/delete operations,
+  pending enrollment approval/decline, and session-scoped enrollment intent,
+  matching the Ruby SDK and coordinator OpenAPI contract. Agent sessions can
+  now list and decide only their own attributed ceremonies while keeping the
+  website tab active. Pending ceremonies expose `PresentedAt` after the
+  built-in Chrome action popup has rendered, without treating presentation as
+  consent.
+- `AnswerOptions.Secrets`, `AnswerWithOptions`, and `AnswerAskWithOptions`
+  deliver a requested password or one-time code through the protected session
+  file while answer text references only `$NAME`. The existing `Answer` and
+  `AnswerAsk` signatures remain source-compatible.
+
 ## [0.3.13] — 2026-08-07
 
 ### Fixed

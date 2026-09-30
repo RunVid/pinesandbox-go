@@ -24,7 +24,9 @@ func (c *Computer) ListSkills(ctx context.Context) (json.RawMessage, error) {
 	return coord.ListSkills(ctx, ct)
 }
 
-// GetSkill returns one skill's metadata + SKILL.md body (raw).
+// GetSkill returns one skill's metadata + SKILL.md body (raw): a skill authored
+// on the Computer, or the computer-agent role guide. Pine's other skills are
+// listed by name and description; their content is not served.
 func (c *Computer) GetSkill(ctx context.Context, name string) (json.RawMessage, error) {
 	coord, ct, err := c.bound()
 	if err != nil {
@@ -79,6 +81,30 @@ func (c *Computer) DeactivateSkill(ctx context.Context, name string) (json.RawMe
 		return nil, err
 	}
 	return coord.DeactivateSkill(ctx, ct, name)
+}
+
+// SetSkillEnabled switches one of Pine's standard or feature skills on or off
+// for the agent processes this Computer starts next (raw result: the skill as
+// the next agent is offered it, and whether the switch changed). Core,
+// engine, and external skills cannot be switched; learned skills use
+// ActivateSkill and DeactivateSkill. A running agent keeps its catalog until
+// its session's agent is reset.
+func (c *Computer) SetSkillEnabled(ctx context.Context, name string, enabled bool) (json.RawMessage, error) {
+	coord, ct, err := c.bound()
+	if err != nil {
+		return nil, err
+	}
+	return coord.SetSkillEnabled(ctx, ct, name, enabled)
+}
+
+// Capabilities returns what this Computer can do for its binding — each
+// product feature with its state — and the limits it enforces (raw).
+func (c *Computer) Capabilities(ctx context.Context) (json.RawMessage, error) {
+	coord, ct, err := c.bound()
+	if err != nil {
+		return nil, err
+	}
+	return coord.Capabilities(ctx, ct)
 }
 
 // DeleteSkillVersion hides a version, un-serving it if active (raw).

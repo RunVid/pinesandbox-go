@@ -138,3 +138,15 @@ func TestControlSentinels_SlugsInTaxonomy(t *testing.T) {
 		}
 	}
 }
+
+// TestErrCapacityExceeded_PublicSurface: the facade sentinel and error type are the
+// control-plane ones, so callers branch with errors.Is and reach detail with errors.As.
+func TestErrCapacityExceeded_PublicSurface(t *testing.T) {
+	var err error = &CapacityExceededError{}
+	if !errors.Is(err, ErrCapacityExceeded) {
+		t.Error("errors.Is(CapacityExceededError, ErrCapacityExceeded) = false, want true")
+	}
+	if errors.Is(&ControlPlaneError{}, ErrCapacityExceeded) {
+		t.Error("a generic ControlPlaneError must NOT match ErrCapacityExceeded")
+	}
+}

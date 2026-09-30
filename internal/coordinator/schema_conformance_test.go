@@ -76,6 +76,8 @@ func TestSchemaConformance(t *testing.T) {
 		{bindPubkeyWire{}, "BindPubkey"},
 		{fileEntryWire{}, "FileEntry"},
 		{artifactWire{}, "Artifact"},
+		{PasskeyCredential{}, "PasskeyCredential"},
+		{PasskeyCeremony{}, "PasskeyCeremony"},
 	}
 	for _, c := range cases {
 		typ := reflect.TypeOf(c.v)

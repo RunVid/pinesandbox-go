@@ -69,12 +69,30 @@ func (c *Client) AgentSteer(ctx context.Context, token, name, text string, opts 
 	return c.postAgentTask(ctx, c.agentPath(name, "/steer"), token, body)
 }
 
-// AgentAnswer responds to an agent's clarifying question. expectedTurnID is optional ("").
-// Returns the updated Task.
+// AgentAnswerOptions optionally guards against answering a stale turn and/or
+// delivers secrets through the protected session file before resolving the ask.
+type AgentAnswerOptions struct {
+	ExpectedTurnID string // omitted when empty
+	Secrets        map[string]string
+}
+
+// AgentAnswer preserves the original convenience signature. Use
+// AgentAnswerWithOptions when the answer needs protected secret delivery.
 func (c *Client) AgentAnswer(ctx context.Context, token, name, requestID, answer, expectedTurnID string) (*AgentTask, error) {
+	return c.AgentAnswerWithOptions(ctx, token, name, requestID, answer, AgentAnswerOptions{
+		ExpectedTurnID: expectedTurnID,
+	})
+}
+
+// AgentAnswerWithOptions responds to an agent's clarifying question and
+// returns the updated Task.
+func (c *Client) AgentAnswerWithOptions(ctx context.Context, token, name, requestID, answer string, opts AgentAnswerOptions) (*AgentTask, error) {
 	body := map[string]any{"request_id": requestID, "answer": answer}
-	if expectedTurnID != "" {
-		body["expected_turn_id"] = expectedTurnID
+	if opts.ExpectedTurnID != "" {
+		body["expected_turn_id"] = opts.ExpectedTurnID
+	}
+	if len(opts.Secrets) > 0 {
+		body["secrets"] = opts.Secrets
 	}
 	return c.postAgentTask(ctx, c.agentPath(name, "/answer"), token, body)
 }

@@ -154,6 +154,7 @@ type (
 	LocationDiscoveryError       = tokens.LocationDiscoveryError
 	BindingRevisionConflictError = tokens.BindingRevisionConflictError
 	ComputerRegistrationError    = tokens.ComputerRegistrationError
+	ComputerDeletionError        = tokens.ComputerDeletionError
 	UnknownComputerError         = tokens.UnknownComputerError
 )
 
@@ -167,7 +168,14 @@ type (
 	UnprocessableEntityError = controlplane.UnprocessableEntityError
 	ServerError              = controlplane.ServerError
 	ControlPlaneError        = controlplane.ControlPlaneError
+	// CapacityExceededError is the create refusal behind ErrCapacityExceeded.
+	CapacityExceededError = controlplane.CapacityExceededError
 )
+
+// ErrCapacityExceeded (429 COMPUTER_CAPACITY_EXCEEDED): create/attach was refused because the
+// project is at its concurrent Computer limit, so nothing was provisioned. Not retried by the
+// SDK; stop another of the project's Computers first. errors.As reaches CapacityExceededError.
+var ErrCapacityExceeded = controlplane.ErrCapacityExceeded
 
 // SandboxFailedError: the pod entered a terminal state (failed/terminated) before it
 // became Ready during attach.

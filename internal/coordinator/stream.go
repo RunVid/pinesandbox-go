@@ -98,13 +98,17 @@ func (e *AgentEvent) ControlChange() (*AgentControlChange, bool) {
 // AgentAsk is the typed payload of a needs_input event — the agent paused on
 // pine_ask and is waiting for an answer. It carries BOTH ids the answer needs
 // (RequestID + TurnID), so AgentMode.AnswerAsk(ctx, ask, text) needs no extra
-// plumbing. Question is the human-facing prompt; Context/Options are optional hints.
+// plumbing. Question is the complete human-facing prompt. Context and Options
+// remain only for decoding needs_input events from older coordinators.
 type AgentAsk struct {
-	RequestID string   // the pending-request id
-	TurnID    string   // the turn this ask belongs to (expected_turn_id on answer)
-	Question  string   // the question to surface to the human
-	Context   string   // optional extra context for the question
-	Options   []string // optional suggested answers (may be empty)
+	RequestID string // the pending-request id
+	TurnID    string // the turn this ask belongs to (expected_turn_id on answer)
+	Question  string // the complete question to surface to the human
+
+	// Deprecated: retained for events from older coordinators; new asks leave it empty.
+	Context string
+	// Deprecated: retained for events from older coordinators; new asks leave it empty.
+	Options []string
 }
 
 // Ask returns the typed ask payload when this event is a needs_input pause

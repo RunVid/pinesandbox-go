@@ -29,6 +29,7 @@ type AgentMode struct {
 type (
 	RunOptions      = coordinator.AgentRunOptions
 	SteerOptions    = coordinator.AgentSteerOptions
+	AnswerOptions   = coordinator.AgentAnswerOptions
 	AgentTask       = coordinator.AgentTask
 	AgentResult     = coordinator.AgentResult
 	AgentUsage      = coordinator.AgentUsage
@@ -61,7 +62,14 @@ func (a *AgentMode) Steer(ctx context.Context, text string, opts SteerOptions) (
 // expectedTurnID guards against answering a stale turn (""=skip the guard). Prefer
 // AnswerAsk, which fills both ids from the ask.
 func (a *AgentMode) Answer(ctx context.Context, requestID, answer, expectedTurnID string) (*AgentTask, error) {
-	return a.s.coord.AgentAnswer(ctx, a.s.computerToken(), a.s.name, requestID, answer, expectedTurnID)
+	return a.AnswerWithOptions(ctx, requestID, answer, AnswerOptions{ExpectedTurnID: expectedTurnID})
+}
+
+// AnswerWithOptions responds to the ask and can deliver protected session
+// secrets. Put only $NAME references in answer; Secrets carries the literals
+// outside model-visible text.
+func (a *AgentMode) AnswerWithOptions(ctx context.Context, requestID, answer string, opts AnswerOptions) (*AgentTask, error) {
+	return a.s.coord.AgentAnswerWithOptions(ctx, a.s.computerToken(), a.s.name, requestID, answer, opts)
 }
 
 // AnswerAsk responds to a needs_input ask (from AgentEvent.Ask); the ask carries
@@ -69,7 +77,14 @@ func (a *AgentMode) Answer(ctx context.Context, requestID, answer, expectedTurnI
 //
 //	if ask, ok := ev.Ask(); ok { ag.AnswerAsk(ctx, ask, reply(ask.Question)) }
 func (a *AgentMode) AnswerAsk(ctx context.Context, ask *AgentAsk, answer string) (*AgentTask, error) {
-	return a.Answer(ctx, ask.RequestID, answer, ask.TurnID)
+	return a.AnswerAskWithOptions(ctx, ask, answer, AnswerOptions{})
+}
+
+// AnswerAskWithOptions is the no-plumbing ask path with optional protected
+// secret delivery. The ask's turn id always supplies the staleness guard.
+func (a *AgentMode) AnswerAskWithOptions(ctx context.Context, ask *AgentAsk, answer string, opts AnswerOptions) (*AgentTask, error) {
+	opts.ExpectedTurnID = ask.TurnID
+	return a.AnswerWithOptions(ctx, ask.RequestID, answer, opts)
 }
 
 // Cancel cancels the running turn; returns the updated Task.

@@ -3,6 +3,7 @@ package pinesandbox
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -16,14 +17,20 @@ import (
 // CurrentKeyVersion is the version stamped on the current state key (rotation only).
 const CurrentKeyVersion = binder.CurrentKeyVersion
 
-const defaultAttachTimeout = 300 * time.Second
+const (
+	defaultSandboxLifetime = 300 * time.Second
+	defaultReadyTimeout    = 300 * time.Second
+	attachCleanupTimeout   = 30 * time.Second
+)
 
-// ComputerLocation is the geographic intent for one Computer binding.
+// ComputerLocation is the browser egress policy for one Computer binding.
 // Country is canonical ISO 3166-1 alpha-2 uppercase (for example "US").
+// Mode may be "direct" instead of Country to bypass regional upstream proxies.
 // Portal owns the supported-country catalog; the SDK only validates the fixed
 // standard and forwards it during attach authorization.
 type ComputerLocation struct {
-	Country string `json:"country"`
+	Country string `json:"country,omitempty"`
+	Mode    string `json:"mode,omitempty"`
 }
 
 // AttachOptions configures CreateComputer / AttachComputer / Computer.Attach.
@@ -36,7 +43,10 @@ type AttachOptions struct {
 	CaptureKeypair       *CaptureKeypair
 	PriorCaptureKeypairs []*CaptureKeypair
 
-	Timeout  time.Duration // sandbox TTL + readiness wait, default 300s
+	Timeout      time.Duration // sandbox lifetime, default 300s
+	ReadyTimeout time.Duration // allocation + pod readiness budget, default 300s
+	// Deprecated: Computer attach does not support environment overrides.
+	// Nonempty maps are rejected before provisioning; leave nil or empty.
 	PodEnv   map[string]string
 	Metadata map[string]string
 	// Location is optional. Portal applies its server-owned default for a new
@@ -76,11 +86,12 @@ type Computer struct {
 	// coordinator bind fails and the Computer itself cannot be returned.
 	lastAuthorizedSandboxID string
 
-	mu            sync.Mutex
-	conn          *Connection
-	sandbox       *SandboxHandle
-	coord         *coordinator.Client
-	computerToken string // ct_
+	mu              sync.Mutex
+	conn            *Connection
+	sandbox         *SandboxHandle
+	finishedSandbox *SandboxHandle // successful save retained across deletion retries
+	coord           *coordinator.Client
+	computerToken   string // ct_
 	// ephemeral records that this Computer was bound access-lease-only; Stop
 	// reads it to skip the pre-terminate checkpoint.
 	ephemeral bool
@@ -115,9 +126,12 @@ func validateLocation(location *ComputerLocation) error {
 	if location == nil {
 		return nil
 	}
+	if location.Mode == "direct" && location.Country == "" {
+		return nil
+	}
 	country := location.Country
-	if len(country) != 2 || country[0] < 'A' || country[0] > 'Z' || country[1] < 'A' || country[1] > 'Z' {
-		return fmt.Errorf("pinesandbox: Location.Country must be canonical ISO 3166-1 alpha-2 uppercase (for example US)")
+	if location.Mode != "" || len(country) != 2 || country[0] < 'A' || country[0] > 'Z' || country[1] < 'A' || country[1] > 'Z' {
+		return fmt.Errorf("pinesandbox: Location.Country must be canonical ISO 3166-1 alpha-2 uppercase, or set Location.Mode to direct without a country")
 	}
 	return nil
 }
@@ -352,6 +366,12 @@ func (c *Computer) Attach(ctx context.Context, conn *Connection, opts AttachOpti
 	if opts.BindingRevision < 0 {
 		return fmt.Errorf("pinesandbox: BindingRevision must be non-negative")
 	}
+	if len(opts.PodEnv) != 0 {
+		return fmt.Errorf("pinesandbox: PodEnv is unsupported for Computer attach; leave it nil or empty")
+	}
+	if opts.ReadyTimeout < 0 {
+		return fmt.Errorf("pinesandbox: ReadyTimeout must be non-negative")
+	}
 	if err := validateLocation(opts.Location); err != nil {
 		return err
 	}
@@ -374,30 +394,41 @@ func (c *Computer) Attach(ctx context.Context, conn *Connection, opts AttachOpti
 	c.mu.Unlock()
 	timeout := opts.Timeout
 	if timeout <= 0 {
-		timeout = defaultAttachTimeout
+		timeout = defaultSandboxLifetime
 	}
-	// Bound the WHOLE attach — the cold provision POST /computer-sandboxes AND the readiness poll —
-	// by the readiness budget, so a cold provision isn't clipped to the transport's 30s
-	// fallback. The caller's own deadline, if shorter, still wins (WithTimeout takes the min).
-	ctx, cancel := context.WithTimeout(ctx, timeout)
+	readyTimeout := opts.ReadyTimeout
+	if readyTimeout == 0 {
+		readyTimeout = defaultReadyTimeout
+	}
+	// Allocation and readiness share a budget independent of sandbox lifetime.
+	// Bind keeps its own budget; the caller's deadline still bounds both phases.
+	readyCtx, cancel := context.WithTimeout(ctx, readyTimeout)
 	defer cancel()
 
 	// Computer create is deliberately single-shot. The lifecycle server does not
 	// currently promise create idempotency, so retrying an ambiguous transport
 	// failure could allocate a second pod.
-	info, err := conn.controlPlane.CreateComputer(ctx, buildComputerCreateBody(timeout, opts))
+	info, err := conn.controlPlane.CreateComputer(readyCtx, buildComputerCreateBody(timeout, opts))
 	if err != nil {
 		return err
 	}
 	sandbox := newSandboxHandle(conn.controlPlane, info.ID, info.Status)
-	if err := sandbox.WaitUntilRunning(ctx, timeout, 0); err != nil {
-		_ = sandbox.Kill(ctx) // best-effort cleanup of a pod that never came up
-		return err
+	attached := false
+	defer func() {
+		if !attached {
+			// The failed operation's deadline/cancellation must not prevent DELETE.
+			cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), attachCleanupTimeout)
+			defer cleanupCancel()
+			_ = sandbox.Kill(cleanupCtx)
+		}
+	}()
+	if err := sandbox.WaitUntilRunning(readyCtx, readyTimeout, 0); err != nil {
+		return readinessBudgetError(ctx, readyCtx, err, sandbox)
 	}
+	cancel()
 
 	coord, err := conn.newCoord(info.ID)
 	if err != nil {
-		_ = sandbox.Kill(ctx)
 		return err
 	}
 	captureKPs, captureGen := c.captureKeypairsCopy()
@@ -423,12 +454,11 @@ func (c *Computer) Attach(ctx context.Context, conn *Connection, opts AttachOpti
 		},
 		OnLocation: func(location tokens.ComputerLocation) {
 			c.mu.Lock()
-			c.location = &ComputerLocation{Country: location.Country}
+			c.location = &ComputerLocation{Country: location.Country, Mode: location.Mode}
 			c.mu.Unlock()
 		},
 	})
 	if err != nil {
-		_ = sandbox.Kill(ctx) // single-use pod — recovery is a fresh attach
 		return err
 	}
 
@@ -437,14 +467,31 @@ func (c *Computer) Attach(ctx context.Context, conn *Connection, opts AttachOpti
 	c.ephemeral = opts.Ephemeral
 	c.persistenceMode = res.PersistenceMode
 	c.mu.Unlock()
+	attached = true
 	return nil
+}
+
+// readinessBudgetError reports expiry of the SDK-owned readiness budget as the
+// documented *ReadyTimeoutError. The readiness context and the poll loop's own
+// deadline expire together, and the sleep between polls observes the context
+// first, so without this translation callers would see context.DeadlineExceeded
+// or a transport timeout instead. Caller cancellation stays distinguishable.
+func readinessBudgetError(callerCtx, readyCtx context.Context, err error, sandbox *SandboxHandle) error {
+	var rt *ReadyTimeoutError
+	if errors.As(err, &rt) {
+		return err
+	}
+	if callerCtx.Err() == nil && errors.Is(readyCtx.Err(), context.DeadlineExceeded) {
+		return &ReadyTimeoutError{SandboxID: sandbox.id, LastState: sandbox.status}
+	}
+	return err
 }
 
 func tokenLocation(location *ComputerLocation) *tokens.ComputerLocation {
 	if location == nil {
 		return nil
 	}
-	return &tokens.ComputerLocation{Country: location.Country}
+	return &tokens.ComputerLocation{Country: location.Country, Mode: location.Mode}
 }
 
 // adopt wires an already-bound, still-live pod (no provision, no bind).
@@ -462,22 +509,41 @@ func (c *Computer) adopt(conn *Connection, sandboxID, computerToken, status stri
 	return nil
 }
 
-// Stop gracefully terminates the pod (persisting state on the way out) and drops the local
-// binding. Returns true once the Sandbox record is confirmed gone.
+// Stop saves supported browser state before deleting the sandbox. A save error
+// retains the source binding. true confirms the sandbox record is gone.
+// An already-absent runtime is stopped, with its final save outcome unknown.
 func (c *Computer) Stop(ctx context.Context) (bool, error) {
 	c.mu.Lock()
 	sandbox, coord, ct, ephemeral := c.sandbox, c.coord, c.computerToken, c.ephemeral
+	finished := c.finishedSandbox == sandbox
 	c.mu.Unlock()
 	if sandbox == nil {
 		return true, nil
 	}
-	// Best-effort durable checkpoint BEFORE terminate, under the current epoch — closes the
-	// race where a fast re-attach's higher epoch fences out the old pod's SIGTERM final
-	// capture (silent state loss). The SIGTERM capture stays the net if this fails (Ruby parity).
-	// An ephemeral (access-lease-only) Computer has no persistence, so there is nothing to
-	// checkpoint.
-	if !ephemeral && coord != nil && ct != "" {
-		_, _ = coord.Capture(ctx, ct)
+	if sandbox.gone(ctx) {
+		c.reset()
+		return true, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if !ephemeral && !finished {
+		if coord == nil || ct == "" {
+			return false, &StopSaveError{Err: fmt.Errorf("coordinator binding unavailable")}
+		}
+		if err := coord.Finish(ctx, ct); err != nil {
+			// TTL expiry may race finish. Absence confirms stopped, not saved.
+			if sandbox.gone(ctx) {
+				c.reset()
+				return true, nil
+			}
+			return false, &StopSaveError{Err: err}
+		}
+		c.mu.Lock()
+		if c.sandbox == sandbox {
+			c.finishedSandbox = sandbox
+		}
+		c.mu.Unlock()
 	}
 	gone, err := sandbox.Terminate(ctx, defaultTerminateWait, defaultPollInterval)
 	if gone {
@@ -501,6 +567,26 @@ func (c *Computer) Kill(ctx context.Context) bool {
 	return ok
 }
 
+// Delete PERMANENTLY deletes this Computer (see Client.DeleteComputer): a live sandbox is
+// force-killed first — no final capture, the state is being deleted — then the id is
+// deleted through the Client connection that attached it. A failed kill does not block
+// the delete; Portal destroys any sandbox still bound to a deleted Computer. On success
+// the local binding is dropped.
+func (c *Computer) Delete(ctx context.Context) error {
+	c.mu.Lock()
+	conn := c.conn
+	c.mu.Unlock()
+	if conn == nil || conn.attachProvider == nil {
+		return fmt.Errorf("pinesandbox: Computer %s has no Client connection; use Client.DeleteComputer", c.id)
+	}
+	c.Kill(ctx)
+	if err := conn.attachProvider.DeleteComputer(ctx, c.id); err != nil {
+		return err
+	}
+	c.reset()
+	return nil
+}
+
 // Alive reports whether the bound pod is still live.
 func (c *Computer) Alive(ctx context.Context) bool {
 	c.mu.Lock()
@@ -512,7 +598,7 @@ func (c *Computer) Alive(ctx context.Context) bool {
 func (c *Computer) reset() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.sandbox, c.coord, c.computerToken = nil, nil, ""
+	c.sandbox, c.finishedSandbox, c.coord, c.computerToken = nil, nil, nil, ""
 }
 
 func (c *Computer) priorKeysCopy() map[int][]byte {
@@ -532,9 +618,6 @@ func buildComputerCreateBody(timeout time.Duration, opts AttachOptions) map[stri
 	body := map[string]any{
 		"timeout": int(timeout.Seconds()),
 	}
-	if opts.PodEnv != nil {
-		body["env"] = opts.PodEnv
-	}
 	if opts.Metadata != nil {
 		body["metadata"] = opts.Metadata
 	}
@@ -545,3 +628,12 @@ func ttlSecondsPtr(d time.Duration) *int {
 	s := int(d.Seconds())
 	return &s
 }
+
+// StopSaveError means stop did not confirm persistence and retained its binding.
+// Unwrap exposes the underlying API problem, including its retry classification.
+type StopSaveError struct{ Err error }
+
+func (e *StopSaveError) Error() string {
+	return "Computer stop could not confirm saved state: " + e.Err.Error()
+}
+func (e *StopSaveError) Unwrap() error { return e.Err }

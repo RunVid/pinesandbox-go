@@ -42,11 +42,17 @@ func TestMultiFieldResponses_ConsciouslyHandled(t *testing.T) {
 		"activateSkill":      "raw: skill-admin json.RawMessage (full body)",
 		"deactivateSkill":    "raw: skill-admin json.RawMessage (full body)",
 		"deleteSkillVersion": "raw: skill-admin json.RawMessage (full body)",
+		"setSkillEnabled":    "raw: skill-switch json.RawMessage (full body)",
+		"getCapabilities":    "raw: capability manifest json.RawMessage (full body)",
 		"captureCheckpoint":  "raw: Capture json.RawMessage (full body)",
 		"uploadFile":         "raw: UploadFile json.RawMessage (full body)",
 		"sessionEpoch":       "raw: Epoch json.RawMessage (full body)",
 
 		// not exposed — the endpoint is deliberately absent from this SDK
+		"getHealth": "not exposed (deliberate): pod-local Computer health for probes and " +
+			"operator diagnostics; the Computer gateway excludes health routes.",
+		"getReadiness": "not exposed (deliberate): kubelet allocation/control readiness; " +
+			"successful Computer attach remains the SDK readiness gate.",
 		"listAgentModelPresets": "not exposed (deliberate): internal testing surface — the " +
 			"validated resident model-preset catalog for the portal playground; spec-marked " +
 			"not part of the stable Computer contract. Add a typed catalog + " +
@@ -57,14 +63,14 @@ func TestMultiFieldResponses_ConsciouslyHandled(t *testing.T) {
 			"No Go integrator needs it.",
 		"setAgentBrowserFlags": "not exposed (deliberate): internal staff-only playground " +
 			"testing surface — the pre-first-run browser-flags config; see getAgentBrowserFlags.",
-		"getFileViewMetadata": "not exposed (deliberate): capability-bound loopback surface " +
-			"for the image-owned browser extension, not a public Computer SDK operation",
-		"createSessionExternalToolGrant": "not exposed (deliberate): session capability-bound " +
-			"grant for an in-Computer external tool, not a public Computer SDK operation",
 		"getAgentEventsPage": "not exposed yet (deliberate): the paged task-history read " +
 			"(task-history contract) — first consumer is the portal transcript. " +
 			"When a Go integrator needs history paging, model {events, latest_event_id} as a " +
 			"typed page DTO; do NOT flatten (latest_event_id is the catch-up cursor).",
+		"getDiagnostic": "not exposed (deliberate): the coordinator-owned Computer " +
+			"diagnostic report read — Pine-internal troubleshooting (portal watcher / support " +
+			"tooling), authenticated by a coord-minted report token, spec-marked x-internal " +
+			"and permanently outside the Computer SDK surface.",
 
 		// flattened — a subset is returned on purpose (low-value metadata dropped)
 		"listSkills": "flattened: returns the skills array; generated_at is manifest " +

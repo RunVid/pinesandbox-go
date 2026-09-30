@@ -123,7 +123,7 @@ func TestCreateSession_BodyAndAuth(t *testing.T) {
 		}
 		auth = r.Header.Get("X-Pine-Auth")
 		_ = json.NewDecoder(r.Body).Decode(&body)
-		fmt.Fprint(w, `{"session":{"name":"s1","token":"ps_abc","browser":{"primary_tab_id":"t1","window_id":42,"ws_url":"ws://x"},"created_at":"2026-01-01T00:00:00Z"}}`)
+		fmt.Fprint(w, `{"session":{"name":"s1","token":"ps_abc","browser":{"primary_tab_id":"t1","window_id":42},"created_at":"2026-01-01T00:00:00Z"}}`)
 	})
 
 	sess, err := c.CreateSession(context.Background(), "ct_admin", CreateSessionOptions{Browser: true})

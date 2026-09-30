@@ -10,6 +10,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"regexp"
 	"strconv"
@@ -721,6 +723,8 @@ echo "A2_RC=$(touch /var/lib/sandbox/J8-EVIL 2>/dev/null; echo $?)"
 echo "A3_RC=$( (cat /var/lib/sandbox/.pine/vnc-gate-secret >/dev/null 2>&1); echo $?)"
 echo "A3_LEN=$(cat /var/lib/sandbox/.pine/vnc-gate-secret 2>/dev/null | wc -c)"
 echo "A4_RC=$( (cat /var/lib/sandbox/.pine/execd-token >/dev/null 2>&1); echo $?)"
+echo "A3B_RC=$( (cat /var/run/pine-credentials/vnc-gate-secret >/dev/null 2>&1); echo $?)"
+echo "A4B_RC=$( (cat /var/run/pine-credentials/system-ui-host-token >/dev/null 2>&1); echo $?)"
 echo "A5_COORD_RC=$(ls /var/lib/coord >/dev/null 2>&1; echo $?)"
 echo "A6_MOUNT=$(test -u /usr/bin/mount 2>/dev/null && echo SETUID || echo stripped)"
 echo "A6_SU=$(test -u /usr/bin/su 2>/dev/null && echo SETUID || echo stripped)"
@@ -751,6 +755,16 @@ rm -rf /var/lib/sandbox/sessions/J8-SQUAT /var/lib/sandbox/J8-EVIL 2>/dev/null |
 	// HOLD — the root execd API token must stay unreadable (a leak = root RCE).
 	if fieldVal(out, "A4_RC") == "0" {
 		t.Errorf("execd access token READABLE by the session — root-RCE token leak (regression)")
+	}
+	// F4/HOLD on the pairing rail: the browser-locally MATERIALIZED secrets
+	// (coord-minted, delivered over the §6 pairing channel, written under
+	// /var/run/pine/pair) carry the same session-unreadable requirement as
+	// their shared-volume predecessors did.
+	if fieldVal(out, "A3B_RC") == "0" {
+		t.Errorf("materialized VNC gate secret READABLE by the session — secret leak")
+	}
+	if fieldVal(out, "A4B_RC") == "0" {
+		t.Errorf("materialized system-UI host token READABLE by the session — token leak")
 	}
 	// HOLD — the ps_-bearing coord registry must not be mounted in the session container.
 	if fieldVal(out, "A5_COORD_RC") == "0" {
@@ -800,4 +814,137 @@ func fieldVal(stdout, key string) string {
 		return ""
 	}
 	return strings.TrimSpace(m[1])
+}
+
+// J9 — permanent delete. Create → drive → checkpoint → stop → restore on a fresh pod →
+// Delete. After delete the id never attaches again, a repeat delete is still a success,
+// and the pod is gone. The saved-state purge and id retirement run on Portal timers
+// (24h / 30d in production); the local loop shortens them via
+// COMPUTER_STATE_PURGE_DELAY_SECONDS / COMPUTER_TOMBSTONE_RETENTION_SECONDS, and the test
+// checks them when PINE_E2E_STATE_OBJECTS_URL (the fake-GCS object listing for the state
+// bucket) is set.
+func TestE2E_J9_Delete(t *testing.T) {
+	c := newClient(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*attachTimeout)
+	defer cancel()
+
+	credentials, err := pine.GenerateCredentials()
+	if err != nil {
+		t.Fatalf("GenerateCredentials: %v", err)
+	}
+	comp, err := c.CreateComputer(ctx, pine.AttachOptions{Credentials: credentials})
+	if err != nil {
+		t.Fatalf("CreateComputer: %v", err)
+	}
+	driveALittle(t, ctx, comp, "delete")
+	if _, err := comp.Capture(ctx); err != nil {
+		teardown(comp)
+		t.Fatalf("Capture: %v", err)
+	}
+	mustSnapshot(t, ctx, comp)
+	if _, err := comp.Stop(ctx); err != nil {
+		teardown(comp)
+		t.Fatalf("Stop: %v", err)
+	}
+
+	re, err := c.AttachComputer(ctx, credentials.ID, credentials.Key, pine.AttachOptions{
+		BindingRevision: comp.BindingRevision(),
+		CaptureKeypair:  credentials.CaptureKeypair,
+	})
+	if err != nil {
+		t.Fatalf("re-attach (restore) failed: %v", err)
+	}
+	restored := mustSnapshot(t, ctx, re)
+	if restored["computer_id"] != credentials.ID {
+		teardown(re)
+		t.Fatalf("restored snapshot computer_id = %v, want %s", restored["computer_id"], credentials.ID)
+	}
+	sess, err := re.CreateSession(ctx, pine.CreateSessionOptions{Name: "e2e-delete-exec"})
+	if err != nil {
+		teardown(re)
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if out := mustExec(t, ctx, sess, "echo pine-delete-ok"); !strings.Contains(out, "pine-delete-ok") {
+		teardown(re)
+		t.Fatalf("exec stdout = %q", out)
+	}
+	stateObjectsBefore := stateObjects(t, credentials.ID)
+
+	if err := re.Delete(ctx); err != nil {
+		teardown(re)
+		t.Fatalf("Delete: %v", err)
+	}
+	if re.Alive(ctx) {
+		t.Error("Computer still reports alive after Delete")
+	}
+	if err := c.DeleteComputer(ctx, credentials.ID); err != nil {
+		t.Errorf("repeat DeleteComputer = %v, want nil (idempotent)", err)
+	}
+	// The SDK provisions a pod before Portal refuses the attach, so on a small pool this
+	// waits for the deleted Computer's pods to finish terminating. Only a control-plane
+	// allocation timeout is retried; any other outcome fails.
+	var unknown *pine.UnknownComputerError
+	for attempt := 1; ; attempt++ {
+		again, err := c.AttachComputer(ctx, credentials.ID, credentials.Key, pine.AttachOptions{
+			BindingRevision: re.BindingRevision(),
+			CaptureKeypair:  credentials.CaptureKeypair,
+		})
+		if errors.As(err, &unknown) {
+			break
+		}
+		if again != nil {
+			teardown(again)
+		}
+		var allocation *pine.ServerError
+		if errors.As(err, &allocation) && allocation.Status == http.StatusGatewayTimeout &&
+			allocation.Code == "KUBERNETES::POD_READY_TIMEOUT" && attempt < 6 {
+			t.Logf("attach after delete: pool busy (attempt %d), retrying", attempt)
+			time.Sleep(20 * time.Second)
+			continue
+		}
+		t.Fatalf("attach after delete = %v, want *UnknownComputerError", err)
+	}
+
+	if stateObjectsBefore < 0 {
+		t.Log("PINE_E2E_STATE_OBJECTS_URL unset — skipping the saved-state purge check")
+		return
+	}
+	if stateObjectsBefore == 0 {
+		t.Fatalf("no saved state under %s/ before delete — the purge check would prove nothing", credentials.ID)
+	}
+	deadline := time.Now().Add(envDuration("PINE_E2E_PURGE_WAIT", 5*time.Minute))
+	for stateObjects(t, credentials.ID) > 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("saved state under %s/ still present after PINE_E2E_PURGE_WAIT", credentials.ID)
+		}
+		time.Sleep(5 * time.Second)
+	}
+	t.Logf("saved state purged (%d objects before delete)", stateObjectsBefore)
+}
+
+// stateObjects counts the objects under the Computer's prefix in the state bucket, or
+// returns -1 when PINE_E2E_STATE_OBJECTS_URL is unset. The URL is a GCS JSON-API object
+// listing, e.g. the local fake-GCS host service:
+// http://localhost:24443/storage/v1/b/pine-cua-sandbox-state-local/o
+func stateObjects(t *testing.T, computerID string) int {
+	t.Helper()
+	base := os.Getenv("PINE_E2E_STATE_OBJECTS_URL")
+	if base == "" {
+		return -1
+	}
+	resp, err := http.Get(base + "?prefix=" + url.QueryEscape(computerID+"/"))
+	if err != nil {
+		t.Fatalf("list state objects: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("list state objects: HTTP %d", resp.StatusCode)
+	}
+	var listing struct {
+		Items []json.RawMessage `json:"items"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&listing); err != nil {
+		t.Fatalf("decode state object listing: %v", err)
+	}
+	return len(listing.Items)
 }

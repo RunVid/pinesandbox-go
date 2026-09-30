@@ -11,7 +11,7 @@ package pinesandbox
 
 // Version is this SDK's release version. SDK patches ship independently within
 // the shared compatibility minor.
-const Version = "0.3.13"
+const Version = "0.3.14"
 
 // SpecVersion is the Computer wire-major this SDK targets — the CG-1 version-identity
 // source. It MUST equal computer-api.yaml's x-pine-spec-version, the gateway's

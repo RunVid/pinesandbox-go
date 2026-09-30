@@ -85,19 +85,41 @@ func (h *SandboxHandle) Terminate(ctx context.Context, waitTimeout, interval tim
 	if interval <= 0 {
 		interval = defaultPollInterval
 	}
-	if err := h.cp.Destroy(ctx, h.id); err != nil {
-		return false, err
-	}
 	deadline := h.clock().Add(waitTimeout)
-	for {
-		if h.gone(ctx) {
-			return true, nil
+	waitCtx, cancel := context.WithTimeout(ctx, waitTimeout)
+	defer cancel()
+	if err := h.cp.Destroy(waitCtx, h.id); err != nil {
+		if ctx.Err() != nil {
+			return false, ctx.Err()
 		}
-		if !h.clock().Before(deadline) {
+		if waitCtx.Err() != nil {
 			return false, nil
 		}
-		if err := h.sleeper(ctx, interval); err != nil {
-			return false, err // context cancelled mid-poll
+		return false, err
+	}
+	for {
+		if ctx.Err() != nil {
+			return false, ctx.Err()
+		}
+		remaining := deadline.Sub(h.clock())
+		if remaining <= 0 || waitCtx.Err() != nil {
+			return false, nil
+		}
+		if h.gone(waitCtx) {
+			return true, nil
+		}
+		remaining = deadline.Sub(h.clock())
+		if remaining <= 0 {
+			return false, nil
+		}
+		if err := h.sleeper(waitCtx, min(interval, remaining)); err != nil {
+			if ctx.Err() != nil {
+				return false, ctx.Err()
+			}
+			if waitCtx.Err() != nil {
+				return false, nil
+			}
+			return false, err
 		}
 	}
 }
@@ -128,6 +150,8 @@ func (h *SandboxHandle) refreshStatus(ctx context.Context) (string, error) {
 // gone reports whether the Sandbox record is confirmed deleted (a 404). Any other outcome
 // (still present, or a transient error) is treated as not-yet-gone.
 func (h *SandboxHandle) gone(ctx context.Context) bool {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
 	_, err := h.cp.Get(ctx, h.id)
 	var nf *NotFoundError
 	return errors.As(err, &nf)

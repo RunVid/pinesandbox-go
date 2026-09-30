@@ -62,6 +62,40 @@ func TestRegisterComputer(t *testing.T) {
 	}
 }
 
+func TestDirectLocationWire(t *testing.T) {
+	calls := 0
+	s := newAttachSource(t, func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		var body map[string]json.RawMessage
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+			return
+		}
+		if got := string(body["location"]); got != `{"mode":"direct"}` {
+			t.Errorf("location = %s", got)
+		}
+		fmt.Fprint(w, `{"bind_token":"b","broker_grant":"g","key_assertion":"k","binding_revision":1,"location":{"mode":"direct"}}`)
+	})
+	if err := s.RegisterComputer(context.Background(), "c1", &ComputerLocation{Mode: "direct"}); err != nil {
+		t.Fatal(err)
+	}
+	req := validCredentialsRequest()
+	req.Location = &ComputerLocation{Mode: "direct"}
+	creds, err := s.Credentials(context.Background(), req)
+	if err != nil || creds.Location == nil || *creds.Location != *req.Location {
+		t.Fatalf("credentials = %+v, error = %v", creds, err)
+	}
+	for _, location := range []ComputerLocation{{Mode: "direct", Country: "US"}, {Mode: "automatic"}, {}} {
+		req.Location = &location
+		if _, err := s.Credentials(context.Background(), req); err == nil {
+			t.Errorf("accepted invalid location %+v", location)
+		}
+	}
+	if calls != 2 {
+		t.Errorf("network calls = %d, want 2", calls)
+	}
+}
+
 func TestRegisterComputer_Conflict(t *testing.T) {
 	s := newAttachSource(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(409)
@@ -313,5 +347,81 @@ func TestAttachSource_StringRedacts(t *testing.T) {
 	s := newAttachSource(t, func(w http.ResponseWriter, r *http.Request) {})
 	if strings.Contains(s.String(), "pk_test") {
 		t.Errorf("String leaked the pk_: %q", s.String())
+	}
+}
+
+func TestDeleteComputer_204IsIdempotentSuccess(t *testing.T) {
+	var calls int
+	s := newAttachSource(t, func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.Method != http.MethodDelete || r.URL.Path != "/v1/computers/c1" {
+			t.Errorf("request = %s %s", r.Method, r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer pk_test" {
+			t.Errorf("auth = %q", got)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	for i := 0; i < 2; i++ {
+		if err := s.DeleteComputer(context.Background(), "c1"); err != nil {
+			t.Fatalf("DeleteComputer #%d: %v", i+1, err)
+		}
+	}
+	if calls != 2 {
+		t.Fatalf("calls = %d, want 2", calls)
+	}
+}
+
+func TestDeleteComputer_RequiresID(t *testing.T) {
+	s := newAttachSource(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+	})
+	if err := s.DeleteComputer(context.Background(), ""); err == nil {
+		t.Fatal("expected error for empty computer_id")
+	}
+}
+
+func TestDeleteComputer_ErrorsByStatus(t *testing.T) {
+	problemBody := func(status int, typ string) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/problem+json")
+			w.WriteHeader(status)
+			fmt.Fprintf(w, `{"type":%q,"title":"t","status":%d}`, typ, status)
+		}
+	}
+	t.Run("422 malformed id", func(t *testing.T) {
+		s := newAttachSource(t, problemBody(422, "INVALID_COMPUTER_ID"))
+		err := s.DeleteComputer(context.Background(), "not-a-uuid")
+		var e *ComputerDeletionError
+		if !errors.As(err, &e) {
+			t.Fatalf("err = %T (%v), want *ComputerDeletionError", err, err)
+		}
+		if e.Status != 422 || e.Code != "INVALID_COMPUTER_ID" || e.Op != "DELETE /v1/computers/not-a-uuid" {
+			t.Errorf("err = %+v", e.tokenBase)
+		}
+	})
+	t.Run("403 insufficient scope", func(t *testing.T) {
+		s := newAttachSource(t, problemBody(403, "INSUFFICIENT_SCOPE"))
+		err := s.DeleteComputer(context.Background(), "c1")
+		var e *ProjectAccessDenied
+		if !errors.As(err, &e) || e.Status != 403 || !strings.Contains(err.Error(), "may not delete computers") {
+			t.Fatalf("err = %T (%v), want *ProjectAccessDenied", err, err)
+		}
+	})
+	for _, tc := range []struct {
+		status int
+		typ    string
+	}{{401, "INVALID_API_KEY"}, {429, "RATE_LIMITED"}, {500, "INTERNAL"}, {503, "UNAVAILABLE"}} {
+		t.Run(fmt.Sprintf("%d generic", tc.status), func(t *testing.T) {
+			s := newAttachSource(t, problemBody(tc.status, tc.typ))
+			err := s.DeleteComputer(context.Background(), "c1")
+			var e *AttachCredentialsError
+			if !errors.As(err, &e) || e.Status != tc.status {
+				t.Fatalf("err = %T (%v), want *AttachCredentialsError status %d", err, err, tc.status)
+			}
+			if strings.Contains(err.Error(), "pk_test") || strings.Contains(fmt.Sprintf("%+v", err), "pk_test") {
+				t.Errorf("error leaked the pk_: %v", err)
+			}
+		})
 	}
 }

@@ -170,6 +170,17 @@ func (c *Client) AttachComputer(ctx context.Context, id string, key []byte, opts
 	return comp, nil
 }
 
+// DeleteComputer PERMANENTLY deletes the Computer with this id: its identity and saved
+// state end (Stop and Kill keep both). Portal tombstones the id at once, destroys any
+// bound sandbox asynchronously, purges saved state after 24 hours, and never accepts the
+// id again. Idempotent and non-disclosing: an unknown, already-deleted, or other project's
+// id also returns nil. There is no undelete. Use Computer.Delete to kill a live handle
+// first. Errors: *ComputerDeletionError (422 malformed id), *ProjectAccessDenied (403),
+// *AttachCredentialsError (401, 429, 5xx).
+func (c *Client) DeleteComputer(ctx context.Context, id string) error {
+	return c.conn.attachProvider.DeleteComputer(ctx, id)
+}
+
 // attachClientError preserves Portal CAS state when a high-level Client call
 // cannot return its temporary Computer. Direct Computer.Attach callers retain
 // the object and can read BindingRevision themselves.
@@ -189,14 +200,26 @@ func attachClientError(comp *Computer, initialRevision int64, credentials *Crede
 	}
 }
 
+// AdoptOptions carries the binding mode persisted by the integrator.
+type AdoptOptions struct {
+	Ephemeral bool
+}
+
 // AdoptExisting adopts an ALREADY-bound, still-live Computer from its persisted
 // {id, key, sandboxID, computerToken} — no new pod, no re-bind. For driving an existing pod
-// across requests from a backend that cached the ct_.
-func (c *Client) AdoptExisting(ctx context.Context, id string, key []byte, sandboxID, computerToken string) (*Computer, error) {
+// across requests from a backend that cached the ct_. An optional AdoptOptions
+// preserves ephemeral mode; omission retains the persistent default.
+func (c *Client) AdoptExisting(ctx context.Context, id string, key []byte, sandboxID, computerToken string, options ...AdoptOptions) (*Computer, error) {
+	if len(options) > 1 {
+		return nil, fmt.Errorf("pinesandbox: AdoptExisting accepts at most one AdoptOptions")
+	}
 	if err := validateIdentity(id, key); err != nil {
 		return nil, err
 	}
 	comp := newComputer(id, key)
+	if len(options) == 1 {
+		comp.ephemeral = options[0].Ephemeral
+	}
 	if err := comp.adopt(c.conn, sandboxID, computerToken, statusRunning); err != nil {
 		return nil, err
 	}

@@ -132,6 +132,55 @@ func TestTerminate_NotConfirmedWithinBudget(t *testing.T) {
 	}
 }
 
+func TestTerminate_BoundsBlockedDeleteAndStatusRequests(t *testing.T) {
+	for _, phase := range []string{"delete", "status"} {
+		t.Run(phase, func(t *testing.T) {
+			parent, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			block := func(ctx context.Context) error {
+				deadline, ok := ctx.Deadline()
+				if !ok || time.Until(deadline) > 100*time.Millisecond {
+					t.Fatal("request did not inherit the deletion budget")
+				}
+				<-ctx.Done()
+				return ctx.Err()
+			}
+			cp := &fakeCP{
+				destroy: func(ctx context.Context, _ string) error {
+					if phase == "delete" {
+						return block(ctx)
+					}
+					return nil
+				},
+				get: func(ctx context.Context, _ string) (*controlplane.SandboxInfo, error) {
+					return nil, block(ctx)
+				},
+			}
+			h := newSandboxHandle(cp, "sb-1", "running")
+			gone, err := h.Terminate(parent, 20*time.Millisecond, time.Second)
+			if gone || err != nil {
+				t.Fatalf("expired confirmation = %v, %v; want false, nil", gone, err)
+			}
+			if parent.Err() != nil {
+				t.Fatal("wait consumed the caller's longer deadline")
+			}
+		})
+	}
+}
+
+func TestTerminate_DeleteAndSleepConsumeTheSameBudget(t *testing.T) {
+	cp := &fakeCP{get: func(context.Context, string) (*controlplane.SandboxInfo, error) {
+		return &controlplane.SandboxInfo{Status: "stopping"}, nil
+	}}
+	h, now := newTestHandle(cp, "running")
+	start := *now
+	cp.destroy = func(context.Context, string) error { *now = now.Add(2 * time.Second); return nil }
+	gone, err := h.Terminate(context.Background(), 5*time.Second, 2*time.Second)
+	if gone || err != nil || now.Sub(start) != 5*time.Second {
+		t.Fatalf("terminate = %v, %v, elapsed %s", gone, err, now.Sub(start))
+	}
+}
+
 // TestTerminate_ContextCancelAborts: a cancelled ctx stops the confirm-gone poll promptly
 // instead of blocking the full wait budget (the ctx-aware poll fix).
 func TestTerminate_ContextCancelAborts(t *testing.T) {

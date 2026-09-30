@@ -16,11 +16,6 @@ func TestAdminRoutes(t *testing.T) {
 				t.Error("health must be token-less")
 			}
 			_, _ = io.WriteString(w, `{"ok":true}`)
-		case r.URL.Path == "/metrics":
-			if r.Header.Get("Accept") != "text/plain" {
-				t.Errorf("metrics Accept = %q", r.Header.Get("Accept"))
-			}
-			_, _ = io.WriteString(w, "pine_up 1\n")
 		case r.URL.Path == "/state" && r.Method == "GET":
 			_, _ = io.WriteString(w, `{"snapshot_id":"snap-1"}`)
 		case r.URL.Path == "/v1/coord/capture" && r.Method == "POST":
@@ -41,9 +36,6 @@ func TestAdminRoutes(t *testing.T) {
 
 	if h, err := c.Health(ctx); err != nil || !contains(string(h), "ok") {
 		t.Fatalf("Health = %s, %v", h, err)
-	}
-	if m, err := c.Metrics(ctx); err != nil || !contains(string(m), "pine_up") {
-		t.Fatalf("Metrics = %s, %v", m, err)
 	}
 	if s, err := c.LatestSnapshot(ctx, "ct_"); err != nil || !contains(string(s), "snap-1") {
 		t.Fatalf("LatestSnapshot = %s, %v", s, err)

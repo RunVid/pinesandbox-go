@@ -132,7 +132,7 @@ func (c *Client) Host() string {
 // ws/wss scheme from it rather than guessing).
 func (c *Client) BaseURL() string { return c.base }
 
-// Request is one unary call. Token "" omits X-Pine-Auth (bind-pubkey/health/metrics are
+// Request is one unary call. Token "" omits X-Pine-Auth (bind-pubkey/health are
 // token-less). Headers carries extras (Idempotency-Key, If-Match, …).
 type Request struct {
 	Token       string

@@ -207,6 +207,40 @@ func TestBind_InvalidCommittedLocationStillRecordsRevision(t *testing.T) {
 	}
 }
 
+func TestBindDirectLocationReceipt(t *testing.T) {
+	for _, tc := range []struct {
+		name                 string
+		requested, committed tokens.ComputerLocation
+		wantError            bool
+	}{
+		{"direct", tokens.ComputerLocation{Mode: "direct"}, tokens.ComputerLocation{Mode: "direct"}, false},
+		{"country instead of direct", tokens.ComputerLocation{Mode: "direct"}, tokens.ComputerLocation{Country: "US"}, true},
+		{"direct instead of country", tokens.ComputerLocation{Country: "US"}, tokens.ComputerLocation{Mode: "direct"}, true},
+		{"contradictory receipt", tokens.ComputerLocation{Mode: "direct"}, tokens.ComputerLocation{Mode: "direct", Country: "US"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			coord := newFakeCoord(t, bindStep{res: &coordinator.BindResult{ComputerToken: "ct", Epoch: 1}})
+			minter := &fakeMinter{raw: true, creds: &tokens.AttachCredentials{
+				BindToken: "bt", BrokerGrant: "bg", KeyAssertion: "ka", BindingRevision: 1, Location: &tc.committed,
+			}}
+			cfg := baseConfig(coord, minter, &fakeClock{t: time.Unix(1700000000, 0)})
+			cfg.Location = &tc.requested
+			var committed tokens.ComputerLocation
+			cfg.OnLocation = func(location tokens.ComputerLocation) { committed = location }
+			_, err := Bind(context.Background(), cfg)
+			if (err != nil) != tc.wantError {
+				t.Fatalf("Bind error = %v, want error = %v", err, tc.wantError)
+			}
+			if tc.wantError && coord.bindCalls != 0 {
+				t.Fatal("bound after mismatched receipt")
+			}
+			if !tc.wantError && committed != tc.committed {
+				t.Fatalf("committed location = %+v", committed)
+			}
+		})
+	}
+}
+
 // TestBind_Ephemeral proves an access-lease-only attach omits every piece of
 // persistence key material: the mint request carries no pk_computer/key_generation,
 // the bind extras carry no key_assertion, and the HPKE-sealed plaintext carries

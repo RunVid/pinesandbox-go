@@ -281,10 +281,10 @@ func mintEnvelope(ctx context.Context, cfg Config) (*envelope, error) {
 		if err := validateLocation(creds.Location); err != nil {
 			return nil, err
 		}
-		if cfg.Location != nil && creds.Location.Country != cfg.Location.Country {
+		if cfg.Location != nil && *creds.Location != *cfg.Location {
 			return nil, fmt.Errorf(
-				"pinesandbox: attach-credentials provider returned location %q instead of requested %q",
-				creds.Location.Country, cfg.Location.Country,
+				"pinesandbox: attach-credentials provider returned location %+v instead of requested %+v",
+				*creds.Location, *cfg.Location,
 			)
 		}
 		if cfg.OnLocation != nil {
@@ -329,9 +329,12 @@ func mintEnvelope(ctx context.Context, cfg Config) (*envelope, error) {
 }
 
 func validateLocation(location *tokens.ComputerLocation) error {
+	if location.Mode == "direct" && location.Country == "" {
+		return nil
+	}
 	country := location.Country
-	if len(country) != 2 || country[0] < 'A' || country[0] > 'Z' || country[1] < 'A' || country[1] > 'Z' {
-		return fmt.Errorf("pinesandbox: attach-credentials provider returned a non-canonical country")
+	if location.Mode != "" || len(country) != 2 || country[0] < 'A' || country[0] > 'Z' || country[1] < 'A' || country[1] > 'Z' {
+		return fmt.Errorf("pinesandbox: attach-credentials provider returned an invalid browser egress policy")
 	}
 	return nil
 }

@@ -81,6 +81,31 @@ func TestAgentSteer_OmitsEmpty(t *testing.T) {
 	}
 }
 
+func TestAgentAnswerWithOptions_SecretsAndTurnGuard(t *testing.T) {
+	var body map[string]any
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/agent/answer") {
+			t.Errorf("path = %s", r.URL.Path)
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		fmt.Fprint(w, `{}`)
+	})
+	opts := AgentAnswerOptions{
+		ExpectedTurnID: "turn_1",
+		Secrets:        map[string]string{"LOGIN_PASSWORD": "answer-secret-123"},
+	}
+	if _, err := c.AgentAnswerWithOptions(context.Background(), "ct_", "s", "req_1", "use $LOGIN_PASSWORD", opts); err != nil {
+		t.Fatal(err)
+	}
+	if body["request_id"] != "req_1" || body["answer"] != "use $LOGIN_PASSWORD" || body["expected_turn_id"] != "turn_1" {
+		t.Errorf("body = %v", body)
+	}
+	secrets, ok := body["secrets"].(map[string]any)
+	if !ok || secrets["LOGIN_PASSWORD"] != "answer-secret-123" {
+		t.Errorf("secrets = %#v", body["secrets"])
+	}
+}
+
 func TestAgentCancelResetTaskResult(t *testing.T) {
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {

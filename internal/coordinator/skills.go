@@ -48,6 +48,25 @@ func (c *Client) DeactivateSkill(ctx context.Context, token, name string) (json.
 	return c.postJSON(ctx, "/v1/skills/"+url.PathEscape(name)+"/deactivate", token, map[string]any{})
 }
 
+// SetSkillEnabled switches one of Pine's standard or feature skills on or off
+// for the agent processes the Computer starts next (raw result).
+func (c *Client) SetSkillEnabled(ctx context.Context, token, name string, enabled bool) (json.RawMessage, error) {
+	body, err := json.Marshal(map[string]bool{"enabled": enabled})
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.do(ctx, "PUT", "/v1/skills/"+url.PathEscape(name)+"/enabled", token, body)
+	if err != nil {
+		return nil, err
+	}
+	return json.RawMessage(resp.Body), nil
+}
+
+// Capabilities returns the Computer's capability manifest (raw).
+func (c *Client) Capabilities(ctx context.Context, token string) (json.RawMessage, error) {
+	return c.getJSON(ctx, "/v1/capabilities", token)
+}
+
 // DeleteSkillVersion hides a version and un-serves it if active (raw).
 func (c *Client) DeleteSkillVersion(ctx context.Context, token, name, version string) (json.RawMessage, error) {
 	resp, err := c.do(ctx, "DELETE", "/v1/skills/"+url.PathEscape(name)+"/versions/"+url.PathEscape(version), token, nil)

@@ -134,7 +134,6 @@ type Browser struct {
 	OwnedTabIDs  []string
 	WindowID     int
 	ActiveTabID  string
-	WSURL        string
 }
 
 type sessionWire struct {
@@ -153,7 +152,6 @@ type browserWire struct {
 	OwnedTabIDs  []string `json:"owned_tab_ids"`
 	WindowID     int      `json:"window_id"` // spec: integer
 	ActiveTabID  string   `json:"active_tab_id"`
-	WSURL        string   `json:"ws_url"`
 }
 
 func (w *sessionWire) toSession() *Session {
@@ -179,7 +177,6 @@ func (w *sessionWire) toSession() *Session {
 			OwnedTabIDs:  owned,
 			WindowID:     w.Browser.WindowID,
 			ActiveTabID:  w.Browser.ActiveTabID,
-			WSURL:        w.Browser.WSURL,
 		}
 	}
 	return s

@@ -130,6 +130,14 @@ func (e *ComputerRegistrationError) Error() string {
 	return tokErr("computer registration refused", e.tokenBase)
 }
 
+// ComputerDeletionError: the portal refused to delete the computer_id (422 — not a
+// lowercase UUIDv7). Unknown, deleted, and cross-project ids are not errors (204).
+type ComputerDeletionError struct{ tokenBase }
+
+func (e *ComputerDeletionError) Error() string {
+	return tokErr("computer deletion refused", e.tokenBase)
+}
+
 // UnknownComputerError: the computer_id is deleted or cross-project (404).
 // First attach lazily creates a missing authorization row.
 type UnknownComputerError struct{ tokenBase }

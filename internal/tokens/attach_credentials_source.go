@@ -22,7 +22,7 @@ type AttachCredentialsSource struct {
 }
 
 const (
-	registerPath  = "/v1/computers"
+	registerPath  = "/v1/computers" // also the DELETE /v1/computers/{id} prefix
 	locationsPath = "/v1/locations"
 )
 
@@ -50,11 +50,12 @@ type AttachCredentials struct {
 	Location             *ComputerLocation
 }
 
-// ComputerLocation is the Portal wire representation of the country intent
+// ComputerLocation is the Portal wire representation of the browser egress policy
 // for one live sandbox binding. The public facade owns its own type so this
 // internal transport package does not leak through the SDK API.
 type ComputerLocation struct {
-	Country string `json:"country"`
+	Country string `json:"country,omitempty"`
+	Mode    string `json:"mode,omitempty"`
 }
 
 // AvailableLocations is the Portal discovery result. Locations is the
@@ -139,12 +140,12 @@ func (s *AttachCredentialsSource) AvailableLocations(ctx context.Context) (*Avai
 	if out.Locations == nil {
 		return nil, s.malformedLocations("location discovery response omitted locations", nil)
 	}
-	if err := validateLocation(&out.DefaultLocation); err != nil {
+	if err := validateLocation(&out.DefaultLocation); err != nil || out.DefaultLocation.Mode != "" {
 		return nil, s.malformedLocations("location discovery response had an invalid default_location", err)
 	}
 	seen := make(map[string]struct{}, len(out.Locations))
 	for i := range out.Locations {
-		if err := validateLocation(&out.Locations[i]); err != nil {
+		if err := validateLocation(&out.Locations[i]); err != nil || out.Locations[i].Mode != "" {
 			return nil, s.malformedLocations("location discovery response had an invalid location", err)
 		}
 		if _, duplicate := seen[out.Locations[i].Country]; duplicate {
@@ -153,6 +154,30 @@ func (s *AttachCredentialsSource) AvailableLocations(ctx context.Context) (*Avai
 		seen[out.Locations[i].Country] = struct{}{}
 	}
 	return &out, nil
+}
+
+// DeleteComputer permanently deletes computer_id (DELETE /v1/computers/{id}). Portal
+// tombstones it at once, destroys any bound sandboxes asynchronously, purges saved state
+// after 24 hours, and never accepts the id again. Idempotent and non-disclosing: unknown,
+// already-deleted, and cross-project ids are the same 204 success.
+func (s *AttachCredentialsSource) DeleteComputer(ctx context.Context, computerID string) error {
+	if computerID == "" {
+		return fmt.Errorf("pinesandbox: computer_id required")
+	}
+	_, err := s.client.Do(ctx, http.MethodDelete, registerPath+"/"+computerID, transport.Request{
+		Headers: map[string]string{"Authorization": "Bearer " + s.apiKey},
+	})
+	if err == nil {
+		return nil
+	}
+	ae, ok := asAPIError(err)
+	if !ok {
+		return err // transport fault — already typed
+	}
+	if ae.Status == 422 {
+		return &ComputerDeletionError{tokenBaseFrom(fmt.Sprintf("malformed computer_id %s", computerID), ae)}
+	}
+	return s.genericForbidden(ae, "computer deletion", "project or key may not delete computers")
 }
 
 // Credentials mints the per-attach bind_token + broker_grant for one pod + boot.
@@ -250,9 +275,12 @@ func validateLocation(location *ComputerLocation) error {
 	if location == nil {
 		return nil
 	}
+	if location.Mode == "direct" && location.Country == "" {
+		return nil
+	}
 	country := location.Country
-	if len(country) != 2 || country[0] < 'A' || country[0] > 'Z' || country[1] < 'A' || country[1] > 'Z' {
-		return fmt.Errorf("pinesandbox: location country must be canonical ISO 3166-1 alpha-2 uppercase (for example US)")
+	if location.Mode != "" || len(country) != 2 || country[0] < 'A' || country[0] > 'Z' || country[1] < 'A' || country[1] > 'Z' {
+		return fmt.Errorf("pinesandbox: location must contain a canonical ISO alpha-2 country or mode direct, exclusively")
 	}
 	return nil
 }
@@ -292,12 +320,17 @@ func (s *AttachCredentialsSource) postWithHeaders(ctx context.Context, path stri
 // message. A bad pk_ stays in the AttachCredentialsError family so `errors.As` on the attach
 // call keeps catching it; callers distinguish it by ae.Status == 401.
 func (s *AttachCredentialsSource) generic(ae *problem.APIError, op string) error {
+	return s.genericForbidden(ae, op, "project or key may not mint attach credentials (scope, project status, or computer status)")
+}
+
+// genericForbidden is generic with an operation-specific 403 message.
+func (s *AttachCredentialsSource) genericForbidden(ae *problem.APIError, op, forbidden string) error {
 	var msg string
 	switch ae.Status {
 	case 401:
 		msg = "invalid or unknown project client key"
 	case 403:
-		return &ProjectAccessDenied{tokenBaseFrom("project or key may not mint attach credentials (scope, project status, or computer status)", ae)}
+		return &ProjectAccessDenied{tokenBaseFrom(forbidden, ae)}
 	case 429:
 		msg = "portal rate-limited the " + op
 	default:

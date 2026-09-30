@@ -368,6 +368,26 @@
       "status": 409,
       "retryable": false,
       "note": "restore rechallenge generation cap exhausted - a live writer keeps advancing latest; terminal"
+    },
+    {
+      "type": "/errors/skill-publication-unavailable",
+      "status": 503,
+      "retryable": true
+    },
+    {
+      "type": "/errors/runtime-initializing",
+      "status": 503,
+      "retryable": true
+    },
+    {
+      "type": "/errors/computer-stopped",
+      "status": 409,
+      "retryable": false
+    },
+    {
+      "type": "/errors/stop-failed",
+      "status": 503,
+      "retryable": false
     }
   ]
 }

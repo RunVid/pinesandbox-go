@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/url"
+	"time"
 
 	"go.pinesandbox.io/computer/internal/base/problem"
 )
@@ -12,15 +14,6 @@ import (
 // Health returns the coord's health document (public, token-less).
 func (c *Client) Health(ctx context.Context) (json.RawMessage, error) {
 	return c.getJSON(ctx, "/health", "")
-}
-
-// Metrics returns the coord's Prometheus metrics (public, text/plain).
-func (c *Client) Metrics(ctx context.Context) ([]byte, error) {
-	resp, err := c.send(ctx, coordReq{method: "GET", path: "/metrics", accept: "text/plain"})
-	if err != nil {
-		return nil, err
-	}
-	return resp.Body, nil
 }
 
 // LatestSnapshot returns the most-recently-persisted snapshot body (ct_), or (nil, nil) if
@@ -62,4 +55,25 @@ func (c *Client) ClaimOrphanDownload(ctx context.Context, token, guid, sessionNa
 func (c *Client) DiscardOrphanDownload(ctx context.Context, token, guid string) error {
 	_, err := c.do(ctx, "DELETE", "/downloads/orphans/"+url.PathEscape(guid), token, nil)
 	return err
+}
+
+// Finish closes browser work and confirms its terminal save. A failed request
+// must not fall back to ordinary capture or sandbox deletion.
+func (c *Client) Finish(ctx context.Context, token string) error {
+	ctx, cancel := context.WithTimeout(ctx, 50*time.Second)
+	defer cancel()
+	raw, err := c.postJSON(ctx, "/v1/coord/finish", token, map[string]any{})
+	if err != nil {
+		return err
+	}
+	var result struct {
+		Saved bool `json:"saved"`
+	}
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return err
+	}
+	if !result.Saved {
+		return fmt.Errorf("stop did not confirm a complete save")
+	}
+	return nil
 }

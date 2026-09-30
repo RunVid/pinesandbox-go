@@ -30,6 +30,10 @@ type AgentUsage struct {
 
 // AgentTokenUsage is the disjoint LLM token split — input excludes cache;
 // total_tokens is Pine-computed (input + cache_read + cache_write + output).
+// The wire additionally carries `usage.llm.charges` (model-proxy charge
+// count — diagnostic telemetry for Pine's own supervision surfaces); it is
+// DELIBERATELY not modelled here — it moves with runtime behavior (retries,
+// compaction) and is not a product metric. Read Raw if you truly need it.
 type AgentTokenUsage struct {
 	InputTokens      int64 `json:"input_tokens"`
 	OutputTokens     int64 `json:"output_tokens"`
