@@ -11,6 +11,10 @@ import (
 // catalog. The generated artifact owns which operations are required; this
 // catalog must advance with the actual implementation in the same change.
 var implementedServerSDKOperations = map[string]any{
+	"createDiagnostic":             (*Client).CreateDiagnostic,
+	"getDiagnostic":                (*Client).GetDiagnostic,
+	"pauseComputer":                (*Computer).Pause,
+	"resumeComputer":               (*Computer).Resume,
 	"decidePasskeyCeremony":        (*Computer).ApprovePasskeyCeremony,
 	"decideSessionPasskeyCeremony": (*Session).ApprovePasskeyCeremony,
 	"declareSessionPasskeyIntent":  (*Session).DeclarePasskeyIntent,

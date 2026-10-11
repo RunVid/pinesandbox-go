@@ -116,7 +116,7 @@ type SessionInfo = coordinator.Session
 type Browser = coordinator.Browser
 
 // Session is the per-window slice of a Computer. It holds its ps_; agent mutations route
-// through the Computer's ct_ (one active driver — see FACADE invariants).
+// through the Computer's ct_ (one active driver at a time).
 type Session struct {
 	parent *Computer
 	coord  *coordinator.Client

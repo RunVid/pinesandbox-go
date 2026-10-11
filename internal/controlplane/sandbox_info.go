@@ -13,13 +13,18 @@ import (
 // — the lifecycle server owns provisioning, not deployment topology (the zone resolver
 // owns addressing).
 type SandboxInfo struct {
-	ID         string
-	Image      string // the image URI (present only in GET/LIST responses)
-	Status     string // normalized lifecycle state (status.state, snake_cased + lowercased)
-	Metadata   map[string]string
-	Entrypoint []string
-	ExpiresAt  *time.Time
-	CreatedAt  *time.Time
+	ID          string
+	ETag        string
+	OperationID string
+	Retryable   bool
+	Reason      string
+	Message     string
+	Image       string // the image URI (present only in GET/LIST responses)
+	Status      string // normalized lifecycle state (status.state, snake_cased + lowercased)
+	Metadata    map[string]string
+	Entrypoint  []string
+	ExpiresAt   *time.Time
+	CreatedAt   *time.Time
 }
 
 // sandboxWire is the nested server JSON; SandboxInfo flattens it.
@@ -29,7 +34,11 @@ type sandboxWire struct {
 		URI string `json:"uri"`
 	} `json:"image"`
 	Status struct {
-		State string `json:"state"`
+		State       string `json:"state"`
+		OperationID string `json:"operation_id"`
+		Retryable   bool   `json:"retryable"`
+		Reason      string `json:"reason"`
+		Message     string `json:"message"`
 	} `json:"status"`
 	Metadata   map[string]string `json:"metadata"`
 	Entrypoint []string          `json:"entrypoint"`
@@ -44,13 +53,17 @@ func ParseSandboxInfo(body []byte) (*SandboxInfo, error) {
 		return nil, fmt.Errorf("pinesandbox: control plane returned an unparseable sandbox: %w", err)
 	}
 	info := &SandboxInfo{
-		ID:         w.ID,
-		Image:      w.Image.URI,
-		Status:     normalizeStatus(w.Status.State),
-		Metadata:   w.Metadata,
-		Entrypoint: w.Entrypoint,
-		ExpiresAt:  parseTime(w.ExpiresAt),
-		CreatedAt:  parseTime(w.CreatedAt),
+		ID:          w.ID,
+		OperationID: w.Status.OperationID,
+		Retryable:   w.Status.Retryable,
+		Reason:      w.Status.Reason,
+		Message:     w.Status.Message,
+		Image:       w.Image.URI,
+		Status:      normalizeStatus(w.Status.State),
+		Metadata:    w.Metadata,
+		Entrypoint:  w.Entrypoint,
+		ExpiresAt:   parseTime(w.ExpiresAt),
+		CreatedAt:   parseTime(w.CreatedAt),
 	}
 	if info.Metadata == nil {
 		info.Metadata = map[string]string{}

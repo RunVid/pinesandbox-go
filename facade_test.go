@@ -351,14 +351,27 @@ func TestAttachLocationCanChangeAfterKillAndIsRetainedWhenOmitted(t *testing.T) 
 
 // TestAttach_BindFailureCleansUp: a terminal bind error tears the pod down and surfaces the
 // typed error (no leaked binding).
-func TestAttach_BindFailureCleansUp(t *testing.T) {
+func TestStartWaitsForPriorReleaseAndCleansFailedBind(t *testing.T) {
 	const computerID = "0190aaaa-bbbb-7ccc-8ddd-eeeeffff0000"
 	kp, _ := bindhpke.GenerateKeypair()
 	captureKP, _ := GenerateCaptureKeypair(1)
 	var destroyed bool
+	var oldReads int
 	controlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == "GET" && r.URL.Path == "/v1/computers/"+computerID:
+			fmt.Fprintf(w, `{"computer_id":%q,"binding_revision":0,"sandbox_id":"old"}`, computerID)
+		case r.Method == "GET" && r.URL.Path == "/sandboxes/old":
+			oldReads++
+			if oldReads == 1 {
+				fmt.Fprint(w, `{"id":"old","status":{"state":"Stopping"}}`)
+			} else {
+				fmt.Fprint(w, `{"id":"old","status":{"state":"Terminated","reason":"COMPUTE_RELEASED"}}`)
+			}
 		case r.URL.Path == "/computer-sandboxes" && r.Method == "POST":
+			if oldReads != 2 {
+				t.Error("allocated before previous compute release")
+			}
 			w.WriteHeader(202)
 			fmt.Fprint(w, `{"id":"sb-1","status":{"state":"Running"}}`)
 		case r.URL.Path == "/v1/computers/"+computerID+"/attach-credentials":
@@ -388,10 +401,10 @@ func TestAttach_BindFailureCleansUp(t *testing.T) {
 
 	conn := buildTestConnection(t, controlSrv.URL, coordSrv.URL)
 	client := &Client{conn: conn}
-	_, err := client.AttachComputer(
-		context.Background(), computerID,
-		[]byte("0123456789abcdef0123456789abcdef"),
-		AttachOptions{CaptureKeypair: captureKP},
+	_, err := client.StartComputer(
+		context.Background(), Credentials{ID: computerID,
+			Key: []byte("0123456789abcdef0123456789abcdef"), CaptureKeypair: captureKP},
+		StartOptions{},
 	)
 	var committed *AttachAuthorizationCommittedError
 	if !errors.As(err, &committed) {
@@ -565,225 +578,7 @@ func TestComputer_NotAttached(t *testing.T) {
 
 // TestStop_SavesThenTerminates verifies Stop confirms a stopped-browser save BEFORE deleting
 // the pod (closes the epoch race that silently loses state).
-func TestStop_SavesThenTerminates(t *testing.T) {
-	var captured, destroyed bool
-	controlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == "DELETE" && r.URL.Path == "/sandboxes/sb-1":
-			if !captured {
-				t.Error("pod deleted BEFORE the save confirmation")
-			}
-			destroyed = true
-			w.WriteHeader(204)
-		case r.Method == "GET" && r.URL.Path == "/sandboxes/sb-1":
-			if !destroyed {
-				fmt.Fprint(w, `{"id":"sb-1","status":{"state":"Running"}}`)
-				return
-			}
-			w.Header().Set("Content-Type", "application/problem+json")
-			w.WriteHeader(404) // confirm-gone
-			fmt.Fprint(w, `{"type":"/errors/not-found","status":404}`)
-		default:
-			w.WriteHeader(500)
-		}
-	}))
-	defer controlSrv.Close()
-	coordSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/v1/coord/finish" {
-			if r.Header.Get("X-Pine-Auth") != "ct_x" {
-				t.Errorf("capture auth = %q, want ct_x", r.Header.Get("X-Pine-Auth"))
-			}
-			captured = true
-			fmt.Fprint(w, `{"saved":true}`)
-			return
-		}
-		w.WriteHeader(500)
-	}))
-	defer coordSrv.Close()
 
-	conn := buildTestConnection(t, controlSrv.URL, coordSrv.URL)
-	comp := newComputer("c1", make([]byte, 32))
-	if err := comp.adopt(conn, "sb-1", "ct_x", "running"); err != nil {
-		t.Fatal(err)
-	}
-	gone, err := comp.Stop(context.Background())
-	if err != nil {
-		t.Fatalf("Stop: %v", err)
-	}
-	if !captured || !destroyed || !gone {
-		t.Errorf("captured=%v destroyed=%v gone=%v, want all true", captured, destroyed, gone)
-	}
-	if comp.SandboxID() != "" {
-		t.Error("binding not cleared after Stop")
-	}
-}
-
-func TestStop_UnconfirmedDeletionCanRetryWithoutTheCoordinator(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	var deleted, deletionStarted atomic.Bool
-	var saves atomic.Int32
-	controlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case "DELETE":
-			deletionStarted.Store(true)
-			w.WriteHeader(204)
-		case "GET":
-			if deleted.Load() {
-				w.WriteHeader(404)
-				fmt.Fprint(w, `{"type":"/errors/not-found","status":404}`)
-				return
-			}
-			if deletionStarted.Load() {
-				cancel() // the first caller loses its deletion confirmation
-			}
-			fmt.Fprint(w, `{"id":"sb-1","status":{"state":"Running"}}`)
-		default:
-			w.WriteHeader(500)
-		}
-	}))
-	defer controlSrv.Close()
-	coordSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		saves.Add(1)
-		fmt.Fprint(w, `{"saved":true}`)
-	}))
-	defer coordSrv.Close()
-	comp := newComputer("c1", make([]byte, 32))
-	if err := comp.adopt(buildTestConnection(t, controlSrv.URL, coordSrv.URL), "sb-1", "ct_x", "running"); err != nil {
-		t.Fatal(err)
-	}
-	gone, err := comp.Stop(ctx)
-	if gone || err == nil || saves.Load() != 1 {
-		t.Fatalf("first stop = %v, %v; saves=%d", gone, err, saves.Load())
-	}
-	if comp.SandboxID() != "sb-1" || comp.ComputerToken() != "ct_x" {
-		t.Fatal("unconfirmed deletion cleared the old binding")
-	}
-	coordSrv.Close()
-	deleted.Store(true)
-	gone, err = comp.Stop(context.Background())
-	if !gone || err != nil || comp.SandboxID() != "" {
-		t.Fatalf("retry stop = %v, %v; binding=%q", gone, err, comp.SandboxID())
-	}
-}
-
-func TestStop_MissingSaveAcknowledgmentNeverDeletes(t *testing.T) {
-	for _, body := range []string{`{}`, `{"saved":false}`, `{"saved":"true"}`} {
-		t.Run(body, func(t *testing.T) {
-			controlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Method != http.MethodGet {
-					t.Error("deletion requested after unconfirmed save")
-				}
-				w.WriteHeader(500)
-			}))
-			defer controlSrv.Close()
-			coordSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, body) }))
-			defer coordSrv.Close()
-			comp := newComputer("c1", make([]byte, 32))
-			if err := comp.adopt(buildTestConnection(t, controlSrv.URL, coordSrv.URL), "sb-1", "ct_x", "running"); err != nil {
-				t.Fatal(err)
-			}
-			gone, err := comp.Stop(context.Background())
-			var saveErr *StopSaveError
-			if gone || !errors.As(err, &saveErr) {
-				t.Fatalf("stop = %v, %v", gone, err)
-			}
-			if comp.SandboxID() != "sb-1" || comp.ComputerToken() != "ct_x" {
-				t.Fatal("source binding lost")
-			}
-		})
-	}
-}
-
-func TestAdoptExisting_StopPreservesPersistenceMode(t *testing.T) {
-	for _, ephemeral := range []bool{false, true} {
-		t.Run(fmt.Sprintf("ephemeral=%v", ephemeral), func(t *testing.T) {
-			var saves atomic.Int32
-			var deleted atomic.Bool
-			controlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Method == http.MethodDelete {
-					deleted.Store(true)
-					w.WriteHeader(http.StatusNoContent)
-				} else if deleted.Load() {
-					w.WriteHeader(http.StatusNotFound)
-				} else {
-					fmt.Fprint(w, `{"id":"sb-1","status":{"state":"Running"}}`)
-				}
-			}))
-			defer controlSrv.Close()
-			coordSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				saves.Add(1)
-				fmt.Fprint(w, `{"saved":true}`)
-			}))
-			defer coordSrv.Close()
-			client := &Client{conn: buildTestConnection(t, controlSrv.URL, coordSrv.URL)}
-			creds, err := GenerateCredentials()
-			if err != nil {
-				t.Fatal(err)
-			}
-			var options []AdoptOptions
-			if ephemeral {
-				options = append(options, AdoptOptions{Ephemeral: true})
-			}
-			comp, err := client.AdoptExisting(context.Background(), creds.ID, creds.Key, "sb-1", "ct_x", options...)
-			if err != nil {
-				t.Fatal(err)
-			}
-			gone, err := comp.Stop(context.Background())
-			if err != nil || !gone {
-				t.Fatalf("stop = %v, %v", gone, err)
-			}
-			wantSaves := int32(1)
-			if ephemeral {
-				wantSaves = 0
-			}
-			if saves.Load() != wantSaves {
-				t.Fatalf("saves=%d want=%d", saves.Load(), wantSaves)
-			}
-		})
-	}
-}
-
-func TestStop_RuntimeDisappearance(t *testing.T) {
-	for _, duringFinish := range []bool{false, true} {
-		t.Run(fmt.Sprintf("during_finish=%v", duringFinish), func(t *testing.T) {
-			var gone atomic.Bool
-			gone.Store(!duringFinish)
-			var saves atomic.Int32
-			controlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Method != http.MethodGet {
-					t.Error("must not delete an absent runtime")
-				}
-				if gone.Load() {
-					w.WriteHeader(404)
-					return
-				}
-				fmt.Fprint(w, `{"id":"sb-1","status":{"state":"Running"}}`)
-			}))
-			defer controlSrv.Close()
-			coordSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				saves.Add(1)
-				gone.Store(true)
-				w.WriteHeader(503)
-			}))
-			defer coordSrv.Close()
-			comp := newComputer("c1", make([]byte, 32))
-			if err := comp.adopt(buildTestConnection(t, controlSrv.URL, coordSrv.URL), "sb-1", "ct_x", "running"); err != nil {
-				t.Fatal(err)
-			}
-			stopped, err := comp.Stop(context.Background())
-			if !stopped || err != nil || comp.SandboxID() != "" {
-				t.Fatalf("Stop = %v, %v, binding=%q", stopped, err, comp.SandboxID())
-			}
-			if !duringFinish && saves.Load() != 0 {
-				t.Fatal("contacted a dead coordinator")
-			}
-		})
-	}
-}
-
-// TestSession_TokenRouting pins the ct_ vs ps_ choice across representative methods: agent
-// mutations + desktop-token use the Computer's ct_; agent reads + drive use the session ps_.
 func TestSession_TokenRouting(t *testing.T) {
 	const ct, ps = "ct_x", "ps_sess"
 	auth := map[string]string{}

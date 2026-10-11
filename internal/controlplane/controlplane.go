@@ -38,33 +38,18 @@ func NewClient(raw *transport.Client, src TokenSource, specMajor int) *Client {
 	}
 }
 
-// Create provisions a pod. body is the sandbox-lifecycle create payload (assembled by the
-// caller); idempotencyKey is sent as Idempotency-Key when non-empty. Returns the parsed
-// SandboxInfo (202 async). No blind retry — a create may have applied; only the safe
-// 401 → token-refresh is retried.
-func (c *Client) Create(ctx context.Context, body any, idempotencyKey string) (*SandboxInfo, error) {
-	return c.create(ctx, "/sandboxes", body, idempotencyKey)
-}
-
 // CreateComputer provisions a Computer sandbox. The body intentionally contains
 // only caller-owned settings; the lifecycle server expands the project's signed
 // runtime policy into the operator-managed platform configuration.
-func (c *Client) CreateComputer(ctx context.Context, body any) (*SandboxInfo, error) {
-	return c.create(ctx, "/computer-sandboxes", body, "")
-}
-
-func (c *Client) create(ctx context.Context, path string, body any, idempotencyKey string) (*SandboxInfo, error) {
+func (c *Client) CreateComputer(ctx context.Context, body map[string]any) (*SandboxInfo, error) {
 	b, err := json.Marshal(body)
 	if err != nil {
 		return nil, fmt.Errorf("pinesandbox: marshal create payload: %w", err)
 	}
-	extra := map[string]string{}
-	if idempotencyKey != "" {
-		extra["Idempotency-Key"] = idempotencyKey
-	}
-	// No create retry: the lifecycle server does not promise Idempotency-Key
-	// deduplication, and a transport fault can happen after allocation applied.
-	resp, err := c.do(ctx, "POST", path, b, extra, false)
+	const path = "/computer-sandboxes"
+	// A create ID permits identical retries without extending runtime expiry.
+	createID, _ := body["create_id"].(string)
+	resp, err := c.do(ctx, "POST", path, b, nil, createID != "")
 	if err != nil {
 		return nil, err
 	}
@@ -72,6 +57,23 @@ func (c *Client) create(ctx context.Context, path string, body any, idempotencyK
 		return nil, statusError("POST", path, c.raw.Host(), resp)
 	}
 	return ParseSandboxInfo(resp.Body)
+}
+
+// Stop admits a durable save-before-release operation. Acceptance is not completion.
+func (c *Client) Stop(ctx context.Context, sandboxID, operationID string) error {
+	path := "/sandboxes/" + url.PathEscape(sandboxID) + "/stop"
+	body, err := json.Marshal(map[string]string{"id": operationID})
+	if err != nil {
+		return err
+	}
+	resp, err := c.do(ctx, "POST", path, body, nil, true)
+	if err != nil {
+		return err
+	}
+	if !okStatus(resp.Status, 202, 404) {
+		return statusError("POST", path, c.raw.Host(), resp)
+	}
+	return nil
 }
 
 // Get fetches a sandbox by id.
@@ -84,7 +86,11 @@ func (c *Client) Get(ctx context.Context, sandboxID string) (*SandboxInfo, error
 	if resp.Status != 200 {
 		return nil, statusError("GET", path, c.raw.Host(), resp)
 	}
-	return ParseSandboxInfo(resp.Body)
+	info, err := ParseSandboxInfo(resp.Body)
+	if err == nil {
+		info.ETag = resp.Headers.Get("ETag")
+	}
+	return info, err
 }
 
 // Destroy deletes a sandbox. Idempotent: a 404 (already gone) is success.
@@ -100,31 +106,39 @@ func (c *Client) Destroy(ctx context.Context, sandboxID string) error {
 	return nil
 }
 
-// Pause freezes the pod in place (state retained on the same pod, NOT broker capture — so
-// resume is fast + same-pod). Returns false if the sandbox was already paused / not in a
-// pausable state (409); any other non-OK status is an error.
-func (c *Client) Pause(ctx context.Context, sandboxID string) (bool, error) {
+// Release deletes exactly the observed incarnation and lifecycle version.
+func (c *Client) Release(ctx context.Context, sandboxID, etag string) error {
+	path := "/sandboxes/" + url.PathEscape(sandboxID)
+	resp, err := c.do(ctx, "DELETE", path, nil, map[string]string{"If-Match": etag}, false)
+	if err != nil {
+		return err
+	}
+	if !okStatus(resp.Status, 204, 404) {
+		return statusError("DELETE", path, c.raw.Host(), resp)
+	}
+	return nil
+}
+
+// Pause requests retained memory capture. Acceptance is not completion.
+func (c *Client) Pause(ctx context.Context, sandboxID string) error {
 	return c.transition(ctx, sandboxID, "pause")
 }
 
-// Resume unfreezes a paused pod. Returns false on a 409 (not paused).
-func (c *Client) Resume(ctx context.Context, sandboxID string) (bool, error) {
+// Resume requests restoration of retained memory. Acceptance is not completion.
+func (c *Client) Resume(ctx context.Context, sandboxID string) error {
 	return c.transition(ctx, sandboxID, "resume")
 }
 
-func (c *Client) transition(ctx context.Context, sandboxID, verb string) (bool, error) {
+func (c *Client) transition(ctx context.Context, sandboxID, verb string) error {
 	path := "/sandboxes/" + url.PathEscape(sandboxID) + "/" + verb
 	resp, err := c.do(ctx, "POST", path, nil, nil, false)
 	if err != nil {
-		return false, err
-	}
-	if resp.Status == 409 {
-		return false, nil
+		return err
 	}
 	if !okStatus(resp.Status, 200, 202, 204) {
-		return false, statusError("POST", path, c.raw.Host(), resp)
+		return statusError("POST", path, c.raw.Host(), resp)
 	}
-	return true, nil
+	return nil
 }
 
 // do sends the request with the project JWS; on a 401 it forces ONE token refresh and

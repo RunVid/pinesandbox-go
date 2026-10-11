@@ -102,6 +102,11 @@
       "retryable": true
     },
     {
+      "type": "/errors/agent-admission-unavailable",
+      "status": 503,
+      "retryable": true
+    },
+    {
       "type": "/errors/session-limit",
       "status": 409,
       "retryable": false

@@ -10,9 +10,12 @@ import (
 )
 
 type fakeCP struct {
+	stop     func(context.Context, string, string) error
 	get      func(ctx context.Context, id string) (*controlplane.SandboxInfo, error)
 	destroy  func(ctx context.Context, id string) error
 	destroys int
+	pause    func(context.Context, string) error
+	resume   func(context.Context, string) error
 }
 
 func (f *fakeCP) Get(ctx context.Context, id string) (*controlplane.SandboxInfo, error) {
@@ -25,6 +28,13 @@ func (f *fakeCP) Destroy(ctx context.Context, id string) error {
 		return f.destroy(ctx, id)
 	}
 	return nil
+}
+
+func (f *fakeCP) Pause(ctx context.Context, id string) error         { return f.pause(ctx, id) }
+func (f *fakeCP) Release(ctx context.Context, id, etag string) error { return f.destroy(ctx, id) }
+func (f *fakeCP) Resume(ctx context.Context, id string) error        { return f.resume(ctx, id) }
+func (f *fakeCP) Stop(ctx context.Context, id, operationID string) error {
+	return f.stop(ctx, id, operationID)
 }
 
 // statusSequence returns a Get func yielding the given statuses in order (last repeats).

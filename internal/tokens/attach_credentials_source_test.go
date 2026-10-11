@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"go.pinesandbox.io/computer/internal/base/problem"
 	"go.pinesandbox.io/computer/internal/base/transport"
 )
 
@@ -136,6 +137,30 @@ func TestAvailableLocationsRejectsMalformedResponse(t *testing.T) {
 	var discovery *LocationDiscoveryError
 	if _, err := s.AvailableLocations(context.Background()); !errors.As(err, &discovery) {
 		t.Fatalf("err = %T (%v), want *LocationDiscoveryError", err, err)
+	}
+}
+
+func TestAvailableLocationsInvalidKey(t *testing.T) {
+	s := newAttachSource(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusUnauthorized)
+		fmt.Fprint(w, `{"type":"INVALID_API_KEY","title":"Unauthorized","status":401}`)
+	})
+	_, err := s.AvailableLocations(context.Background())
+	var discovery *LocationDiscoveryError
+	if !errors.As(err, &discovery) {
+		t.Fatalf("err = %T (%v), want *LocationDiscoveryError", err, err)
+	}
+	var invalid *InvalidClientKey
+	if !errors.As(err, &invalid) {
+		t.Fatalf("err = %T (%v), want it to wrap *InvalidClientKey", err, err)
+	}
+	var ae *problem.APIError
+	if !errors.As(err, &ae) || ae.Status != http.StatusUnauthorized {
+		t.Fatalf("err = %v, want the 401 APIError in the chain", err)
+	}
+	if !strings.Contains(err.Error(), "invalid project client key") {
+		t.Fatalf("message = %q", err.Error())
 	}
 }
 

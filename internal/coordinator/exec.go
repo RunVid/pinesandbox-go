@@ -43,6 +43,7 @@ func (c *Client) Exec(ctx context.Context, token, name, command string, opts Exe
 	defer sr.Body.Close()
 
 	res := &ExecResult{}
+	completed, failed := false, false
 	for frame, ferr := range sse.Frames(sr.Body) {
 		if ferr != nil {
 			return res, ferr
@@ -55,11 +56,21 @@ func (c *Client) Exec(ctx context.Context, token, name, command string, opts Exe
 			continue // tolerate a non-JSON frame (e.g. a stray keepalive)
 		}
 		accumulate(res, ev)
+		switch ev["type"] {
+		case "execution_complete":
+			completed = true
+		case "error":
+			failed = true
+		}
 		if fn != nil {
 			if err := fn(ev); err != nil {
 				return res, err
 			}
 		}
+	}
+	if res.ExitCode == nil && completed && !failed {
+		zero := 0
+		res.ExitCode = &zero
 	}
 	return res, nil
 }
@@ -97,11 +108,6 @@ func accumulate(res *ExecResult, ev map[string]any) {
 			res.Error = s
 		} else if text != "" {
 			res.Error = text
-		}
-	case "execution_complete":
-		if res.ExitCode == nil { // a clean complete with no prior error ⇒ exit 0
-			zero := 0
-			res.ExitCode = &zero
 		}
 	}
 	// Defensive: honor a top-level exit_code if a future wire adds one (no-op on today's).

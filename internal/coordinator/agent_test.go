@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -253,3 +255,31 @@ func TestDriveTrack(t *testing.T) {
 }
 
 // The typed agent/control event-iterator tests live in stream_test.go.
+
+// Acceptance can precede a lost response. Retrying this mutation could start
+// a second turn if the first completes before the retry reaches the server.
+func TestAgentRunDoesNotRetryLostResponse(t *testing.T) {
+	var calls atomic.Int32
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/sessions/s/agent/run" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		if r.Header.Get("Idempotency-Key") != "" {
+			t.Error("Run must not claim replay-safe admission")
+		}
+		_, _ = io.Copy(io.Discard, r.Body)
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		_ = conn.Close()
+	})
+	if _, err := c.AgentRun(context.Background(), "ct_a", "s", "g", AgentRunOptions{}); err == nil {
+		t.Fatal("lost response must reach the caller")
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("Run sent %d requests, want 1", got)
+	}
+}

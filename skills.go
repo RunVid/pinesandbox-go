@@ -83,10 +83,10 @@ func (c *Computer) DeactivateSkill(ctx context.Context, name string) (json.RawMe
 	return coord.DeactivateSkill(ctx, ct, name)
 }
 
-// SetSkillEnabled switches one of Pine's standard or feature skills on or off
-// for the agent processes this Computer starts next (raw result: the skill as
-// the next agent is offered it, and whether the switch changed). Core,
-// engine, and external skills cannot be switched; learned skills use
+// SetSkillEnabled switches one of Pine's skills that ListSkills marks
+// switchable on or off for the agent processes this Computer starts next (raw
+// result: the skill as the next agent is offered it, and whether the switch
+// changed). Other Pine skills cannot be switched; learned skills use
 // ActivateSkill and DeactivateSkill. A running agent keeps its catalog until
 // its session's agent is reset.
 func (c *Computer) SetSkillEnabled(ctx context.Context, name string, enabled bool) (json.RawMessage, error) {
@@ -97,8 +97,8 @@ func (c *Computer) SetSkillEnabled(ctx context.Context, name string, enabled boo
 	return coord.SetSkillEnabled(ctx, ct, name, enabled)
 }
 
-// Capabilities returns what this Computer can do for its binding — each
-// product feature with its state — and the limits it enforces (raw).
+// Capabilities returns the product features this Computer can use for its
+// binding and the limits it enforces on your calls (raw).
 func (c *Computer) Capabilities(ctx context.Context) (json.RawMessage, error) {
 	coord, ct, err := c.bound()
 	if err != nil {

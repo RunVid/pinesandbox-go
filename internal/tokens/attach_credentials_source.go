@@ -86,6 +86,33 @@ type CredentialsRequest struct {
 	Ephemeral bool
 }
 
+// BindingReference is an authorization revision, not runtime health or credentials.
+type BindingReference struct {
+	ComputerID      string `json:"computer_id"`
+	BindingRevision *int64 `json:"binding_revision"`
+	SandboxID       string `json:"sandbox_id"`
+}
+
+func (s *AttachCredentialsSource) CurrentBinding(ctx context.Context, computerID string) (*BindingReference, error) {
+	resp, err := s.client.Do(ctx, http.MethodGet, registerPath+"/"+computerID, transport.Request{
+		Headers: map[string]string{"Authorization": "Bearer " + s.apiKey},
+	})
+	if err != nil {
+		if ae, ok := asAPIError(err); ok {
+			if ae.Status == http.StatusNotFound {
+				return nil, &UnknownComputerError{tokenBaseFrom("Computer not found", ae)}
+			}
+			return nil, s.generic(ae, "computer binding lookup")
+		}
+		return nil, err
+	}
+	var result BindingReference
+	if err := json.Unmarshal(resp.Body, &result); err != nil || result.ComputerID != computerID || result.BindingRevision == nil || *result.BindingRevision < 0 {
+		return nil, fmt.Errorf("pinesandbox: computer binding response was malformed")
+	}
+	return &result, nil
+}
+
 // RegisterComputer registers computer_id into the portal ownership registry (idempotent
 // for the same project; 409/422 for a cross-project duplicate).
 func (s *AttachCredentialsSource) RegisterComputer(ctx context.Context, computerID string, location *ComputerLocation) error {
@@ -129,6 +156,13 @@ func (s *AttachCredentialsSource) AvailableLocations(ctx context.Context) (*Avai
 		}
 		if ae.Status == http.StatusForbidden {
 			return nil, &ProjectAccessDenied{tokenBaseFrom("project or key may not discover locations", ae)}
+		}
+		if ae.Status == http.StatusUnauthorized {
+			// Stay a *LocationDiscoveryError for existing callers, and wrap the
+			// same *InvalidClientKey that project-token minting returns.
+			base := tokenBaseFrom("invalid project client key (unknown or revoked pk_)", ae)
+			base.Cause = &InvalidClientKey{tokenBaseFrom("unknown or revoked project client key", ae)}
+			return nil, &LocationDiscoveryError{base}
 		}
 		return nil, &LocationDiscoveryError{tokenBaseFrom("portal location discovery failed", ae)}
 	}

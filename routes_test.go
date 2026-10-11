@@ -15,7 +15,7 @@ import (
 // spec rename/removal of a route the SDK depends on fails CI). The per-method httptest tests
 // pin that the methods actually send these paths; this list pins them to the contract.
 var sdkRoutes = []string{
-	// control plane (sandbox-lifecycle)
+	// public Computer lifecycle
 	"POST /computer-sandboxes",
 	"GET /sandboxes/{id}",
 	"DELETE /sandboxes/{id}",

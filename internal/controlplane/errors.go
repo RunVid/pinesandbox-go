@@ -117,7 +117,7 @@ func statusError(method, path, host string, resp *transport.Response) error {
 		return &ForbiddenError{b}
 	case status == 404:
 		return &NotFoundError{b}
-	case status == 409:
+	case status == 409 || status == 412:
 		return &ConflictError{b}
 	case status == 422:
 		return &UnprocessableEntityError{b}

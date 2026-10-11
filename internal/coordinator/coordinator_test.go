@@ -154,6 +154,32 @@ func TestCreateSession_BodyAndAuth(t *testing.T) {
 	}
 }
 
+// A Computer that fails to set a session up answers with a retryable 500
+// /errors/internal problem. The SDK surfaces the server's judgment and, as for
+// any POST, doesn't replay the create itself.
+func TestCreateSession_SetupFailureIsRetryableServerError(t *testing.T) {
+	calls := 0
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprint(w, `{"type":"/errors/internal","title":"Internal Server Error","status":500,`+
+			`"detail":"the Computer couldn't set up the session; try again","request_id":"req_1","retryable":true}`)
+	})
+
+	_, err := c.CreateSession(context.Background(), "ct_admin", CreateSessionOptions{Name: "beta", Browser: true})
+	var apiErr *problem.APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("CreateSession error = %v, want a *problem.APIError", err)
+	}
+	if apiErr.Status != 500 || apiErr.ProblemType != "/errors/internal" || !apiErr.Retryable || apiErr.RequestID != "req_1" {
+		t.Errorf("APIError = %+v, want a retryable 500 /errors/internal with its request id", apiErr)
+	}
+	if calls != 1 {
+		t.Errorf("POST /sessions sent %d times, want 1", calls)
+	}
+}
+
 func TestCreateSession_BlindSent(t *testing.T) {
 	var body map[string]any
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {

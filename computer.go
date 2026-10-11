@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -33,6 +34,17 @@ type ComputerLocation struct {
 	Mode    string `json:"mode,omitempty"`
 }
 
+// StartOptions configures a fresh runtime for saved credentials. Identity, keys
+// and ephemeral mode belong to Credentials; Start reads the current binding.
+type StartOptions struct {
+	Timeout          time.Duration // runtime lifetime, default 300s
+	ReadyTimeout     time.Duration // allocation readiness budget, default 300s
+	Location         *ComputerLocation
+	Metadata         map[string]string
+	MaxBindAttempts  int
+	BindReadyTimeout time.Duration
+}
+
 // AttachOptions configures CreateComputer / AttachComputer / Computer.Attach.
 type AttachOptions struct {
 	// Credentials reuses a pre-generated identity (CreateComputer only); empty mints one.
@@ -53,8 +65,8 @@ type AttachOptions struct {
 	// Computer; later attaches retain the last location when omitted and may
 	// replace it after Stop or Kill.
 	Location *ComputerLocation
-	// BindingRevision is the last Portal attach revision persisted by the
-	// integrator. Zero is correct for a never-attached/legacy Computer.
+	// BindingRevision is used by low-level Computer.Attach. Client.AttachComputer
+	// reads the current binding and ignores this value.
 	BindingRevision int64
 
 	// Ephemeral binds an access lease ONLY — no persistence. The attach carries
@@ -86,12 +98,11 @@ type Computer struct {
 	// coordinator bind fails and the Computer itself cannot be returned.
 	lastAuthorizedSandboxID string
 
-	mu              sync.Mutex
-	conn            *Connection
-	sandbox         *SandboxHandle
-	finishedSandbox *SandboxHandle // successful save retained across deletion retries
-	coord           *coordinator.Client
-	computerToken   string // ct_
+	mu            sync.Mutex
+	conn          *Connection
+	sandbox       *SandboxHandle
+	coord         *coordinator.Client
+	computerToken string // ct_
 	// ephemeral records that this Computer was bound access-lease-only; Stop
 	// reads it to skip the pre-terminate checkpoint.
 	ephemeral bool
@@ -143,8 +154,8 @@ func (c *Computer) ID() string { return c.id }
 // copy — mutating it does not affect the Computer's bound key.
 func (c *Computer) Key() []byte { return cloneKey(c.key) }
 
-// BindingRevision is the last Portal attach authorization revision. Persist
-// it with the integrator-owned binding and pass it to the next AttachComputer.
+// BindingRevision is diagnostic metadata for the latest attach authorization.
+// Client.StartComputer reads the current revision; applications need not save it.
 func (c *Computer) BindingRevision() int64 {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -168,6 +179,27 @@ func (c *Computer) CaptureKeypair() *CaptureKeypair {
 		return nil
 	}
 	return c.captureKeypairs[c.captureGen].clone()
+}
+
+// Credentials returns a copy of the caller-owned secrets. Save them before
+// Create, and again only after changing keys. It contains no live runtime tokens.
+func (c *Computer) Credentials() Credentials {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	result := Credentials{ID: c.id, Key: cloneKey(c.key), Ephemeral: c.ephemeral,
+		CaptureKeypair: c.captureKeypairs[c.captureGen].clone(), PriorKeys: map[int][]byte{}}
+	for generation, kp := range c.captureKeypairs {
+		if generation != c.captureGen {
+			result.PriorCaptureKeypairs = append(result.PriorCaptureKeypairs, kp.clone())
+		}
+	}
+	sort.Slice(result.PriorCaptureKeypairs, func(i, j int) bool {
+		return result.PriorCaptureKeypairs[i].Generation < result.PriorCaptureKeypairs[j].Generation
+	})
+	for version, key := range c.priorKeys {
+		result.PriorKeys[version] = cloneKey(key)
+	}
+	return result
 }
 
 // SandboxID is the bound pod's sandbox id (empty if not attached).
@@ -401,14 +433,17 @@ func (c *Computer) Attach(ctx context.Context, conn *Connection, opts AttachOpti
 		readyTimeout = defaultReadyTimeout
 	}
 	// Allocation and readiness share a budget independent of sandbox lifetime.
-	// Bind keeps its own budget; the caller's deadline still bounds both phases.
+	// Bind has a separate budget, also bounded by the caller's context.
 	readyCtx, cancel := context.WithTimeout(ctx, readyTimeout)
 	defer cancel()
 
-	// Computer create is deliberately single-shot. The lifecycle server does not
-	// currently promise create idempotency, so retrying an ambiguous transport
-	// failure could allocate a second pod.
-	info, err := conn.controlPlane.CreateComputer(readyCtx, buildComputerCreateBody(timeout, opts))
+	createID, err := uuidV7()
+	if err != nil {
+		return err
+	}
+	body := buildComputerCreateBody(timeout, opts)
+	body["create_id"] = createID
+	info, err := conn.controlPlane.CreateComputer(readyCtx, body)
 	if err != nil {
 		return err
 	}
@@ -509,43 +544,56 @@ func (c *Computer) adopt(conn *Connection, sandboxID, computerToken, status stri
 	return nil
 }
 
-// Stop saves supported browser state before deleting the sandbox. A save error
-// retains the source binding. true confirms the sandbox record is gone.
-// An already-absent runtime is stopped, with its final save outcome unknown.
+// Status observes this binding through the lifecycle service. Unlike Alive,
+// it preserves errors: NotFound confirms runtime-record absence; a transport
+// or authorization error does not. It never resumes or replaces the runtime.
+func (c *Computer) Status(ctx context.Context) (string, error) {
+	c.mu.Lock()
+	sandbox := c.sandbox
+	c.mu.Unlock()
+	if sandbox == nil {
+		return "", fmt.Errorf("pinesandbox: Computer %s has no runtime binding", c.id)
+	}
+	info, err := sandbox.cp.Get(ctx, sandbox.id)
+	if err != nil {
+		return "", err
+	}
+	return info.Status, nil
+}
+
+// Pause retains live memory, the binding and session credentials. It waits for
+// Paused, bounded by six minutes or the caller's earlier context deadline.
+func (c *Computer) Pause(ctx context.Context) error {
+	return c.transitionMemory(ctx, "paused")
+}
+
+// Resume restores retained memory and waits for Running with the same budget
+// as Pause. It never creates a replacement binding or falls back to Start.
+func (c *Computer) Resume(ctx context.Context) error {
+	return c.transitionMemory(ctx, statusRunning)
+}
+
+func (c *Computer) transitionMemory(ctx context.Context, target string) error {
+	c.mu.Lock()
+	sandbox := c.sandbox
+	c.mu.Unlock()
+	if sandbox == nil {
+		return fmt.Errorf("pinesandbox: Computer %s has no retained runtime", c.id)
+	}
+	return sandbox.transitionMemory(ctx, target)
+}
+
+// Stop admits server-owned save-before-release, then waits for compute release.
+// A timeout only ends this wait. Another backend can continue from a saved handle.
+// After the runtime record is gone its final save outcome is unknown.
 func (c *Computer) Stop(ctx context.Context) (bool, error) {
 	c.mu.Lock()
-	sandbox, coord, ct, ephemeral := c.sandbox, c.coord, c.computerToken, c.ephemeral
-	finished := c.finishedSandbox == sandbox
+	sandbox := c.sandbox
 	c.mu.Unlock()
 	if sandbox == nil {
 		return true, nil
 	}
-	if sandbox.gone(ctx) {
-		c.reset()
-		return true, nil
-	}
-	if err := ctx.Err(); err != nil {
-		return false, err
-	}
-	if !ephemeral && !finished {
-		if coord == nil || ct == "" {
-			return false, &StopSaveError{Err: fmt.Errorf("coordinator binding unavailable")}
-		}
-		if err := coord.Finish(ctx, ct); err != nil {
-			// TTL expiry may race finish. Absence confirms stopped, not saved.
-			if sandbox.gone(ctx) {
-				c.reset()
-				return true, nil
-			}
-			return false, &StopSaveError{Err: err}
-		}
-		c.mu.Lock()
-		if c.sandbox == sandbox {
-			c.finishedSandbox = sandbox
-		}
-		c.mu.Unlock()
-	}
-	gone, err := sandbox.Terminate(ctx, defaultTerminateWait, defaultPollInterval)
+	gone, err := sandbox.Stop(ctx)
 	if gone {
 		c.reset()
 	}
@@ -598,7 +646,7 @@ func (c *Computer) Alive(ctx context.Context) bool {
 func (c *Computer) reset() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.sandbox, c.finishedSandbox, c.coord, c.computerToken = nil, nil, nil, ""
+	c.sandbox, c.coord, c.computerToken = nil, nil, ""
 }
 
 func (c *Computer) priorKeysCopy() map[int][]byte {
@@ -631,7 +679,10 @@ func ttlSecondsPtr(d time.Duration) *int {
 
 // StopSaveError means stop did not confirm persistence and retained its binding.
 // Unwrap exposes the underlying API problem, including its retry classification.
-type StopSaveError struct{ Err error }
+type StopSaveError struct {
+	Err       error
+	Retryable bool
+}
 
 func (e *StopSaveError) Error() string {
 	return "Computer stop could not confirm saved state: " + e.Err.Error()

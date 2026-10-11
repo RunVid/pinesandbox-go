@@ -10,7 +10,7 @@ import (
 )
 
 // TestSandboxWireConformsToSpec checks the control-plane sandbox wire type's JSON fields are
-// a subset of the sandbox-lifecycle Sandbox schema (the wire-axis drift gate for this layer).
+// a subset of the public ComputerRuntime schema (the wire-axis drift gate for this layer).
 // Skips on the mirror (the schema artifact isn't published with the SDK).
 func TestSandboxWireConformsToSpec(t *testing.T) {
 	b, err := os.ReadFile(filepath.Join("..", "..", "..", "contract", "computer-schemas.json"))
@@ -21,9 +21,9 @@ func TestSandboxWireConformsToSpec(t *testing.T) {
 	if err := json.Unmarshal(b, &schemas); err != nil {
 		t.Fatalf("parse schema artifact: %v", err)
 	}
-	props, ok := schemas["Sandbox"]
+	props, ok := schemas["ComputerRuntime"]
 	if !ok {
-		t.Fatal("spec schema \"Sandbox\" not found in artifact")
+		t.Fatal("spec schema \"ComputerRuntime\" not found in artifact")
 	}
 	set := make(map[string]bool, len(props))
 	for _, p := range props {
@@ -41,7 +41,7 @@ func TestSandboxWireConformsToSpec(t *testing.T) {
 			continue
 		}
 		if !set[name] {
-			t.Errorf("sandboxWire: json field %q is not a property of the spec Sandbox schema (props: %v)", name, props)
+			t.Errorf("sandboxWire: json field %q is not a property of the spec ComputerRuntime schema (props: %v)", name, props)
 		}
 	}
 }

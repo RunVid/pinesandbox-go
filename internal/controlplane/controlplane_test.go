@@ -52,20 +52,19 @@ const sandboxJSON = `{"id":"pine-abc","image":{"uri":"reg/img:1"},"status":{"sta
 	`"metadata":{"k":"v"},"entrypoint":["/bin/sh"],"expiresAt":"2026-01-01T01:00:00Z","createdAt":"2026-01-01T00:00:00Z"}`
 
 func TestCreate_SuccessAndHeaders(t *testing.T) {
-	var gotAuth, gotSpec, gotIdem, gotCT string
+	var gotAuth, gotSpec, gotCT string
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		gotAuth = r.Header.Get("Authorization")
 		gotSpec = r.Header.Get("Computer-Spec-Version")
-		gotIdem = r.Header.Get("Idempotency-Key")
 		gotCT = r.Header.Get("Content-Type")
-		if r.Method != "POST" || r.URL.Path != "/sandboxes" {
+		if r.Method != "POST" || r.URL.Path != "/computer-sandboxes" {
 			t.Errorf("got %s %s", r.Method, r.URL.Path)
 		}
 		w.WriteHeader(202)
 		fmt.Fprint(w, sandboxJSON)
 	}, &fakeSource{initial: "jws1"})
 
-	info, err := c.Create(context.Background(), map[string]any{"image": map[string]string{"uri": "reg/img:1"}}, "idem-1")
+	info, err := c.CreateComputer(context.Background(), map[string]any{"timeout": 3600})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -77,9 +76,6 @@ func TestCreate_SuccessAndHeaders(t *testing.T) {
 	}
 	if gotSpec != "1" {
 		t.Errorf("Computer-Spec-Version = %q, want 1", gotSpec)
-	}
-	if gotIdem != "idem-1" {
-		t.Errorf("Idempotency-Key = %q", gotIdem)
 	}
 	if gotCT != "application/json" {
 		t.Errorf("Content-Type = %q", gotCT)
@@ -144,24 +140,27 @@ func TestDestroy_Idempotent(t *testing.T) {
 	}
 }
 
-func TestPauseResume_409IsFalse(t *testing.T) {
-	cases := []struct {
-		status int
-		want   bool
-	}{{202, true}, {409, false}, {200, true}}
-	for _, tc := range cases {
-		c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-			if !strings.HasSuffix(r.URL.Path, "/pause") {
-				t.Errorf("path = %s", r.URL.Path)
+func TestPauseResume_PreservesConflict(t *testing.T) {
+	for _, verb := range []string{"pause", "resume"} {
+		for _, status := range []int{200, 202, 204, 409, 501} {
+			c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != "POST" || r.URL.Path != "/sandboxes/x/"+verb {
+					t.Errorf("request = %s %s", r.Method, r.URL.Path)
+				}
+				w.WriteHeader(status)
+			}, &fakeSource{initial: "jws1"})
+			request := c.Pause
+			if verb == "resume" {
+				request = c.Resume
 			}
-			w.WriteHeader(tc.status)
-		}, &fakeSource{initial: "jws1"})
-		got, err := c.Pause(context.Background(), "x")
-		if err != nil {
-			t.Fatalf("Pause(%d): %v", tc.status, err)
-		}
-		if got != tc.want {
-			t.Errorf("Pause(%d) = %v, want %v", tc.status, got, tc.want)
+			err := request(context.Background(), "x")
+			var conflict *ConflictError
+			if status == 409 && !errors.As(err, &conflict) {
+				t.Fatalf("%s: expected typed conflict, got %v", verb, err)
+			}
+			if (status < 400) != (err == nil) {
+				t.Fatalf("%s(%d): %v", verb, status, err)
+			}
 		}
 	}
 }
@@ -317,5 +316,31 @@ func TestSpecVersionMismatch(t *testing.T) {
 	var me *spec.MismatchError
 	if _, err := c.Get(context.Background(), "x"); !errors.As(err, &me) {
 		t.Fatalf("err = %T (%v), want *spec.MismatchError", err, err)
+	}
+}
+
+func TestKeyedCreateReplaysLostReplyWithSameIdentity(t *testing.T) {
+	const createID = "11111111-1111-4111-8111-111111111111"
+	var calls int
+	var bodies []string
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, string(raw))
+		calls++
+		if calls == 1 {
+			conn, _, err := w.(http.Hijacker).Hijack()
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			_ = conn.Close() // Admission succeeded, its response was lost.
+			return
+		}
+		w.WriteHeader(202)
+		fmt.Fprint(w, `{"id":"same-runtime","status":{"state":"Pending"}}`)
+	}, &fakeSource{initial: "jws"})
+	info, err := c.CreateComputer(context.Background(), map[string]any{"timeout": 300, "create_id": createID})
+	if err != nil || info.ID != "same-runtime" || calls != 2 || bodies[0] != bodies[1] {
+		t.Fatalf("keyed retry: info=%+v err=%v calls=%d bodies=%v", info, err, calls, bodies)
 	}
 }

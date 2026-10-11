@@ -149,7 +149,11 @@ func TestE2E_J2_Persistence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateComputer: %v", err)
 	}
-	bindingRevision := comp.BindingRevision()
+	saved, err := json.Marshal(credentials)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer teardown(comp)
 
 	driveALittle(t, ctx1, comp, "persist")
 	if _, err := comp.Capture(ctx1); err != nil {
@@ -178,14 +182,27 @@ func TestE2E_J2_Persistence(t *testing.T) {
 		t.Fatalf("Stop: %v", err)
 	}
 
-	// Phase 2 — re-attach with the persisted identity, capture keypair, and
-	// binding revision onto a fresh pod. A successful bind == restore.
+	// Phase 2 — reload the saved value, rotate capture keys, and restore the
+	// old snapshot. Start must retain the old generation without a saved revision.
 	ctx2, cancel2 := newCtx(t)
 	defer cancel2()
-	re, err := c.AttachComputer(ctx2, credentials.ID, credentials.Key, pine.AttachOptions{
-		BindingRevision: bindingRevision,
-		CaptureKeypair:  credentials.CaptureKeypair,
-	})
+	var loaded pine.Credentials
+	if err := json.Unmarshal(saved, &loaded); err != nil {
+		t.Fatal(err)
+	}
+	loaded.PriorCaptureKeypairs = []*pine.CaptureKeypair{loaded.CaptureKeypair}
+	loaded.CaptureKeypair, err = pine.GenerateCaptureKeypair(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved, err = json.Marshal(loaded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(saved, &loaded); err != nil {
+		t.Fatal(err)
+	}
+	re, err := c.StartComputer(ctx2, loaded, pine.StartOptions{})
 	if err != nil {
 		t.Fatalf("re-attach (restore) failed: %v", err)
 	}

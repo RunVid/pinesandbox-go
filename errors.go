@@ -100,6 +100,10 @@ type (
 // not guess replay safety for transport failures: callers must apply the
 // operation-specific retry policy for timeouts and connection errors.
 func IsRetryable(err error) bool {
+	var stopErr *StopSaveError
+	if errors.As(err, &stopErr) {
+		return stopErr.Retryable
+	}
 	var apiErr *problem.APIError
 	return errors.As(err, &apiErr) && apiErr.Retryable
 }
@@ -177,23 +181,23 @@ type (
 // SDK; stop another of the project's Computers first. errors.As reaches CapacityExceededError.
 var ErrCapacityExceeded = controlplane.ErrCapacityExceeded
 
-// SandboxFailedError: the pod entered a terminal state (failed/terminated) before it
-// became Ready during attach.
+// SandboxFailedError: the runtime reported failed, terminated or unavailable
+// before completing the requested lifecycle operation. Unavailable may be retryable.
 type SandboxFailedError struct {
 	SandboxID string
 	State     string
 }
 
 func (e *SandboxFailedError) Error() string {
-	return fmt.Sprintf("pinesandbox: Computer pod %s entered terminal state %q before becoming Ready", e.SandboxID, e.State)
+	return fmt.Sprintf("pinesandbox: Computer pod %s reported %q before completing the lifecycle operation", e.SandboxID, e.State)
 }
 
-// ReadyTimeoutError: the pod did not become Ready within the attach timeout.
+// ReadyTimeoutError: allocation or a memory lifecycle operation exceeded its budget.
 type ReadyTimeoutError struct {
 	SandboxID string
 	LastState string
 }
 
 func (e *ReadyTimeoutError) Error() string {
-	return fmt.Sprintf("pinesandbox: Computer pod %s did not become Ready in time (last state %q)", e.SandboxID, e.LastState)
+	return fmt.Sprintf("pinesandbox: Computer pod %s did not complete the lifecycle operation in time (last state %q)", e.SandboxID, e.LastState)
 }

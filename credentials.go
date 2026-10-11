@@ -2,9 +2,12 @@ package pinesandbox
 
 import (
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"regexp"
+	"sort"
 	"time"
 )
 
@@ -15,9 +18,12 @@ var computerIDRE = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89
 // key is never sent in the clear — it rides the bind handshake HPKE-sealed to the coord's
 // ephemeral key.
 type Credentials struct {
-	ID             string
-	Key            []byte // 32 bytes
-	CaptureKeypair *CaptureKeypair
+	ID                   string
+	Key                  []byte // 32 bytes
+	CaptureKeypair       *CaptureKeypair
+	PriorCaptureKeypairs []*CaptureKeypair
+	PriorKeys            map[int][]byte
+	Ephemeral            bool
 }
 
 // String redacts the state key so a struct dump in a log can't leak it; GoString (%#v)
@@ -28,6 +34,182 @@ func (c Credentials) String() string {
 
 // GoString redacts the key under %#v.
 func (c Credentials) GoString() string { return c.String() }
+
+// The storage envelope is shared with Ruby. No runtime tokens or binding revision
+// belong here. These bytes contain secrets; applications own encrypted storage.
+type credentialsJSON struct {
+	Schema               int                  `json:"schema"`
+	ID                   string               `json:"id"`
+	Key                  string               `json:"key"`
+	Ephemeral            bool                 `json:"ephemeral"`
+	CaptureKeypair       *captureKeypairJSON  `json:"capture_keypair"`
+	PriorCaptureKeypairs []captureKeypairJSON `json:"prior_capture_keypairs"`
+	PriorKeys            []priorKeyJSON       `json:"prior_keys"`
+}
+type captureKeypairJSON struct {
+	Generation int    `json:"generation"`
+	PK         string `json:"pk"`
+	SK         string `json:"sk"`
+}
+type priorKeyJSON struct {
+	Version *int   `json:"version"`
+	Key     string `json:"key"`
+}
+
+func (c Credentials) validate() error {
+	if err := validateIdentity(c.ID, c.Key); err != nil {
+		return err
+	}
+	if !c.Ephemeral && c.CaptureKeypair == nil {
+		return fmt.Errorf("pinesandbox: persistent credentials require a capture keypair")
+	}
+	if err := c.CaptureKeypair.validate(); err != nil {
+		return err
+	}
+	seen := map[int]bool{}
+	for _, kp := range c.PriorCaptureKeypairs {
+		if kp == nil || c.CaptureKeypair == nil {
+			return fmt.Errorf("pinesandbox: prior capture keypairs require a current keypair and non-nil entries")
+		}
+		if err := kp.validate(); err != nil {
+			return err
+		}
+		if seen[kp.Generation] || kp.Generation >= c.CaptureKeypair.Generation {
+			return fmt.Errorf("pinesandbox: prior capture generations must be distinct and below current")
+		}
+		seen[kp.Generation] = true
+	}
+	for version, key := range c.PriorKeys {
+		if version == CurrentKeyVersion || len(key) != 32 {
+			return fmt.Errorf("pinesandbox: prior keys require a non-current version and 32 bytes")
+		}
+	}
+	return nil
+}
+
+func encodeCaptureKeypair(kp *CaptureKeypair) *captureKeypairJSON {
+	if kp == nil {
+		return nil
+	}
+	return &captureKeypairJSON{kp.Generation, base64.StdEncoding.EncodeToString(kp.PK), base64.StdEncoding.EncodeToString(kp.SK)}
+}
+
+// MarshalJSON encodes durable credentials, including retained keys needed to
+// restore older state. The result contains secrets, not encrypted storage.
+func (c Credentials) MarshalJSON() ([]byte, error) {
+	if err := c.validate(); err != nil {
+		return nil, err
+	}
+	wire := credentialsJSON{Schema: 1, ID: c.ID, Key: base64.StdEncoding.EncodeToString(c.Key), Ephemeral: c.Ephemeral,
+		CaptureKeypair: encodeCaptureKeypair(c.CaptureKeypair), PriorCaptureKeypairs: []captureKeypairJSON{}, PriorKeys: []priorKeyJSON{}}
+	for _, kp := range c.PriorCaptureKeypairs {
+		wire.PriorCaptureKeypairs = append(wire.PriorCaptureKeypairs, *encodeCaptureKeypair(kp))
+	}
+	sort.Slice(wire.PriorCaptureKeypairs, func(i, j int) bool {
+		return wire.PriorCaptureKeypairs[i].Generation < wire.PriorCaptureKeypairs[j].Generation
+	})
+	for version, key := range c.PriorKeys {
+		wire.PriorKeys = append(wire.PriorKeys, priorKeyJSON{&version, base64.StdEncoding.EncodeToString(key)})
+	}
+	sort.Slice(wire.PriorKeys, func(i, j int) bool { return *wire.PriorKeys[i].Version < *wire.PriorKeys[j].Version })
+	return json.Marshal(wire)
+}
+
+func decodeCredentialKey(s string) ([]byte, error) {
+	key, err := base64.StdEncoding.Strict().DecodeString(s)
+	if err != nil || len(key) != 32 || base64.StdEncoding.EncodeToString(key) != s {
+		return nil, fmt.Errorf("pinesandbox: credential key must be 32 bytes in strict Base64")
+	}
+	return key, nil
+}
+func decodeCaptureKeypair(wire *captureKeypairJSON) (*CaptureKeypair, error) {
+	if wire == nil {
+		return nil, nil
+	}
+	pk, err := decodeCredentialKey(wire.PK)
+	if err != nil {
+		return nil, err
+	}
+	sk, err := decodeCredentialKey(wire.SK)
+	if err != nil {
+		return nil, err
+	}
+	return &CaptureKeypair{Generation: wire.Generation, PK: pk, SK: sk}, nil
+}
+
+// UnmarshalJSON validates the shared storage format and replaces c only on success.
+func (c *Credentials) UnmarshalJSON(data []byte) error {
+	// encoding/json treats null as a zero value for scalars and slices. Reject
+	// it where the storage contract requires a boolean or collection.
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return fmt.Errorf("pinesandbox: malformed credentials JSON")
+	}
+	// Releases before the shared schema used encoding/json's exported Go
+	// field names. Read those saved records; always write the shared format.
+	if _, versioned := fields["schema"]; !versioned && fields["ID"] != nil {
+		var legacy struct {
+			ID             string
+			Key            []byte
+			CaptureKeypair *CaptureKeypair
+		}
+		if err := json.Unmarshal(data, &legacy); err != nil {
+			return fmt.Errorf("pinesandbox: malformed legacy credentials JSON")
+		}
+		next := Credentials{ID: legacy.ID, Key: legacy.Key, CaptureKeypair: legacy.CaptureKeypair}
+		if err := next.validate(); err != nil {
+			return err
+		}
+		*c = next
+		return nil
+	}
+	for _, name := range []string{"ephemeral", "prior_capture_keypairs", "prior_keys"} {
+		if raw, present := fields[name]; present && string(raw) == "null" {
+			return fmt.Errorf("pinesandbox: credentials field %s cannot be null", name)
+		}
+	}
+	var wire credentialsJSON
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return fmt.Errorf("pinesandbox: malformed credentials JSON")
+	}
+	if wire.Schema != 1 {
+		return fmt.Errorf("pinesandbox: unsupported credentials schema %d", wire.Schema)
+	}
+	key, err := decodeCredentialKey(wire.Key)
+	if err != nil {
+		return err
+	}
+	kp, err := decodeCaptureKeypair(wire.CaptureKeypair)
+	if err != nil {
+		return err
+	}
+	next := Credentials{ID: wire.ID, Key: key, CaptureKeypair: kp, Ephemeral: wire.Ephemeral, PriorKeys: map[int][]byte{}}
+	for i := range wire.PriorCaptureKeypairs {
+		prior, err := decodeCaptureKeypair(&wire.PriorCaptureKeypairs[i])
+		if err != nil {
+			return err
+		}
+		next.PriorCaptureKeypairs = append(next.PriorCaptureKeypairs, prior)
+	}
+	for _, prior := range wire.PriorKeys {
+		if prior.Version == nil {
+			return fmt.Errorf("pinesandbox: prior key is missing version")
+		}
+		if _, exists := next.PriorKeys[*prior.Version]; exists {
+			return fmt.Errorf("pinesandbox: duplicate prior key version")
+		}
+		key, err := decodeCredentialKey(prior.Key)
+		if err != nil {
+			return err
+		}
+		next.PriorKeys[*prior.Version] = key
+	}
+	if err := next.validate(); err != nil {
+		return err
+	}
+	*c = next
+	return nil
+}
 
 // GenerateCredentials mints a fresh Computer identity offline: a sortable UUIDv7 id + a
 // cryptographically random 32-byte state key. Equivalent to the Ruby

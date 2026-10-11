@@ -11,7 +11,7 @@ import (
 // schema-gate can't be: it checks the SDK doesn't SILENTLY extract one field of a
 // multi-field response and drop the rest (the next_before class of bug).
 //
-// specs/gen-multifield-responses.py discovers every coordinator 200 response with
+// specs/gen-multifield-responses.py discovers every public coordinator 200 response with
 // ≥2 top-level fields → contract/multifield-responses.json. This test asserts each
 // one is CONSCIOUSLY handled by this SDK, recorded in `handled` below as:
 //   - modeled:    returned as a typed DTO (the fields are surfaced)
@@ -37,40 +37,23 @@ func TestMultiFieldResponses_ConsciouslyHandled(t *testing.T) {
 		"getAgentResult":   "modeled: AgentResult (typed + .Raw)",
 
 		// raw — the method returns the FULL response body as json.RawMessage
-		"getSkill":           "raw: skill body json.RawMessage (full body)",
-		"getSkillVersion":    "raw: skill-version json.RawMessage (full body)",
-		"activateSkill":      "raw: skill-admin json.RawMessage (full body)",
-		"deactivateSkill":    "raw: skill-admin json.RawMessage (full body)",
-		"deleteSkillVersion": "raw: skill-admin json.RawMessage (full body)",
-		"setSkillEnabled":    "raw: skill-switch json.RawMessage (full body)",
-		"getCapabilities":    "raw: capability manifest json.RawMessage (full body)",
-		"captureCheckpoint":  "raw: Capture json.RawMessage (full body)",
-		"uploadFile":         "raw: UploadFile json.RawMessage (full body)",
-		"sessionEpoch":       "raw: Epoch json.RawMessage (full body)",
+		"getSkill":            "raw: skill body json.RawMessage (full body)",
+		"getSkillVersion":     "raw: skill-version json.RawMessage (full body)",
+		"activateSkill":       "raw: skill-admin json.RawMessage (full body)",
+		"deactivateSkill":     "raw: skill-admin json.RawMessage (full body)",
+		"deleteSkillVersion":  "raw: skill-admin json.RawMessage (full body)",
+		"setSkillEnabled":     "raw: skill-switch json.RawMessage (full body)",
+		"getCapabilities":     "raw: capability manifest json.RawMessage (full body)",
+		"captureCheckpoint":   "raw: Capture json.RawMessage (full body)",
+		"uploadFile":          "raw: UploadFile json.RawMessage (full body)",
+		"sessionEpoch":        "raw: Epoch json.RawMessage (full body)",
+		"claimDownloadOrphan": "raw: ClaimOrphanDownload json.RawMessage (full body)",
 
 		// not exposed — the endpoint is deliberately absent from this SDK
-		"getHealth": "not exposed (deliberate): pod-local Computer health for probes and " +
-			"operator diagnostics; the Computer gateway excludes health routes.",
-		"getReadiness": "not exposed (deliberate): kubelet allocation/control readiness; " +
-			"successful Computer attach remains the SDK readiness gate.",
-		"listAgentModelPresets": "not exposed (deliberate): internal testing surface — the " +
-			"validated resident model-preset catalog for the portal playground; spec-marked " +
-			"not part of the stable Computer contract. Add a typed catalog + " +
-			"AgentRunOptions.ModelPreset here if a Go integrator ever needs model selection.",
-		"getAgentBrowserFlags": "not exposed (deliberate): internal staff-only playground " +
-			"testing surface — the session's humanize/fill-commit browser flags for the portal " +
-			"admin playground; spec-marked x-internal, not part of the stable Computer contract. " +
-			"No Go integrator needs it.",
-		"setAgentBrowserFlags": "not exposed (deliberate): internal staff-only playground " +
-			"testing surface — the pre-first-run browser-flags config; see getAgentBrowserFlags.",
 		"getAgentEventsPage": "not exposed yet (deliberate): the paged task-history read " +
 			"(task-history contract) — first consumer is the portal transcript. " +
 			"When a Go integrator needs history paging, model {events, latest_event_id} as a " +
 			"typed page DTO; do NOT flatten (latest_event_id is the catch-up cursor).",
-		"getDiagnostic": "not exposed (deliberate): the coordinator-owned Computer " +
-			"diagnostic report read — Pine-internal troubleshooting (portal watcher / support " +
-			"tooling), authenticated by a coord-minted report token, spec-marked x-internal " +
-			"and permanently outside the Computer SDK surface.",
 
 		// flattened — a subset is returned on purpose (low-value metadata dropped)
 		"listSkills": "flattened: returns the skills array; generated_at is manifest " +

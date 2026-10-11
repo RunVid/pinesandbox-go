@@ -75,6 +75,25 @@ func TestExec_NonzeroExit(t *testing.T) {
 	}
 }
 
+func TestExec_DoesNotInferSuccessAfterError(t *testing.T) {
+	for _, stream := range []string{
+		"data: {\"type\":\"error\",\"error\":{\"ename\":\"Timeout\",\"evalue\":\"command timed out\"}}\n\ndata: {\"type\":\"execution_complete\"}\n\n",
+		"data: {\"type\":\"error\"}\n\ndata: {\"type\":\"execution_complete\"}\n\n",
+		"data: {\"type\":\"stdout\",\"text\":\"partial\"}\n\n",
+	} {
+		c := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = io.WriteString(w, stream)
+		})
+		res, err := c.Exec(context.Background(), "ps_", "s", "command", ExecOptions{}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.ExitCode != nil {
+			t.Errorf("stream %q: exit = %d, want unknown", stream, *res.ExitCode)
+		}
+	}
+}
+
 // TestExec_CallbackAbort: a callback returning an error stops the stream and is returned.
 func TestExec_CallbackAbort(t *testing.T) {
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
