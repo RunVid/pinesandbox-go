@@ -3,7 +3,7 @@
 // forwards it unchanged), decodes non-2xx into a typed *problem.APIError, captures the
 // request-id, and normalizes transport faults into typed *TimeoutError / *ConnectionError
 // so an integrator never sees a raw net/url error. Generic base primitive (internal/base)
-// — Computer-agnostic, must not import a domain package (§3).
+// — Computer-agnostic, must not import a domain package.
 package transport
 
 import (

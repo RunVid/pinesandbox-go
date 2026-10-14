@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-// TestArch_BaseDoesNotImportDomain enforces the §3 boundary: internal/base/* is the
+// TestArch_BaseDoesNotImportDomain enforces the base ↛ domain boundary: internal/base/* is the
 // generic, Computer-agnostic layer (the Ruby-rewrite blueprint) and must NEVER depend on
 // a domain package (internal/bindhpke, and later internal/coordinator / controlplane /
 // tokens). A violation would couple the base to Computer-specific code and break the
@@ -27,6 +27,6 @@ func TestArch_BaseDoesNotImportDomain(t *testing.T) {
 		}
 	}
 	if len(violations) > 0 {
-		t.Fatalf("internal/base imports non-base internal packages (base ↛ domain, §3): %v", violations)
+		t.Fatalf("internal/base imports non-base internal packages (base ↛ domain): %v", violations)
 	}
 }

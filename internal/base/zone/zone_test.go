@@ -93,7 +93,7 @@ func TestZone_Vectors(t *testing.T) {
 // TestZone_VectorsMatchCanonical guards the module-local testdata against drift from the
 // canonical contract artifact. The published mirror ships only the local copy (the
 // canonical lives outside the Go subtree), so this runs only in the monorepo and skips
-// elsewhere — the contract-discipline backstop, per design §9.1.
+// elsewhere — the contract-discipline backstop.
 func TestZone_VectorsMatchCanonical(t *testing.T) {
 	canonical := filepath.Join("..", "..", "..", "..", "contract", "zone-vectors.json")
 	want, err := os.ReadFile(canonical)

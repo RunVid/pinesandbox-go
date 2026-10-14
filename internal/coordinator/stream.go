@@ -17,7 +17,7 @@ import (
 	"go.pinesandbox.io/computer/internal/base/transport"
 )
 
-// Typed SSE event iterators (design §8). `for ev, err := range AgentEvents(...)` yields
+// Typed SSE event iterators. `for ev, err := range AgentEvents(...)` yields
 // typed events; the feed is CONTINUOUS (per-session, across turns), so a drop (EOF / read
 // fault / connection reset on reopen) is transparently resumed via Last-Event-ID under a
 // bounded reconnect budget. A non-nil err is terminal: a non-reconnectable error (auth /

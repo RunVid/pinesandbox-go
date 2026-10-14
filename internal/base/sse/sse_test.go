@@ -119,7 +119,7 @@ func (c *chunkReader) Read(p []byte) (int, error) {
 }
 
 // TestSSE_VectorsMatchCanonical guards the module-local vector copies against the
-// canonical specs/vectors (skips on the mirror — §9.1).
+// canonical specs/vectors (skips on the mirror).
 func TestSSE_VectorsMatchCanonical(t *testing.T) {
 	for _, name := range vectorFiles {
 		canonical := filepath.Join("..", "..", "..", "..", "..", "..", "specs", "vectors", name)

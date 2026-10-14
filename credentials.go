@@ -15,8 +15,8 @@ var computerIDRE = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89
 
 // Credentials is a Computer's durable identity: a stable id + a 32-byte state key. PERSIST
 // both to re-attach later (the key seals/unseals the Computer's checkpointed state). The
-// key is never sent in the clear — it rides the bind handshake HPKE-sealed to the coord's
-// ephemeral key.
+// key is never sent in the clear: the attach seals it with HPKE to the runtime's
+// single-use attach key.
 type Credentials struct {
 	ID                   string
 	Key                  []byte // 32 bytes

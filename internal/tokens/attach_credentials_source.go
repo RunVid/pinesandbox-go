@@ -235,7 +235,7 @@ func (s *AttachCredentialsSource) Credentials(ctx context.Context, req Credentia
 	}
 	// An ephemeral (access-lease-only) attach submits no capture identity, so
 	// pk_computer/key_generation are omitted entirely. It signals the mode so the
-	// portal lazily creates a new Computer row as ephemeral (§14).
+	// portal lazily creates a new Computer row as ephemeral.
 	if req.Ephemeral {
 		body.PersistenceMode = "ephemeral"
 	} else {

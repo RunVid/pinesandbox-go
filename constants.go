@@ -3,7 +3,7 @@ package pinesandbox
 // Canonical string values an integrator matches against or supplies — so you write
 // `ev.Type == pine.EventNeedsInput` instead of guessing `"needs_input"` (autocomplete
 // + one spelling). Plain string constants, net/http-style. The agent/terminal sets
-// are ADDITIVE — the coord may emit values not listed here, so switch with a default
+// are ADDITIVE — the API may send values not listed here, so switch with a default
 // rather than assuming these are exhaustive.
 
 // Agent event kinds — AgentEvent.Type (spec TaskEvent.type).

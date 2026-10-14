@@ -10,13 +10,13 @@ import (
 
 // CreateSessionOptions configures Computer.CreateSession.
 type CreateSessionOptions struct {
-	Name    string // empty → coord mints a friendly name
+	Name    string // empty → the Computer picks a friendly name
 	Label   string
 	Browser bool
 	Blind   bool
 }
 
-// CreateSession opens a new session on the Computer (ct_-authorized) and returns it holding
+// CreateSession opens a new session on the Computer (with the ct_) and returns it holding
 // its own ps_.
 func (c *Computer) CreateSession(ctx context.Context, opts CreateSessionOptions) (*Session, error) {
 	coord, ct, err := c.bound()
@@ -32,9 +32,9 @@ func (c *Computer) CreateSession(ctx context.Context, opts CreateSessionOptions)
 	return c.wrapSession(coord, s), nil
 }
 
-// Session fetches an existing session's metadata by name (ct_-authorized).
+// Session fetches an existing session's metadata by name (with the ct_).
 //
-// The coord redacts the session's ps_ on read (it's handed out only at
+// The Computer redacts the session's ps_ on read (it's handed out only at
 // CreateSession), so the returned handle has no ps_: its ct_-routed ops work
 // (control, agent + authoring mutations), but ps_-routed ops (drive, agent/read
 // surfaces, files) 401. For reuse in a stateless backend, persist the ps_ from
@@ -52,7 +52,7 @@ func (c *Computer) Session(ctx context.Context, name string) (*Session, error) {
 }
 
 // AdoptSession rebuilds a drive-capable *Session from a persisted ps_, with no
-// coord round-trip — the session analog of Client.AdoptExisting and the reuse path
+// request to the Computer — the session analog of Client.AdoptExisting and the reuse path
 // for a stateless backend (persist {name, ps_} at CreateSession; per request
 // AdoptExisting the Computer, then AdoptSession). The Computer must be attached; a
 // wrong/expired ps_ surfaces as a 401 on first use.
@@ -134,10 +134,10 @@ func (s *Session) Token() string { return s.token }
 // Info exposes the parsed session metadata (browser plane, timestamps, etc.).
 func (s *Session) Info() *SessionInfo { return s.info }
 
-// Agent returns the delegate-mode agent driver (one persistent Task per session).
+// Agent returns the session's driver for Pine's agent (one persistent Task per session).
 func (s *Session) Agent() *AgentMode { return &AgentMode{s: s} }
 
-// Drive returns the BYOA drive-mode primitives.
+// Drive returns the primitives for driving the session with your own agent.
 func (s *Session) Drive() *DriveMode { return &DriveMode{s: s} }
 
 // Epoch returns the session's current epoch document (raw).
@@ -150,7 +150,7 @@ func (s *Session) Focus(ctx context.Context) error {
 	return s.coord.Focus(ctx, s.token, s.name)
 }
 
-// RecreateTerminal rebuilds the bash terminal after an execd restart left it lost.
+// RecreateTerminal rebuilds the session's bash terminal after a restart lost it.
 func (s *Session) RecreateTerminal(ctx context.Context) error {
 	return s.coord.RecreateTerminal(ctx, s.token, s.name)
 }

@@ -65,7 +65,7 @@ func (c *Computer) GetSkillVersion(ctx context.Context, name, version string) (j
 	return coord.GetSkillVersion(ctx, ct, name, version)
 }
 
-// ActivateSkill serves a reviewed draft version (operator gate; raw).
+// ActivateSkill makes a reviewed draft version the one the agent is offered (raw).
 func (c *Computer) ActivateSkill(ctx context.Context, name, version string) (json.RawMessage, error) {
 	coord, ct, err := c.bound()
 	if err != nil {
@@ -118,12 +118,11 @@ func (c *Computer) DeleteSkillVersion(ctx context.Context, name, version string)
 
 // ---- session-scoped authoring (ct_) ----
 //
-// Authoring is an operator lifecycle: the mutations are ct_-only at the coord
-// (RouteClassAdmin — the task agent has no authoring path) and the author event
-// stream accepts ct_ OR ps_, so the WHOLE lifecycle routes through the Computer's
-// ct_. That keeps it consistent (mirrors the agent mutations) and lets a ct_-only
-// handle — e.g. one from Computer.Session(name), whose ps_ is redacted — both start
-// authoring AND stream its progress.
+// Authoring mutations require the Computer token (the agent itself can't author) and the
+// author event stream accepts ct_ OR ps_, so the WHOLE lifecycle uses the Computer's ct_.
+// That keeps it consistent (mirrors the agent mutations) and lets a ct_-only handle — e.g.
+// one from Computer.Session(name), whose ps_ is redacted — both start authoring AND stream
+// its progress.
 
 // Learn authors a draft from the session's latest finished run; scaffold (optional) seeds
 // the SKILL.md the author continues from (raw 202 body — drive AuthorEvents for progress).
@@ -136,20 +135,20 @@ func (s *Session) Teach(ctx context.Context, goal string, opts TeachOptions) (js
 	return s.coord.TeachSkill(ctx, s.computerToken(), s.name, goal, opts)
 }
 
-// Refine revises an existing immutable skill version with operator guidance
+// Refine revises an existing immutable skill version with your guidance
 // (raw 202 body — drive AuthorEvents for progress and the resulting draft).
 func (s *Session) Refine(ctx context.Context, skill string, version int, guidance string) (json.RawMessage, error) {
 	return s.coord.RefineSkill(ctx, s.computerToken(), s.name, skill, version, guidance)
 }
 
-// AuthorSkill registers a BYOA-authored SKILL.md draft directly (raw).
+// AuthorSkill registers a SKILL.md draft you wrote yourself (raw).
 func (s *Session) AuthorSkill(ctx context.Context, skillName, skillMD, reason string, opts AuthorSkillOptions) (json.RawMessage, error) {
 	return s.coord.AuthorSkillDraft(ctx, s.computerToken(), s.name, skillName, skillMD, reason, opts)
 }
 
 // AuthorEvents streams an in-flight author run; fn receives each event's raw data JSON.
-// Returns the resume cursor; fn returning ErrStop stops cleanly. Part of the ct_
-// authoring lifecycle (the coord accepts ct_ on this SSE route).
+// Returns the resume cursor; fn returning ErrStop stops cleanly. Uses the ct_, like the
+// rest of authoring.
 func (s *Session) AuthorEvents(ctx context.Context, authorID, lastEventID string, fn func(data []byte) error) (string, error) {
 	return s.coord.AuthorEvents(ctx, s.computerToken(), s.name, authorID, lastEventID, fn)
 }

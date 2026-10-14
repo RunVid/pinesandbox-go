@@ -3,6 +3,7 @@ package pinesandbox
 import (
 	"context"
 	"errors"
+	"net/http"
 	"testing"
 	"time"
 
@@ -10,6 +11,7 @@ import (
 )
 
 type fakeCP struct {
+	wait     func(context.Context, string, *controlplane.SandboxInfo) (*controlplane.SandboxInfo, error)
 	stop     func(context.Context, string, string) error
 	get      func(ctx context.Context, id string) (*controlplane.SandboxInfo, error)
 	destroy  func(ctx context.Context, id string) error
@@ -20,6 +22,83 @@ type fakeCP struct {
 
 func (f *fakeCP) Get(ctx context.Context, id string) (*controlplane.SandboxInfo, error) {
 	return f.get(ctx, id)
+}
+
+func (f *fakeCP) WaitForChange(ctx context.Context, id string, previous *controlplane.SandboxInfo) (*controlplane.SandboxInfo, error) {
+	if f.wait != nil {
+		return f.wait(ctx, id, previous)
+	}
+	info, err := f.get(ctx, id)
+	return info, err
+}
+
+func TestLifecycleUsesConditionalWaitWithoutPeriodicSleep(t *testing.T) {
+	reads, waits := 0, 0
+	var now *time.Time
+	cp := &fakeCP{get: func(context.Context, string) (*controlplane.SandboxInfo, error) {
+		reads++
+		return &controlplane.SandboxInfo{Status: "resuming", ETag: `"uid/1"`}, nil
+	}, wait: func(_ context.Context, _ string, previous *controlplane.SandboxInfo) (*controlplane.SandboxInfo, error) {
+		waits++
+		if previous.ETag != `"uid/1"` {
+			t.Fatal("lost status validator")
+		}
+		if waits == 1 {
+			*now = now.Add(25 * time.Second)
+			return previous, nil
+		}
+		return &controlplane.SandboxInfo{Status: "running", ETag: `"uid/2"`}, nil
+	}}
+	h, clock := newTestHandle(cp, "")
+	now = clock
+	h.sleeper = func(context.Context, time.Duration) error { t.Fatal("event-driven wait slept"); return nil }
+	if err := h.WaitUntilRunning(context.Background(), time.Minute, time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if reads != 1 || waits != 2 {
+		t.Fatalf("reads=%d waits=%d", reads, waits)
+	}
+}
+
+func TestConditionalWaitPacesOnlyQuickUnchangedReads(t *testing.T) {
+	for _, elapsed := range []time.Duration{0, 500 * time.Millisecond, 25 * time.Second} {
+		t.Run(elapsed.String(), func(t *testing.T) {
+			previous := &controlplane.SandboxInfo{Status: "resuming", ETag: `"uid/1"`}
+			cp := &fakeCP{}
+			h, now := newTestHandle(cp, "resuming")
+			cp.wait = func(context.Context, string, *controlplane.SandboxInfo) (*controlplane.SandboxInfo, error) {
+				*now = now.Add(elapsed)
+				return previous, nil
+			}
+			current, delay, err := h.observe(context.Background(), previous, 2*time.Second)
+			if err != nil || current != previous || delay != max(0, 2*time.Second-elapsed) {
+				t.Fatalf("current=%+v delay=%v err=%v", current, delay, err)
+			}
+		})
+	}
+}
+
+func TestConditionalStopWaitPreservesTimeoutAndCancellation(t *testing.T) {
+	for _, callerCancels := range []bool{false, true} {
+		ctx, cancel := context.WithCancel(context.Background())
+		cp := &fakeCP{get: func(context.Context, string) (*controlplane.SandboxInfo, error) {
+			return &controlplane.SandboxInfo{Status: "stopping", ETag: `"uid/1"`}, nil
+		}}
+		h, now := newTestHandle(cp, "stopping")
+		cp.wait = func(context.Context, string, *controlplane.SandboxInfo) (*controlplane.SandboxInfo, error) {
+			if callerCancels {
+				cancel()
+			} else {
+				*now = now.Add(390 * time.Second)
+			}
+			return nil, &TimeoutError{Msg: "wait ended"}
+		}
+		stopped, err := h.Stop(ctx)
+		if stopped || (callerCancels && !errors.Is(err, context.Canceled)) || (!callerCancels && err != nil) {
+			t.Fatalf("callerCancels=%v: stopped=%v err=%v", callerCancels, stopped, err)
+		}
+		cancel()
+	}
 }
 
 func (f *fakeCP) Destroy(ctx context.Context, id string) error {
@@ -233,5 +312,75 @@ func TestAlive(t *testing.T) {
 	h2, _ := newTestHandle(dead, "running")
 	if h2.Alive(context.Background()) {
 		t.Error("Alive = true for a 404'd sandbox")
+	}
+}
+
+func TestConditionalWaitRetriesTransientFaultsWithinLifecycleBudget(t *testing.T) {
+	attempts := 0
+	cp := &fakeCP{get: func(context.Context, string) (*controlplane.SandboxInfo, error) {
+		return &controlplane.SandboxInfo{Status: "resuming", ETag: `"uid/1"`}, nil
+	}, wait: func(_ context.Context, _ string, previous *controlplane.SandboxInfo) (*controlplane.SandboxInfo, error) {
+		attempts++
+		if previous.ETag != `"uid/1"` {
+			t.Fatal("transport fault changed the last observation")
+		}
+		switch attempts {
+		case 1:
+			return nil, &TimeoutError{Msg: "conditional read timed out"}
+		case 2:
+			return nil, &ConnectionError{Msg: "connection reset"}
+		case 3, 4, 5:
+			err := &ServerError{}
+			err.Status = []int{http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout}[attempts-3]
+			return nil, err
+		default:
+			return &controlplane.SandboxInfo{Status: "running", ETag: `"uid/2"`}, nil
+		}
+	}}
+	h, now := newTestHandle(cp, "resuming")
+	started := *now
+	if err := h.WaitUntilRunning(context.Background(), time.Minute, 2*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 6 || now.Sub(started) != 10*time.Second {
+		t.Fatalf("attempts=%d paced=%v", attempts, now.Sub(started))
+	}
+}
+
+func TestConditionalWaitBoundsPersistentGatewayFailure(t *testing.T) {
+	err := &ServerError{}
+	err.Status = http.StatusBadGateway
+	cp := &fakeCP{get: func(context.Context, string) (*controlplane.SandboxInfo, error) {
+		return &controlplane.SandboxInfo{Status: "resuming", ETag: `"uid/1"`}, nil
+	}, wait: func(context.Context, string, *controlplane.SandboxInfo) (*controlplane.SandboxInfo, error) {
+		return nil, err
+	}}
+	h, now := newTestHandle(cp, "resuming")
+	started := *now
+	var timeout *ReadyTimeoutError
+	if got := h.WaitUntilRunning(context.Background(), 5*time.Second, 2*time.Second); !errors.As(got, &timeout) {
+		t.Fatalf("err=%v, want readiness timeout", got)
+	}
+	if now.Sub(started) != 5*time.Second {
+		t.Fatalf("wait exceeded caller budget: %v", now.Sub(started))
+	}
+}
+
+func TestConditionalWaitPreservesNonTransientErrors(t *testing.T) {
+	internal := &ServerError{}
+	internal.Status = http.StatusInternalServerError
+	unsupported := &ServerError{}
+	unsupported.Status = http.StatusNotImplemented
+	for _, failure := range []error{&UnauthorizedError{}, &ForbiddenError{}, &NotFoundError{}, &ConflictError{}, &CapacityExceededError{}, internal, unsupported} {
+		cp := &fakeCP{get: func(context.Context, string) (*controlplane.SandboxInfo, error) {
+			return &controlplane.SandboxInfo{Status: "resuming", ETag: `"uid/1"`}, nil
+		}, wait: func(context.Context, string, *controlplane.SandboxInfo) (*controlplane.SandboxInfo, error) {
+			return nil, failure
+		}}
+		h, _ := newTestHandle(cp, "resuming")
+		h.sleeper = func(context.Context, time.Duration) error { t.Fatal("non-transient failure was retried"); return nil }
+		if err := h.WaitUntilRunning(context.Background(), time.Minute, time.Second); err != failure {
+			t.Fatalf("err=%v, want original %v", err, failure)
+		}
 	}
 }

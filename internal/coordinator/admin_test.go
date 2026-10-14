@@ -11,11 +11,6 @@ func TestAdminRoutes(t *testing.T) {
 	var claimBody string
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.URL.Path == "/health":
-			if _, ok := r.Header["X-Pine-Auth"]; ok {
-				t.Error("health must be token-less")
-			}
-			_, _ = io.WriteString(w, `{"ok":true}`)
 		case r.URL.Path == "/state" && r.Method == "GET":
 			_, _ = io.WriteString(w, `{"snapshot_id":"snap-1"}`)
 		case r.URL.Path == "/v1/coord/capture" && r.Method == "POST":
@@ -34,9 +29,6 @@ func TestAdminRoutes(t *testing.T) {
 	})
 	ctx := context.Background()
 
-	if h, err := c.Health(ctx); err != nil || !contains(string(h), "ok") {
-		t.Fatalf("Health = %s, %v", h, err)
-	}
 	if s, err := c.LatestSnapshot(ctx, "ct_"); err != nil || !contains(string(s), "snap-1") {
 		t.Fatalf("LatestSnapshot = %s, %v", s, err)
 	}

@@ -1,7 +1,7 @@
 // Package problem decodes RFC 9457 problem+json into a typed *APIError and resolves the
 // retryable judgment: the 0C wire field when present, falling back to the embedded
 // error-taxonomy for older servers that omit it. A generic base primitive
-// (internal/base) — Computer-agnostic, must not import a domain package (§3).
+// (internal/base) — Computer-agnostic, must not import a domain package.
 //
 // The taxonomy is embedded (go:embed) — compiled into the binary, NOT read from disk at
 // runtime (the contract README's "no runtime file dependency"). A drift test guards the
@@ -42,7 +42,7 @@ func mustLoadTaxonomy() map[string]bool {
 
 // APIError is a typed coordinator / control-plane error (RFC 9457 problem+json). Its
 // fields are exported and final after decode; there is deliberately NO Retryable()
-// method — Go forbids a field and method of the same name (§7). Callers reach it with
+// method — Go forbids a field and method of the same name. Callers reach it with
 // errors.As(err, &apiErr).
 type APIError struct {
 	Status      int    // HTTP status

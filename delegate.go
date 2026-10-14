@@ -13,9 +13,9 @@ import (
 // needs the server-held ct_), so the integrator re-mints server-side and refreshes the
 // envelope before each (re)connect. MarshalJSON emits the web-SDK wire shape.
 type DelegatedConnection struct {
-	// ComputerHost is the Computer's full data-plane origin — https://<id>.computer.<zone>
-	// (a complete URI per computer-api.yaml, NOT a bare host), so the web SDK derives the
-	// desktop's ws/wss scheme from it instead of guessing.
+	// ComputerHost is the Computer's full origin — https://<id>.computer.<zone>
+	// (a complete URI, NOT a bare host), so the web SDK derives the desktop's ws/wss
+	// scheme from it instead of guessing.
 	ComputerHost          string
 	SessionName           string
 	SpecVersion           int
@@ -62,8 +62,8 @@ func (c *Computer) DelegateDesktop(ctx context.Context, name string, create, bro
 	}
 	s, err := c.Session(ctx, name)
 	if err != nil {
-		// A missing session is a coordinator RFC-9457 404 (*APIError), not the control-plane
-		// *NotFoundError.
+		// A missing session is an RFC 9457 404 from the Computer (*APIError), not the
+		// lifecycle *NotFoundError.
 		var ae *APIError
 		if !create || !errors.As(err, &ae) || ae.Status != 404 {
 			return nil, err

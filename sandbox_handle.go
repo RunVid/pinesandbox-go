@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"time"
 
 	"go.pinesandbox.io/computer/internal/base/wait"
@@ -13,6 +14,7 @@ import (
 // sandboxControl is the control-plane subset a SandboxHandle needs (faked in tests).
 type sandboxControl interface {
 	Get(ctx context.Context, sandboxID string) (*controlplane.SandboxInfo, error)
+	WaitForChange(ctx context.Context, sandboxID string, previous *controlplane.SandboxInfo) (*controlplane.SandboxInfo, error)
 	Destroy(ctx context.Context, sandboxID string) error
 	Pause(ctx context.Context, sandboxID string) error
 	Resume(ctx context.Context, sandboxID string) error
@@ -32,9 +34,8 @@ var (
 	liveStates     = map[string]bool{"running": true, "pending": true, "stopping": true}
 )
 
-// SandboxHandle is the lifecycle handle for a provisioned pod, backed by the control plane.
-// A powered-on Computer holds one; it carries no data-plane knowledge (the coordinator host
-// is derived from the zone).
+// SandboxHandle is the lifecycle handle for an allocated runtime. An attached Computer
+// holds one; it only allocates, observes and releases the runtime.
 type SandboxHandle struct {
 	cp      sandboxControl
 	id      string
@@ -50,7 +51,7 @@ func newSandboxHandle(cp sandboxControl, sandboxID, status string) *SandboxHandl
 // ID is the sandbox id.
 func (h *SandboxHandle) ID() string { return h.id }
 
-// WaitUntilRunning blocks until the pod reports Running, returning *SandboxFailedError on a
+// WaitUntilRunning blocks until the runtime reports Running, returning *SandboxFailedError on a
 // terminal state or *ReadyTimeoutError if it never becomes Ready within timeout. A
 // create-time Running status (a prewarmed Computer) skips the first poll.
 func (h *SandboxHandle) WaitUntilRunning(ctx context.Context, timeout, interval time.Duration) error {
@@ -67,6 +68,7 @@ func (h *SandboxHandle) waitUntilState(ctx context.Context, target string, timeo
 	deadline := h.clock().Add(timeout)
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	var info *controlplane.SandboxInfo
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -74,18 +76,23 @@ func (h *SandboxHandle) waitUntilState(ctx context.Context, target string, timeo
 		if !h.clock().Before(deadline) {
 			return &ReadyTimeoutError{SandboxID: h.id, LastState: h.status}
 		}
-		state, err := h.refreshStatus(waitCtx)
+		current, delay, err := h.observe(waitCtx, info, interval)
 		if err != nil {
 			return readinessBudgetError(ctx, waitCtx, err, h)
 		}
+		info = current
+		state := info.Status
+		h.status = state
 		if state == target {
 			return nil
 		}
 		if terminalStates[state] || state == "unavailable" {
 			return &SandboxFailedError{SandboxID: h.id, State: state}
 		}
-		if err := h.sleeper(waitCtx, max(0, min(interval, deadline.Sub(h.clock())))); err != nil {
-			return readinessBudgetError(ctx, waitCtx, err, h)
+		if delay > 0 {
+			if err := h.sleeper(waitCtx, max(0, min(delay, deadline.Sub(h.clock())))); err != nil {
+				return readinessBudgetError(ctx, waitCtx, err, h)
+			}
 		}
 	}
 }
@@ -165,27 +172,36 @@ func (h *SandboxHandle) Stop(ctx context.Context) (bool, error) {
 		if waitCtx.Err() != nil || !h.clock().Before(deadline) {
 			return false, nil
 		}
-		info, err := h.cp.Get(waitCtx, h.id)
+		current, delay, err := h.observe(waitCtx, info, defaultPollInterval)
 		if errors.As(err, &missing) {
 			return true, nil
 		}
 		if err != nil {
+			if ctx.Err() != nil {
+				return false, ctx.Err()
+			}
+			if waitCtx.Err() != nil || !h.clock().Before(deadline) {
+				return false, nil
+			}
 			return false, err
 		}
+		info = current
 		if computeReleased(info) {
 			return true, nil
 		}
 		if info.Status == "save_failed" {
 			return false, stopSaveError(info)
 		}
-		if err := h.sleeper(waitCtx, min(defaultPollInterval, deadline.Sub(h.clock()))); err != nil {
-			if ctx.Err() != nil {
-				return false, ctx.Err()
+		if delay > 0 {
+			if err := h.sleeper(waitCtx, min(delay, deadline.Sub(h.clock()))); err != nil {
+				if ctx.Err() != nil {
+					return false, ctx.Err()
+				}
+				if waitCtx.Err() != nil {
+					return false, nil
+				}
+				return false, err
 			}
-			if waitCtx.Err() != nil {
-				return false, nil
-			}
-			return false, err
 		}
 	}
 }
@@ -221,18 +237,23 @@ func (h *SandboxHandle) releaseFailedRuntime(ctx context.Context, info *controlp
 		if err := waitCtx.Err(); err != nil {
 			return false, err
 		}
-		if h.gone(waitCtx) {
+		current, delay, err := h.observe(waitCtx, info, defaultPollInterval)
+		var missing *NotFoundError
+		if errors.As(err, &missing) || (err == nil && computeReleased(current)) {
 			return true, nil
 		}
-		if err := h.sleeper(waitCtx, defaultPollInterval); err != nil {
-			return false, err
+		info = current
+		if delay > 0 {
+			if err := h.sleeper(waitCtx, delay); err != nil {
+				return false, err
+			}
 		}
 	}
 }
 
-// Terminate gracefully deletes the pod and waits until the Sandbox record is confirmed gone
-// (GET 404) or waitTimeout elapses. true = the record is gone (note: the pod's SIGTERM
-// final capture may still be draining); false = delete issued but not confirmed gone.
+// Terminate gracefully deletes the runtime and waits until its record is confirmed gone
+// (GET 404) or waitTimeout elapses. true = the record is gone (its final save may still be
+// finishing); false = delete issued but not confirmed gone.
 func (h *SandboxHandle) Terminate(ctx context.Context, waitTimeout, interval time.Duration) (bool, error) {
 	if waitTimeout <= 0 {
 		waitTimeout = defaultTerminateWait
@@ -252,6 +273,7 @@ func (h *SandboxHandle) Terminate(ctx context.Context, waitTimeout, interval tim
 		}
 		return false, err
 	}
+	var info *controlplane.SandboxInfo
 	for {
 		if ctx.Err() != nil {
 			return false, ctx.Err()
@@ -260,23 +282,55 @@ func (h *SandboxHandle) Terminate(ctx context.Context, waitTimeout, interval tim
 		if remaining <= 0 || waitCtx.Err() != nil {
 			return false, nil
 		}
-		if h.gone(waitCtx) {
+		current, delay, err := h.observe(waitCtx, info, interval)
+		var missing *NotFoundError
+		if errors.As(err, &missing) || (err == nil && computeReleased(current)) {
 			return true, nil
 		}
+		info = current
 		remaining = deadline.Sub(h.clock())
 		if remaining <= 0 {
 			return false, nil
 		}
-		if err := h.sleeper(waitCtx, min(interval, remaining)); err != nil {
-			if ctx.Err() != nil {
-				return false, ctx.Err()
+		if delay > 0 {
+			if err := h.sleeper(waitCtx, min(delay, remaining)); err != nil {
+				if ctx.Err() != nil {
+					return false, ctx.Err()
+				}
+				if waitCtx.Err() != nil {
+					return false, nil
+				}
+				return false, err
 			}
-			if waitCtx.Err() != nil {
-				return false, nil
-			}
-			return false, err
 		}
 	}
+}
+
+func (h *SandboxHandle) observe(ctx context.Context, previous *controlplane.SandboxInfo, interval time.Duration) (*controlplane.SandboxInfo, time.Duration, error) {
+	started := h.clock()
+	var info *controlplane.SandboxInfo
+	var err error
+	if previous != nil && previous.ETag != "" {
+		info, err = h.cp.WaitForChange(ctx, h.id, previous)
+		var timeout *TimeoutError
+		var connection *ConnectionError
+		var server *ServerError
+		transient := errors.As(err, &timeout) || errors.As(err, &connection) ||
+			(errors.As(err, &server) && (server.Status == http.StatusBadGateway ||
+				server.Status == http.StatusServiceUnavailable || server.Status == http.StatusGatewayTimeout))
+		if ctx.Err() == nil && transient {
+			// An observation failure changes no lifecycle state.
+			info, err = previous, nil
+		}
+	} else {
+		info, err = h.cp.Get(ctx, h.id)
+	}
+	if err == nil && info.ETag != "" && (previous == nil || info.ETag != previous.ETag) {
+		return info, 0, nil
+	}
+	// Old servers and immediate failures cannot spin. Time already spent
+	// waiting counts; a completed server wait needs no additional sleep.
+	return info, max(0, interval-h.clock().Sub(started)), err
 }
 
 // Kill is an ungraceful best-effort delete (no wait); it never returns an error.
@@ -284,7 +338,7 @@ func (h *SandboxHandle) Kill(ctx context.Context) bool {
 	return h.cp.Destroy(ctx, h.id) == nil
 }
 
-// Alive reports whether the pod is in a live state (running/pending/stopping).
+// Alive reports whether the runtime is in a live state (running/pending/stopping).
 func (h *SandboxHandle) Alive(ctx context.Context) bool {
 	state, err := h.refreshStatus(ctx)
 	if err != nil {

@@ -15,30 +15,41 @@ var ErrStop = coordinator.ErrStop
 // reconnect budget — detect it with errors.Is; the underlying transport fault is wrapped.
 var ErrStreamLost = coordinator.ErrStreamLost
 
-// AgentMode is the delegate-mode agent driver: one persistent Task per session, each Run a
-// turn. Mutations (Run/Steer/Answer/Cancel/Reset) are ct_-authorized + return the updated
-// AgentTask; reads use the session ps_ (Status → AgentTask, Result → AgentResult, Events →
-// the typed, resuming event iterator).
+// AgentMode drives Pine's agent in a session: one persistent Task per session, each Run a
+// turn. Mutations (Run/Steer/Answer/Cancel/Reset) use the Computer token (ct_) and return
+// the updated AgentTask; reads use the session token (ps_) (Status → AgentTask, Result →
+// AgentResult, Events → the typed, resuming event iterator).
 type AgentMode struct {
 	s *Session
 }
 
-// Typed agent-track surface (aliases of the coordinator types, mirroring the
-// coordinator-api.yaml Task / TaskResult / TaskEvent schemas — each carries a Raw escape
-// hatch).
+// Agent types, mirroring the Computer API's Task, TaskResult and TaskEvent schemas.
+// AgentTask, AgentResult and AgentEvent also keep the full JSON object in Raw.
 type (
-	RunOptions      = coordinator.AgentRunOptions
-	SteerOptions    = coordinator.AgentSteerOptions
-	AnswerOptions   = coordinator.AgentAnswerOptions
-	AgentTask       = coordinator.AgentTask
-	AgentResult     = coordinator.AgentResult
-	AgentUsage      = coordinator.AgentUsage
+	// RunOptions are AgentMode.Run's optional context, skills, constraints and secrets.
+	RunOptions = coordinator.AgentRunOptions
+	// SteerOptions pin a steer to a turn and can deliver secrets.
+	SteerOptions = coordinator.AgentSteerOptions
+	// AnswerOptions guard an answer against a stale turn and can deliver secrets.
+	AnswerOptions = coordinator.AgentAnswerOptions
+	// AgentTask is the session's persistent task: its state, latest goal, usage and turn ids.
+	AgentTask = coordinator.AgentTask
+	// AgentResult is how a turn ended and what it produced.
+	AgentResult = coordinator.AgentResult
+	// AgentUsage is a turn's token counts, duration and cost.
+	AgentUsage = coordinator.AgentUsage
+	// AgentTokenUsage is a turn's model token counts.
 	AgentTokenUsage = coordinator.AgentTokenUsage
-	AgentDuration   = coordinator.AgentDuration
-	AgentCost       = coordinator.AgentCost
-	FileRef         = coordinator.FileRef
-	AuthorResult    = coordinator.AuthorResult
-	AgentEvent      = coordinator.AgentEvent
+	// AgentDuration is a turn's total and active time.
+	AgentDuration = coordinator.AgentDuration
+	// AgentCost is a turn's cost at your project's rates.
+	AgentCost = coordinator.AgentCost
+	// FileRef points to a file a turn produced.
+	FileRef = coordinator.FileRef
+	// AuthorResult is the outcome of a skill-authoring run.
+	AuthorResult = coordinator.AuthorResult
+	// AgentEvent is one event from AgentMode.Events.
+	AgentEvent = coordinator.AgentEvent
 	// AgentControlChange is the typed controller_changed payload returned by
 	// AgentEvent.ControlChange().
 	AgentControlChange = coordinator.AgentControlChange
@@ -48,7 +59,7 @@ type (
 
 // Run starts a turn toward goal; returns the session's Task (running for this turn).
 // errors.Is(err, ErrSessionBusy) ⇒ a turn is already active; errors.Is(err,
-// ErrActionNotImplemented) ⇒ no resident agent is configured in this environment.
+// ErrActionNotImplemented) ⇒ Pine's agent isn't available in this environment.
 func (a *AgentMode) Run(ctx context.Context, goal string, opts RunOptions) (*AgentTask, error) {
 	return a.s.coord.AgentRun(ctx, a.s.computerToken(), a.s.name, goal, opts)
 }

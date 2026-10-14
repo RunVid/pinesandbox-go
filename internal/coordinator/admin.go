@@ -11,11 +11,6 @@ import (
 	"go.pinesandbox.io/computer/internal/base/problem"
 )
 
-// Health returns the coord's health document (public, token-less).
-func (c *Client) Health(ctx context.Context) (json.RawMessage, error) {
-	return c.getJSON(ctx, "/health", "")
-}
-
 // LatestSnapshot returns the most-recently-persisted snapshot body (ct_), or (nil, nil) if
 // none exists yet (404). The SDK does not decode the snapshot format. A 503 (state
 // persistence not enabled) propagates as *problem.APIError.

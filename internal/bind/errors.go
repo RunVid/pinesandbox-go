@@ -52,13 +52,17 @@ func (e *ComputerAlreadyAttachedError) Error() string {
 // PodPoisonedError: a single-use pod bound elsewhere / tainted — recycle, never replay.
 type PodPoisonedError struct{ base }
 
-func (e *PodPoisonedError) Error() string { return errMsg("pod poisoned", e.Status, e.Msg) }
+func (e *PodPoisonedError) Error() string {
+	return errMsg("runtime cannot be attached", e.Status, e.Msg)
+}
 
 // BrokerUnreachableError: the broker / restore pipeline is unavailable (503 / non-epoch
 // bind-restore-failed).
 type BrokerUnreachableError struct{ base }
 
-func (e *BrokerUnreachableError) Error() string { return errMsg("broker unreachable", e.Status, e.Msg) }
+func (e *BrokerUnreachableError) Error() string {
+	return errMsg("saved state unavailable", e.Status, e.Msg)
+}
 
 // BindTimeoutError: the readiness deadline elapsed before the pod became ready (produced
 // by the attach loop, not the classifier).

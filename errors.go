@@ -18,12 +18,11 @@ import (
 // internal packages. The aliases keep one source of truth per error (the layer that
 // raises it) while presenting a single flat surface.
 
-// Agent-lane control-flow sentinels: the coordinator statuses that carry control meaning,
-// as errors.Is-able values so callers branch on intent instead of raw status ints. Each is
+// Session and agent sentinels: the API errors that carry control meaning, as
+// errors.Is-able values so callers branch on intent instead of raw status ints. Each is
 // a *APIError carrying just its problem-type slug; APIError.Is matches by slug, so
 // errors.Is(err, ErrTaskNotReady) is true for the live wire error AND errors.As(err,
-// &apiErr) still reaches its full detail (status, request id, retryable). Slugs are pinned
-// to the coordinator's error taxonomy (validated in errors_test.go).
+// &apiErr) still reaches its full detail (status, request id, retryable).
 var (
 	// ErrControlNotHeld (409): this session/caller does not hold the control
 	// authority required by the attempted mutation.
@@ -44,10 +43,9 @@ var (
 	// name-conflict 409).
 	ErrTaskNotFound = &problem.APIError{Status: 404, ProblemType: "/errors/task-not-found"}
 	// ErrNoActiveTurn (409): a task MUTATION (answer/steer/…) with no active turn to
-	// act on. The coordinator emits this as TWO slugs, both covered here: the
-	// idle-session gate `/errors/no-active-task` ("no in-flight turn"), and the
-	// mid-request race `/errors/no-active-turn` where the turn ends between the
-	// in-flight check and the broker mutation. The session and its task history are
+	// act on. The API reports this as TWO slugs, both covered here:
+	// `/errors/no-active-task` when the session is idle, and `/errors/no-active-turn`
+	// when the turn ends while the request is being handled. The session and its task history are
 	// fine — there is just nothing to steer right now; start a turn with Run.
 	ErrNoActiveTurn = &problem.APIError{
 		Status:          409,
@@ -57,7 +55,7 @@ var (
 	// ErrNoActiveTask is the deprecated predecessor of the two sentinels above.
 	// It is FROZEN at its original {404, /errors/no-active-task} value — do not
 	// mutate the field. APIError.Is matches by problem-type slug only (status is
-	// ignored), so this sentinel already matches the coordinator's real
+	// ignored), so this sentinel already matches the API's real
 	// {409, /errors/no-active-task} mutation error by slug; changing its Status
 	// would give no matching benefit and could break code that reads the
 	// sentinel's fields. The real gap it never covered — a task READ on a
@@ -66,21 +64,21 @@ var (
 	//
 	// Deprecated: use ErrTaskNotFound for reads and ErrNoActiveTurn for mutations.
 	ErrNoActiveTask = &problem.APIError{Status: 404, ProblemType: "/errors/no-active-task"}
-	// ErrActionNotImplemented (501): the action isn't available here (e.g. no resident agent
-	// configured in this environment — agent.Run / delegate-mode turns).
+	// ErrActionNotImplemented (501): the action isn't available here (e.g. Pine's agent
+	// isn't available in this environment — AgentMode.Run).
 	ErrActionNotImplemented = &problem.APIError{Status: 501, ProblemType: "/errors/action-not-implemented"}
-	// ErrLeaseExpired (403): the access lease lapsed and the portal DEFINITIVELY refused a
-	// refresh — the project is revoked / out of credits. Control is cut (reads stay open);
+	// ErrLeaseExpired (403): the access lease lapsed and Pine DEFINITIVELY refused to
+	// renew it — the project is revoked / out of credits. Control is cut (reads stay open);
 	// re-attach the Computer or surface the suspension. Retrying won't help.
 	ErrLeaseExpired = &problem.APIError{Status: 403, ProblemType: "/errors/lease-expired"}
 	// ErrLeaseRefreshUnavailable (503, retryable): the lease lapsed and the refresh failed
-	// TRANSIENTLY (gateway/portal blip) — no revocation verdict. Retry; do NOT re-attach.
+	// TRANSIENTLY (a temporary Pine outage) — no revocation verdict. Retry; do NOT re-attach.
 	ErrLeaseRefreshUnavailable = &problem.APIError{Status: 503, ProblemType: "/errors/lease-refresh-unavailable"}
 )
 
-// Wire / transport / spec-version (coordinator + control-plane responses).
+// API, transport and version errors.
 type (
-	// APIError is the RFC-9457 wire error from the coordinator data plane. Callers read
+	// APIError is an RFC 9457 problem returned by a Computer. Callers read
 	// {Status, ProblemType, Detail, RequestID, Retryable}, errors.Is the control sentinels
 	// above, or switch on ProblemType.
 	APIError = problem.APIError
@@ -88,9 +86,10 @@ type (
 	TimeoutError = transport.TimeoutError
 	// ConnectionError is a normalized connection failure (dial/DNS/TLS/EOF).
 	ConnectionError = transport.ConnectionError
-	// SpecVersionMismatch is raised when the gateway serves a different Computer-API major.
+	// SpecVersionMismatch is returned when a Computer serves a different Computer API
+	// major version.
 	SpecVersionMismatch = spec.MismatchError
-	// SandboxGoneError means the gateway cannot route the bound sandbox. It
+	// SandboxGoneError means the runtime the Computer was attached to is gone. It
 	// wraps APIError, preserving host/op/request-id diagnostics via errors.As.
 	SandboxGoneError = coordinator.SandboxGoneError
 )
@@ -109,13 +108,13 @@ func IsRetryable(err error) bool {
 }
 
 // AttachAuthorizationCommittedError means Portal committed a new binding
-// revision, but the later coordinator bind did not complete. The fresh pod is
-// cleaned up best-effort. Persist BindingRevision before retrying so the next
+// revision, but attaching the Computer to the runtime did not complete. The
+// runtime is cleaned up best-effort. Persist BindingRevision before retrying so the next
 // attach can supersede the failed authorization instead of losing CAS state.
 // Credentials is non-nil for CreateComputer, which otherwise has no result in
 // which to return identity and capture-key material selected for the committed
 // attach. Its String and GoString forms redact secrets.
-// The underlying typed bind error remains reachable with errors.Is/errors.As.
+// The underlying typed attach error remains reachable with errors.Is/errors.As.
 type AttachAuthorizationCommittedError struct {
 	BindingRevision int64
 	SandboxID       string
@@ -125,29 +124,38 @@ type AttachAuthorizationCommittedError struct {
 
 func (e *AttachAuthorizationCommittedError) Error() string {
 	return fmt.Sprintf(
-		"pinesandbox: attach authorization committed at revision %d for sandbox %s, but coordinator bind failed: %v",
+		"pinesandbox: attach authorization committed at revision %d for sandbox %s, but the attach did not complete: %v",
 		e.BindingRevision, e.SandboxID, e.Err,
 	)
 }
 
 func (e *AttachAuthorizationCommittedError) Unwrap() error { return e.Err }
 
-// Bind handshake errors.
+// Errors from attaching a Computer to a runtime.
 type (
-	BindError                    = bind.BindError
-	BindAuthError                = bind.BindAuthError
+	// BindError is an attach failure the other attach errors don't cover.
+	BindError = bind.BindError
+	// BindAuthError means the runtime rejected the attach authorization (401/403).
+	BindAuthError = bind.BindAuthError
+	// ComputerAlreadyAttachedError means another runtime already holds this Computer.
 	ComputerAlreadyAttachedError = bind.ComputerAlreadyAttachedError
-	PodPoisonedError             = bind.PodPoisonedError
-	BrokerUnreachableError       = bind.BrokerUnreachableError
-	BindTimeoutError             = bind.BindTimeoutError
-	// TokenRejectedError: a 401 on a previously-bound ct_/ps_ — a report that the
-	// coordinator did not recognize the token, not an instruction to re-attach. On a
-	// live current sandbox this is binding_auth_lost; attach only on confirmed
+	// PodPoisonedError means the runtime is attached to a different Computer or can't
+	// be reused. Start a fresh runtime; don't retry this one.
+	PodPoisonedError = bind.PodPoisonedError
+	// BrokerUnreachableError means the Computer's saved state couldn't be restored
+	// because the state service is unavailable.
+	BrokerUnreachableError = bind.BrokerUnreachableError
+	// BindTimeoutError means the runtime wasn't ready to attach within the readiness
+	// budget.
+	BindTimeoutError = bind.BindTimeoutError
+	// TokenRejectedError: a 401 on a ct_/ps_ that worked before — a report that the
+	// Computer did not recognize the token, not an instruction to re-attach. On a
+	// live current runtime this is binding_auth_lost; attach only on confirmed
 	// sandbox-gone evidence. (Renamed from RebindRequiredError in 0.3.9.)
 	TokenRejectedError = bind.TokenRejectedError
 )
 
-// Control-token + attach-credential (portal) errors.
+// Errors from Portal: project tokens, attach credentials, locations and Computer records.
 type (
 	ControlTokenError            = tokens.ControlTokenError
 	InvalidClientKey             = tokens.InvalidClientKey
@@ -162,7 +170,7 @@ type (
 	UnknownComputerError         = tokens.UnknownComputerError
 )
 
-// Control-plane (lifecycle) errors.
+// Errors from runtime lifecycle requests.
 type (
 	BadRequestError          = controlplane.BadRequestError
 	UnauthorizedError        = controlplane.UnauthorizedError
@@ -189,7 +197,7 @@ type SandboxFailedError struct {
 }
 
 func (e *SandboxFailedError) Error() string {
-	return fmt.Sprintf("pinesandbox: Computer pod %s reported %q before completing the lifecycle operation", e.SandboxID, e.State)
+	return fmt.Sprintf("pinesandbox: Computer runtime %s reported %q before completing the lifecycle operation", e.SandboxID, e.State)
 }
 
 // ReadyTimeoutError: allocation or a memory lifecycle operation exceeded its budget.
@@ -199,5 +207,5 @@ type ReadyTimeoutError struct {
 }
 
 func (e *ReadyTimeoutError) Error() string {
-	return fmt.Sprintf("pinesandbox: Computer pod %s did not complete the lifecycle operation in time (last state %q)", e.SandboxID, e.LastState)
+	return fmt.Sprintf("pinesandbox: Computer runtime %s did not complete the lifecycle operation in time (last state %q)", e.SandboxID, e.LastState)
 }

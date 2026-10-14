@@ -2,7 +2,7 @@
 // author, control events). It does FRAMING ONLY — split a byte stream into blank-line-
 // terminated frames and yield Frame{ID, Event, Data} each — leaving each stream to layer
 // its own decoder (control → typed structs, agent/author → JSON). Generic base primitive
-// (internal/base) — Computer-agnostic, must not import a domain package (§3).
+// (internal/base) — Computer-agnostic, must not import a domain package.
 //
 // The framing is pinned by the cross-SDK vectors (specs/vectors), validated identically
 // by check-vectors.py and the web SDK. NOTE the contract subtleties (both load-bearing):
@@ -12,7 +12,7 @@
 //   - an unterminated trailing block (no closing blank line) is DISCARDED, not flushed
 //     (exec truncation safety).
 //
-// exec's bare-JSON tolerance is NOT here — it lives in the exec decoder (§8), so this
+// exec's bare-JSON tolerance is NOT here — it lives in the exec decoder, so this
 // stays a faithful SSE framer.
 package sse
 
@@ -39,7 +39,7 @@ type Frame struct {
 	Data  string
 }
 
-// Frames returns an iterator over the SSE frames in r (range-over-func, §8). On a read
+// Frames returns an iterator over the SSE frames in r (range-over-func). On a read
 // error the final iteration yields a zero Frame and the error.
 func Frames(r io.Reader) iter.Seq2[Frame, error] {
 	return framesWithCap(r, maxFrameBytes)

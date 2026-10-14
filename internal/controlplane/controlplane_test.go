@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"go.pinesandbox.io/computer/internal/base/spec"
 	"go.pinesandbox.io/computer/internal/base/transport"
@@ -50,6 +51,41 @@ func newTestClient(t *testing.T, handler http.HandlerFunc, src TokenSource) *Cli
 
 const sandboxJSON = `{"id":"pine-abc","image":{"uri":"reg/img:1"},"status":{"state":"Running"},` +
 	`"metadata":{"k":"v"},"entrypoint":["/bin/sh"],"expiresAt":"2026-01-01T01:00:00Z","createdAt":"2026-01-01T00:00:00Z"}`
+
+func TestWaitForChangePreservesConditionalResponse(t *testing.T) {
+	for _, status := range []int{200, 304, 404} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			previous := &SandboxInfo{Status: "pausing", ETag: `"uid/1"`}
+			c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.Header.Get("If-None-Match") != previous.ETag || r.Header.Get("Prefer") != "" {
+					t.Errorf("missing conditional wait headers: %v", r.Header)
+				}
+				w.Header().Set("X-Computer-Spec-Version", "1")
+				w.Header().Set("ETag", `"uid/2"`)
+				w.WriteHeader(status)
+				if status == 200 {
+					_, _ = io.WriteString(w, sandboxJSON)
+				}
+			}, &fakeSource{initial: "test"})
+			info, err := c.WaitForChange(context.Background(), "pine-abc", previous)
+			switch status {
+			case 200:
+				if err != nil || info.Status != "running" || info.ETag != `"uid/2"` {
+					t.Fatalf("info=%+v err=%v", info, err)
+				}
+			case 304:
+				if err != nil || info != previous {
+					t.Fatalf("304 lost previous observation: %v", err)
+				}
+			case 404:
+				var missing *NotFoundError
+				if !errors.As(err, &missing) {
+					t.Fatalf("missing runtime: %v", err)
+				}
+			}
+		})
+	}
+}
 
 func TestCreate_SuccessAndHeaders(t *testing.T) {
 	var gotAuth, gotSpec, gotCT string
@@ -342,5 +378,35 @@ func TestKeyedCreateReplaysLostReplyWithSameIdentity(t *testing.T) {
 	info, err := c.CreateComputer(context.Background(), map[string]any{"timeout": 300, "create_id": createID})
 	if err != nil || info.ID != "same-runtime" || calls != 2 || bodies[0] != bodies[1] {
 		t.Fatalf("keyed retry: info=%+v err=%v calls=%d bodies=%v", info, err, calls, bodies)
+	}
+}
+
+type waitRoundTripper func(*http.Request) (*http.Response, error)
+
+func (f waitRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestConditionalWaitHonorsCallerDeadlineWithoutNegotiatingServerTiming(t *testing.T) {
+	for _, short := range []bool{false, true} {
+		ctx := context.Background()
+		cancel := func() {}
+		maxBudget := 35 * time.Second
+		if short {
+			ctx, cancel = context.WithTimeout(ctx, 12*time.Second)
+			maxBudget = 12 * time.Second
+		}
+		raw := transport.New("https", "api.example.test", transport.WithHTTPClient(&http.Client{Transport: waitRoundTripper(func(r *http.Request) (*http.Response, error) {
+			deadline, ok := r.Context().Deadline()
+			remaining := time.Until(deadline)
+			if !ok || remaining > maxBudget || remaining < maxBudget-time.Second || r.Header.Get("Prefer") != "" {
+				t.Errorf("budget=%v wait=%s", remaining, r.Header.Get("Prefer"))
+			}
+			return &http.Response{StatusCode: 304, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(""))}, nil
+		})}))
+		c := NewClient(raw, &fakeSource{initial: "test"}, 1)
+		_, err := c.WaitForChange(ctx, "computer", &SandboxInfo{Status: "pausing", ETag: `"uid/1"`})
+		cancel()
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 }

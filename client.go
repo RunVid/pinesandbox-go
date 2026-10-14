@@ -1,7 +1,3 @@
-// Package pinesandbox is Pine's server-side Go SDK for the Computer — provision, bind, and
-// drive a Pine CUA browser Computer (sessions, agent, drive). It composes the internal
-// layers (zone/transport/control-plane/tokens/coordinator/bind handshake) behind a small
-// hand-written facade whose nouns/verbs match the Ruby `pinesandbox` gem.
 package pinesandbox
 
 import (
@@ -16,9 +12,9 @@ import (
 	"go.pinesandbox.io/computer/internal/tokens"
 )
 
-// Connection is the resolved attach context: the zone (host derivation), the control-plane
-// client, the attach-credential provider, and the coord-client factory. Client builds one
-// and Computer.Attach drives through it.
+// Connection is the resolved attach context a Client builds: where the project's
+// Computers live and the clients that allocate and authorize them. Computer.Attach
+// takes one.
 type Connection struct {
 	zone           *zone.Zone
 	controlPlane   *controlplane.Client
@@ -41,7 +37,7 @@ type Client struct {
 // ClientOptions configures NewClient.
 type ClientOptions struct {
 	// Endpoint is the portal URL or domain the project was given (required), e.g.
-	// "https://staging.pinesandbox.io".
+	// "https://pinesandbox.io".
 	Endpoint string
 	// APIKey is the project client key (pk_) — required.
 	APIKey string
@@ -54,7 +50,7 @@ type ClientOptions struct {
 // NewClient wires the SDK from a pk_ + endpoint.
 func NewClient(opts ClientOptions) (*Client, error) {
 	if opts.Endpoint == "" {
-		return nil, fmt.Errorf("pinesandbox: Endpoint required (e.g. \"https://staging.pinesandbox.io\")")
+		return nil, fmt.Errorf("pinesandbox: Endpoint required (e.g. \"https://pinesandbox.io\")")
 	}
 	if opts.APIKey == "" {
 		return nil, fmt.Errorf("pinesandbox: APIKey required (a pk_ client key)")
@@ -161,7 +157,7 @@ func (c *Client) CreateComputer(ctx context.Context, opts AttachOptions) (*Compu
 }
 
 // StartComputer starts an EXISTING persistent Computer by its stored id + state key.
-// A fresh pod is provisioned and bound with the Computer's prior state restored.
+// It allocates a fresh runtime, attaches the Computer and restores its saved state.
 func (c *Client) StartComputer(ctx context.Context, creds Credentials, opts StartOptions) (*Computer, error) {
 	return c.startWithCredentials(ctx, creds, opts, false)
 }
@@ -295,9 +291,10 @@ type AdoptOptions struct {
 	BindingRevision int64
 }
 
-// AdoptExisting reconstructs an already-bound Computer from its persisted
-// {id, key, sandboxID, computerToken} — no new pod, no re-bind. For driving an existing pod
-// across requests from a backend that cached the ct_. An optional AdoptOptions
+// AdoptExisting reconstructs an attached Computer from its persisted
+// {id, key, sandboxID, computerToken} without allocating or attaching anything. Use it
+// to keep driving a running Computer across requests from a backend that saved its
+// ct_. An optional AdoptOptions
 // preserves ephemeral mode and binding revision; omission uses persistent mode
 // and revision zero. Lifecycle operations observe the runtime's current state.
 func (c *Client) AdoptExisting(ctx context.Context, id string, key []byte, sandboxID, computerToken string, options ...AdoptOptions) (*Computer, error) {

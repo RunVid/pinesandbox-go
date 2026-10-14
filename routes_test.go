@@ -31,7 +31,6 @@ var sdkRoutes = []string{
 	"GET /v1/coord/bind-pubkey",
 	"POST /v1/coord/bind",
 	"POST /v1/coord/capture",
-	"GET /health",
 	"GET /state",
 	"GET /downloads/orphans",
 	"POST /downloads/orphans/{guid}/claim",
@@ -143,6 +142,30 @@ func TestRoutes_ConformToSpec(t *testing.T) {
 		t.Fatalf("CG-4: %d SDK route(s) not found in the spec — regenerate the artifact or fix the drift:\n%s",
 			len(missing), strings.Join(missing, "\n"))
 	}
+}
+
+// publicRoute reports whether a request the SDK sent ("METHOD /concrete/path") is one
+// of the public routes in contract/computer-routes.json. ok is false on the mirror,
+// which doesn't publish the artifact.
+func publicRoute(t *testing.T, request string) (public, ok bool) {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("..", "contract", "computer-routes.json"))
+	if err != nil {
+		return false, false
+	}
+	var routes []string
+	if err := json.Unmarshal(b, &routes); err != nil {
+		t.Fatalf("parse route artifact: %v", err)
+	}
+	for _, r := range routes {
+		method, path, _ := strings.Cut(r, " ")
+		pattern := "^" + strings.ReplaceAll(regexp.QuoteMeta(path), `\{\}`, "[^/]+") + "$"
+		reqMethod, reqPath, _ := strings.Cut(request, " ")
+		if method == reqMethod && regexp.MustCompile(pattern).MatchString(reqPath) {
+			return true, true
+		}
+	}
+	return false, true
 }
 
 // TestRoutes_NoDuplicates guards the declared list against accidental copy-paste dupes.

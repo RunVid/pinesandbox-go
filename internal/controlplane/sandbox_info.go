@@ -7,9 +7,8 @@ import (
 	"time"
 )
 
-// SandboxInfo is the parsed control-plane view of a sandbox (the Computer's pod). Mirrors
-// the Ruby OpenSandbox::SandboxInfo surface: id, image URI, normalized status, metadata,
-// entrypoint, and the two timestamps. The data-plane URL is intentionally NOT carried here
+// SandboxInfo is the parsed control-plane view of a Computer's sandbox: id, image URI,
+// normalized status, metadata, entrypoint, and the two timestamps. The data-plane URL is intentionally NOT carried here
 // — the lifecycle server owns provisioning, not deployment topology (the zone resolver
 // owns addressing).
 type SandboxInfo struct {

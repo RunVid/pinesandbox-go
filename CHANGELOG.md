@@ -5,11 +5,30 @@ package `pinesandbox`) are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/). The current beta compatibility
 line is `v0.3.x`; review release notes before adopting a new minor version.
 
+## [0.3.16] — 2026-10-14
+
+### Changed
+
+- Waiting for a Computer to start, pause, resume, stop or be deleted returns
+  as soon as its state changes instead of polling, still honoring your
+  context's cancellation and deadline. A connection dropped during the wait
+  reconnects within that deadline. Where Pine doesn't support this yet, the SDK
+  polls as before. Saved credentials keep working.
+- Error messages and package documentation describe the Computer and its
+  runtime. The messages of `SandboxFailedError`, `ReadyTimeoutError`,
+  `AttachAuthorizationCommittedError`, `PodPoisonedError`,
+  `BrokerUnreachableError` and `SpecVersionMismatch` are reworded; their types,
+  fields and `errors.Is`/`errors.As` behavior are unchanged.
+
+### Removed
+
+- `Computer.Health`, which read a route outside the public API.
+
 ## [0.3.15] — 2026-10-11
 
 ### Added
 
-- `Client.CreateDiagnostic` and `Client.GetDiagnostic` request and read a saved diagnostic with a support reference, using the project key and Computer ID. An optional session requests a read-only agent investigation with separate private and customer-facing reports; omitting it checks lifecycle status. No customer work is repeated or support ticket opened. Requires the diagnostics backend, coordinator support path, and gateway routes.
+- `Client.CreateDiagnostic` and `Client.GetDiagnostic` request and read a saved diagnostic of a Computer, with a support reference, using the project key and Computer ID. Naming a session also has Pine's agent review that session's recorded work, without changing anything; otherwise the diagnostic checks the Computer's lifecycle status. A diagnostic never repeats your work or opens a support ticket.
 
 - `Computer.Pause` and `Computer.Resume` keep a Computer's sessions and their
   state while it isn't working, for projects with Pause enabled. Both wait for
@@ -85,7 +104,7 @@ line is `v0.3.x`; review release notes before adopting a new minor version.
   needs; tokens are never method parameters.
 - **Sessions.** Several sessions on one Computer, each with its own browser
   window, shell and work directory, sharing the Computer's sign-ins.
-- **The resident agent.** `Session.Agent()` runs a goal, then steers, answers,
+- **Pine's agent.** `Session.Agent()` runs a goal, then steers, answers,
   cancels or resets it; its events stream with typed constants and resume from
   a saved cursor. Secrets reach the agent by name (`$NAME`) and never enter the
   conversation.

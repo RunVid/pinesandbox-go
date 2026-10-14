@@ -167,7 +167,7 @@ func TestAPIError_IsAsError(t *testing.T) {
 }
 
 // TestTaxonomyMatchesCanonical guards the embedded copy against the canonical artifact
-// (skips on the mirror where the canonical is absent — §9.1).
+// (skips on the mirror where the canonical is absent).
 func TestTaxonomyMatchesCanonical(t *testing.T) {
 	canonical := filepath.Join("..", "..", "..", "..", "contract", "error-taxonomy.json")
 	want, err := os.ReadFile(canonical)

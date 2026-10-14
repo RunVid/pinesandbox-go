@@ -1,6 +1,6 @@
 // Package bindhpke is the SENDER side of the v8.3 bind HPKE handshake — the SDK seals
 // the bind plaintext for coord's per-process ephemeral X25519 key. RFC 9180 mode_base,
-// suite LOCKED by PERSISTENCE_BIND_CONTRACT §5.2 (mirrors coord's pkg/bindhpke exactly so
+// suite LOCKED by the attach contract (mirrors coord's pkg/bindhpke exactly so
 // the wire is byte-compatible — the interop/ test module proves SDK-seal/coord-open):
 //
 //	KEM  = X25519-HKDF-SHA256 (0x0020)
@@ -13,7 +13,7 @@
 //	wire ciphertext = enc[32] || aead_ciphertext   (enc = the X25519 encapsulated key)
 //
 // This is a domain package (under internal/, NOT internal/base): it may import base, but
-// base must never import it (the base ↛ domain boundary, §3 — enforced by the
+// base must never import it (the base ↛ domain boundary — enforced by the
 // import-graph test).
 package bindhpke
 
@@ -30,14 +30,14 @@ import (
 // encLen is the X25519 encapsulated-key length (RFC 9180 KEM 0x0020).
 const encLen = 32
 
-// kemID / suite are the LOCKED bind HPKE primitives (§5.2). Centralized so the sender
+// kemID / suite are the LOCKED bind HPKE primitives. Centralized so the sender
 // here cannot drift from coord's recipient.
 var (
 	kemID = hpke.KEM_X25519_HKDF_SHA256
 	suite = hpke.NewSuite(kemID, hpke.KDF_HKDF_SHA256, hpke.AEAD_ChaCha20Poly1305)
 )
 
-// Info builds the HPKE info string per §5.2 — the process-binding (a ciphertext sealed
+// Info builds the HPKE info string — the process-binding (a ciphertext sealed
 // for one pod/boot can't be opened by another). MUST byte-match coord's Info.
 func Info(podUID, coordBootID string) []byte {
 	return []byte("pine.bind.v1|" + podUID + "|" + coordBootID)

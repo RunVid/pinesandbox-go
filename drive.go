@@ -7,8 +7,8 @@ import (
 	"go.pinesandbox.io/computer/internal/coordinator"
 )
 
-// DriveMode is the BYOA drive-mode primitives — observe / computer-use / upload_file — all
-// session-scoped (ps_). For callers driving the Computer with their own agent loop.
+// DriveMode is the primitives for driving a session with your own agent loop — observe /
+// computer-use / upload_file — all with the session token (ps_).
 type DriveMode struct {
 	s *Session
 }

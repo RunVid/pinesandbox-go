@@ -8,7 +8,7 @@ import (
 	"go.pinesandbox.io/computer/internal/coordinator"
 )
 
-// Control / tab / desktop-token types (re-exported from the coordinator layer).
+// Control, handoff, tab and desktop-token types.
 type (
 	ControlState        = coordinator.ControlState
 	ControlPatch        = coordinator.ControlPatch
@@ -45,9 +45,9 @@ func (s *Session) CloseTab(ctx context.Context, targetID string) error {
 
 // ---- control lease (ct_) ----
 //
-// Control is operator lease management: the coord makes PATCH /control ct_-only
-// (ps_ → 403) and the reads accept ct_ OR ps_, so the whole surface routes through
-// the Computer's ct_ — keeping it uniform and usable on any handle.
+// Changing control requires the Computer token (a ps_ gets 403) and the reads
+// accept either token, so every control call uses the ct_ and works on any
+// Session handle.
 
 // ControlState returns the session's control state + ETag (use the ETag as the next
 // UpdateControl If-Match).
@@ -77,8 +77,8 @@ type controlOpts struct {
 	actorType string
 }
 
-// WithForce takes/releases control BY FORCE — records actor_type "admin_override",
-// which the coord pairs with force=true to bypass If-Match. Use it to wrest control
+// WithForce takes/releases control BY FORCE — records actor_type "admin_override" and
+// sends force=true, which skips the If-Match check. Use it to wrest control
 // regardless of who currently holds it. force is DERIVED from actor_type (force ⇔
 // admin_override), so a later WithActor() can't leave the two inconsistent.
 func WithForce() ControlOption {
@@ -108,7 +108,7 @@ func (s *Session) ReleaseControl(ctx context.Context, opts ...ControlOption) (*C
 // TakeControl/ReleaseControl. The 412 retry mints a FRESH Idempotency-Key (each
 // UpdateControl call auto-fills one) — the retry is a distinct request, so it must
 // NOT reuse the rejected key; that keeps the SDK correct without depending on
-// coord-side cleanup (mirrors the Ruby SDK's hardened behavior).
+// server-side cleanup (mirrors the Ruby SDK's hardened behavior).
 func (s *Session) setController(ctx context.Context, controller string, opts []ControlOption) (*ControlState, error) {
 	o := controlOpts{actorType: ActorUserClick}
 	for _, fn := range opts {
@@ -140,7 +140,8 @@ func (s *Session) NotifyHuman(ctx context.Context, reason, detail, ifMatch strin
 	return s.coord.ControlNotify(ctx, s.token, s.name, reason, detail, ifMatch)
 }
 
-// DesktopToken mints a short-TTL browser-safe VNC desktop-stream token (dt_). ct_-only.
+// DesktopToken mints a short-lived, browser-safe desktop-stream token (dt_) with the
+// Computer token.
 func (s *Session) DesktopToken(ctx context.Context) (*DesktopToken, error) {
 	return s.coord.MintDesktopToken(ctx, s.computerToken(), s.name)
 }

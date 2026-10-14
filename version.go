@@ -1,21 +1,23 @@
 // Package pinesandbox is the Pine Computer server SDK for Go.
 //
-// It presents the same nouns/verbs as the Ruby `pinesandbox` gem for integrator
-// backends: provision/attach a Computer, drive sessions (agent / BYOA-drive / shell /
-// files / control), and hand a browser-safe DelegatedConnection to a web app.
-// Same audience as the Ruby gem — never a browser.
+// Use it from your backend to create and start Computers, open sessions, give
+// Pine's agent a goal or drive a session with your own agent, run shell
+// commands, move files, manage control, and hand a browser-safe
+// DelegatedConnection to your web app. It holds project and Computer
+// credentials, so it never runs in a browser. Its nouns and verbs match the
+// Ruby `pinesandbox` gem.
 //
-// Integration guide: https://pinesandbox.io/docs/integration. The wire contract is the
-// published OpenAPI reference: https://pinesandbox.io/spec/computer and
-// https://pinesandbox.io/spec/coordinator.
+// Integration guide: https://pinesandbox.io/docs/integration. API reference:
+// https://pinesandbox.io/spec/computer and https://pinesandbox.io/spec/portal.
 package pinesandbox
 
 // Version is this SDK's release version. SDK patches ship independently within
 // the shared compatibility minor.
-const Version = "0.3.15"
+const Version = "0.3.16"
 
-// SpecVersion is the Computer wire-major this SDK targets — the CG-1 version-identity
-// source. It MUST equal computer-api.yaml's x-pine-spec-version, the gateway's
-// specVersion const, and Ruby's DelegatedConnection::SPEC_VERSION;
-// specs/check-version-identity.py greps this constant (regex SpecVersion = <n>).
+// specs/check-version-identity.py reads this constant (SpecVersion = <n>) and
+// checks it against the API spec and the other SDKs.
+
+// SpecVersion is the Computer API major version this SDK targets. A Computer
+// that serves a different major version fails with SpecVersionMismatch.
 const SpecVersion = 1

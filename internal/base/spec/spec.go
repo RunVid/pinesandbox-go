@@ -46,7 +46,7 @@ type MismatchError struct {
 }
 
 func (e *MismatchError) Error() string {
-	return fmt.Sprintf("pinesandbox: Computer-API spec-version mismatch: SDK pins v%d, gateway served %q", e.Supported, e.Served)
+	return fmt.Sprintf("pinesandbox: Computer-API spec-version mismatch: SDK pins v%d, the Computer served %q", e.Supported, e.Served)
 }
 
 // leadingInt parses the leading signed integer of s, stopping at the first non-digit —

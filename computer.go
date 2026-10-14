@@ -55,8 +55,8 @@ type AttachOptions struct {
 	CaptureKeypair       *CaptureKeypair
 	PriorCaptureKeypairs []*CaptureKeypair
 
-	Timeout      time.Duration // sandbox lifetime, default 300s
-	ReadyTimeout time.Duration // allocation + pod readiness budget, default 300s
+	Timeout      time.Duration // runtime lifetime, default 300s
+	ReadyTimeout time.Duration // allocation readiness budget, default 300s
 	// Deprecated: Computer attach does not support environment overrides.
 	// Nonempty maps are rejected before provisioning; leave nil or empty.
 	PodEnv   map[string]string
@@ -69,18 +69,17 @@ type AttachOptions struct {
 	// reads the current binding and ignores this value.
 	BindingRevision int64
 
-	// Ephemeral binds an access lease ONLY — no persistence. The attach carries
-	// no capture keypair, omits pk_computer/key_generation at mint, forwards no
-	// key_assertion, seals the bind payload WITHOUT any computer key, and skips
-	// the pre-stop checkpoint. Default (false) is the persistent attach.
+	// Ephemeral attaches without saved state: nothing is restored, no state key
+	// or capture keypair is sent, and Stop saves nothing. Default (false) is the
+	// persistent attach.
 	Ephemeral bool
 
-	MaxBindAttempts  int           // default binder.DefaultMaxBindAttempts
-	BindReadyTimeout time.Duration // default binder.DefaultReadyTimeout
+	MaxBindAttempts  int           // attach attempts, default 3
+	BindReadyTimeout time.Duration // attach readiness budget, default 120s
 }
 
-// Computer is a persistent Pine CUA Computer. Identity is (ID, Key); a powered-on Computer
-// also holds a sandbox handle, a coordinator client, and the pod's ct_.
+// Computer is a persistent Pine Computer. Its identity is (ID, Key); while attached to a
+// runtime it also holds the runtime's handle and its Computer token (ct_).
 type Computer struct {
 	id        string
 	key       []byte
@@ -202,7 +201,7 @@ func (c *Computer) Credentials() Credentials {
 	return result
 }
 
-// SandboxID is the bound pod's sandbox id (empty if not attached).
+// SandboxID is the id of the runtime the Computer is attached to (empty if not attached).
 func (c *Computer) SandboxID() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -212,17 +211,18 @@ func (c *Computer) SandboxID() string {
 	return c.sandbox.ID()
 }
 
-// ComputerToken is the pod's ct_ (empty if not attached). @api advanced — prefer the typed
-// Session/Computer methods, which attach the right token.
+// ComputerToken is the Computer token (ct_) for the attached runtime (empty if not
+// attached). @api advanced — prefer the typed Session/Computer methods, which send the
+// right token.
 func (c *Computer) ComputerToken() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.computerToken
 }
 
-// PersistenceMode is the bound persistence mode the coordinator reported on
-// the last successful attach (e.g. "persistent" or "ephemeral"); empty if not
-// attached or the coord reported none.
+// PersistenceMode is the persistence mode the runtime reported on the last
+// successful attach (e.g. "persistent" or "ephemeral"); empty if not attached
+// or none was reported.
 func (c *Computer) PersistenceMode() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -385,9 +385,9 @@ func (c *Computer) AddPriorKey(version int, key []byte) error {
 	return nil
 }
 
-// Attach provisions a fresh pod via the control plane, waits for Running, and runs the bind
-// handshake — leaving the Computer ready to create sessions. Refuses to re-attach a live
-// Computer (call Stop or Kill first).
+// Attach allocates a fresh runtime, waits for it to run, and attaches the Computer to it,
+// leaving the Computer ready to create sessions. It refuses to attach a Computer that is
+// already attached (call Stop or Kill first).
 func (c *Computer) Attach(ctx context.Context, conn *Connection, opts AttachOptions) error {
 	c.mu.Lock()
 	if c.sandbox != nil {
@@ -635,7 +635,7 @@ func (c *Computer) Delete(ctx context.Context) error {
 	return nil
 }
 
-// Alive reports whether the bound pod is still live.
+// Alive reports whether the attached runtime is still live.
 func (c *Computer) Alive(ctx context.Context) bool {
 	c.mu.Lock()
 	sandbox := c.sandbox

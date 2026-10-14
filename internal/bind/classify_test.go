@@ -221,7 +221,7 @@ func TestClassify_BindRestoreFailedBranches(t *testing.T) {
 }
 
 // TestDecisionTableMatchesCanonical guards the testdata copy against the canonical
-// contract artifact (skips on the mirror where the canonical is absent — §9.1).
+// contract artifact (skips on the mirror where the canonical is absent).
 func TestDecisionTableMatchesCanonical(t *testing.T) {
 	canonical := filepath.Join("..", "..", "..", "contract", "bind-decision-table.json")
 	want, err := os.ReadFile(canonical)

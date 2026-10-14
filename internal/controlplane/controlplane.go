@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"time"
 
 	"go.pinesandbox.io/computer/internal/base/spec"
 	"go.pinesandbox.io/computer/internal/base/transport"
@@ -82,6 +83,29 @@ func (c *Client) Get(ctx context.Context, sandboxID string) (*SandboxInfo, error
 	resp, err := c.do(ctx, "GET", path, nil, nil, false)
 	if err != nil {
 		return nil, err
+	}
+	if resp.Status != 200 {
+		return nil, statusError("GET", path, c.raw.Host(), resp)
+	}
+	info, err := ParseSandboxInfo(resp.Body)
+	if err == nil {
+		info.ETag = resp.Headers.Get("ETag")
+	}
+	return info, err
+}
+
+// WaitForChange observes the last version. The server owns the hold time;
+// the caller's deadline bounds the request independently.
+func (c *Client) WaitForChange(ctx context.Context, sandboxID string, previous *SandboxInfo) (*SandboxInfo, error) {
+	ctx, cancel := context.WithTimeout(ctx, 35*time.Second)
+	defer cancel()
+	path := "/sandboxes/" + url.PathEscape(sandboxID)
+	resp, err := c.do(ctx, "GET", path, nil, map[string]string{"If-None-Match": previous.ETag}, true)
+	if err != nil {
+		return nil, err
+	}
+	if resp.Status == 304 {
+		return previous, nil
 	}
 	if resp.Status != 200 {
 		return nil, statusError("GET", path, c.raw.Host(), resp)

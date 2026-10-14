@@ -1,7 +1,7 @@
 # Pine Computer Go SDK
 
-Pine's server-side Go SDK for the **Computer** — provision, bind, and drive a Pine
-CUA browser Computer (sessions, agent, drive) from a backend.
+Pine's server-side Go SDK for the **Computer** — create, start, and drive a Pine
+Computer (sessions, Pine's agent, your own agent, shell, files) from a backend.
 
 ```
 go get go.pinesandbox.io/computer
@@ -24,12 +24,10 @@ retained binding and sessions and never falls back to Start after snapshot loss.
 compatible alias. `Computer.Pause(ctx)` and `Computer.Resume(ctx)` wait for
 observed completion, bounded by six minutes or an earlier caller deadline. A
 failed operation retains the existing binding for inspection or retry. Stop
-resumes a paused runtime before saving. Internal control-plane adapters are not
-an integrator API.
+resumes a paused runtime before saving.
 
 Pause requires a project opt-in and a snapshot-capable runtime. It is off by
-default; an operator enables it in the project's feature settings. Refresh the
-project token after enabling. Removing the grant blocks new pauses while
+default and enabled per project. Refresh the project token after it is enabled. Removing the grant blocks new pauses while
 preserving Resume and Stop of retained memory. Ordinary Stop/Start is unaffected.
 
 Do not turn a Resume error into an automatic `StartComputer` call. A timeout
@@ -142,7 +140,7 @@ func run() error {
 compute release. Caller cancellation does not cancel accepted work. Reconstruct a
 saved handle on another backend to observe or join it; no SDK-local save receipt
 is needed. `*pine.StopSaveError` retains the binding and reports whether retrying
-can help. A coordinator restart may leave the final save unconfirmed.
+can help. A restart of the Computer's services may leave the final save unconfirmed.
 
 Check both results: `false, nil` means release is unconfirmed; cancellation remains
 an error. Keep the saved binding until Stop returns true. Success proves compute
@@ -207,9 +205,9 @@ or other project's id also succeeds. There is no undelete.
 
 ## Timeouts
 
-`AttachOptions.Timeout` sets the sandbox lifetime. `ReadyTimeout` separately
-bounds allocation plus pod readiness; `BindReadyTimeout` bounds the following
-bind. Runtime expiry starts at allocation, independently of those wait budgets.
+`AttachOptions.Timeout` sets the runtime lifetime. `ReadyTimeout` separately
+bounds allocation and runtime readiness; `BindReadyTimeout` bounds the following
+attach. Runtime expiry starts at allocation, independently of those wait budgets.
 The caller's context can shorten either wait. Defaults and cleanup
 semantics are defined in the [attach timeout contract](https://pinesandbox.io/spec/computer).
 For example, `Timeout: 8 * time.Hour` keeps a long-lived Computer while
@@ -223,15 +221,15 @@ returns; it is best-effort and does not recover allocations after a process cras
 ## Stateless reuse (multi-instance / restarted backends)
 
 The handle isn't the source of truth — your **persisted credentials** are. A
-stateless backend rebuilds the handles per request, no provisioning and no coord
-round-trip for the session:
+stateless backend rebuilds the handles per request, with no allocation and no
+request to the Computer for the session:
 
 - **Computer** — persist `comp.ID()`, `comp.Key()`, the current and retained
   capture keypairs, `comp.SandboxID()`, and
   `comp.ComputerToken()` (the `ct_`). Portal is an authorization ledger, not
   the source of truth for this integrator-owned record.
 - **Session** — persist `sess.Name()` and `sess.Token()` (the `ps_`). The `ps_` is
-  minted once at `CreateSession` and the coordinator redacts it on read, so a
+  minted once at `CreateSession` and the Computer redacts it on read, so a
   session re-fetched with `comp.Session(name)` has **no** `ps_` (its drive ops
   `401`); keep the create-time value and rebuild with `AdoptSession`.
 
@@ -321,7 +319,7 @@ terminals until the new submission is confirmed. A fresh session starts with an
 empty cursor.
 
 `Run` sends one request and does not retry an ambiguous transport failure.
-The same operation works with older coordinators; there is no route probe.
+The same operation works with older Computers; there is no route probe.
 
 If the process loses the final outcome, reconcile through `Status` and the
 durable pre-submit `Events` cursor/baseline before deciding whether to submit
@@ -330,29 +328,29 @@ baseline, cumulative v1 history cannot prove that a repeated goal was accepted.
 This v1 surface does not promise exactly-once submission across a process
 restart.
 
-Tokens split by tier: **`ct_` is the operator surface** — control lease, agent +
-skills-authoring mutations, lifecycle; **`ps_` is the session's own drive + reads**.
+Tokens split by tier: **`ct_` is your backend's Computer-wide token** — control,
+agent + skills-authoring mutations, lifecycle; **`ps_` is the session's own drive + reads**.
 The SDK attaches the right one per call.
 
 Skill authoring is asynchronous: `Session.Learn`, `Session.Teach`, and
 `Session.Refine` return the accepted author run; consume progress and its terminal
 draft through `Session.AuthorEvents`.
 
-When coord rejects a bound token, the SDK surfaces a typed
-`*pine.TokenRejectedError` — a report, not an attach instruction (`ct_` is
-binding-lifetime, so on a live pod this is `binding_auth_lost`). It never silently
-re-mints (that would land a fresh pod and invalidate every `ps_`). Reconcile, and
+When the Computer rejects a token that worked before, the SDK surfaces a typed
+`*pine.TokenRejectedError` — a report, not an attach instruction (`ct_` lasts as long
+as the binding, so on a live runtime this is `binding_auth_lost`). It never silently
+re-mints (that would land a fresh runtime and invalidate every `ps_`). Reconcile, and
 recover by re-attaching **only when the sandbox is confirmed gone**:
 `AttachComputer` mints a fresh `ct_` + sessions/`ps_`; persist the new creds and retry.
 
-An unavailable gateway route surfaces as
+A Computer that can no longer be reached surfaces as
 `*pine.SandboxGoneError`; `errors.As` still reaches its underlying `*pine.APIError`
 for host, operation, request id, and wire detail. Reconcile it with `comp.Status(ctx)`:
-paused/restoring runtimes withdraw their route without deleting the runtime record.
+paused or restoring runtimes can't be reached, but their runtime record remains.
 A missing session on a live
 Computer instead matches `pine.ErrSessionNotFound`, and a control ownership
 conflict matches `pine.ErrControlNotHeld`. Use `pine.IsRetryable(err)` for the
-server's data-plane retry judgment; it intentionally does not guess whether an
+server's retry judgment; it intentionally does not guess whether an
 opaque transport failure or mutation is safe to replay.
 
 ## Driving the Computer with an agent
@@ -360,9 +358,9 @@ opaque transport failure or mutation is safe to replay.
 A Computer is a real cloud browser + desktop + shell. There are **three ways** an
 agent (or a human) can drive it — pick per task; they share one Computer/Session.
 
-### 1. Delegate mode — Pine's resident agent drives
+### 1. Delegate mode — Pine's agent drives
 
-You hand a goal; Pine's in-Computer agent runs the perceive→act loop, pauses to ask
+You hand a goal; Pine's agent runs the perceive→act loop on the Computer, pauses to ask
 when it needs input, and reports a typed outcome. One persistent task per session;
 each `Run` is a turn (the thread is the memory — `Reset` clears it).
 
@@ -404,10 +402,10 @@ for ev, err := range ag.Events(ctx, cursor) {
 }
 ```
 
-`AgentMode.Cancel` targets whichever turn is current. The coordinator captures
-and fences that executor internally, so callers do not carry a run identifier.
+`AgentMode.Cancel` targets whichever turn is current, so callers do not carry a
+run identifier.
 
-### 2. BYOA (bring your own agent) — your agent drives
+### 2. Your own agent drives
 
 Your own model loop drives the Computer with two primitives: `Observe` (a snapshot
 of the active tab — screenshot + the coordinate metadata to map actions) and
@@ -457,7 +455,7 @@ json.NewEncoder(w).Encode(env)       // → your frontend
 ## Surface
 
 `Client` → `Computer` → `Session`, with `Session.Agent()` (delegate mode) and
-`Session.Drive()` (BYOA primitives). The package godoc is the authoritative
+`Session.Drive()` (your own agent's primitives). The package godoc is the authoritative
 surface reference (`go doc go.pinesandbox.io/computer`), and the wire contract
 is the published [API reference](https://pinesandbox.io/spec/computer). The
 noun/verb set matches the Ruby `pinesandbox` gem (same verbs, presented
@@ -492,21 +490,20 @@ if report.Assessment != nil { log.Print(report.Assessment.Message) }
 
 Supply a session name to investigate its recorded agent work; omit it for a lifecycle check. The investigation does not operate the application or repeat its work. It produces a private report for Pine support and a separate customer-safe assessment. Optional descriptions provide private context. An unavailable diagnostic does not justify repeating customer work. Requesting a report does not open a human support ticket; share its reference separately when asking Pine for help.
 
-Errors are **self-describing at the resource level**: every `*APIError` off a gateway-fronted
+Errors are **self-describing at the resource level**: every `*APIError` from a Computer
 response folds the failing Computer + operation into `Error()` — resource first — so a generic
 handler that logs only `err` shows WHICH Computer and WHICH call failed with no extra plumbing.
 `Host` / `Op` / `RequestID` are also exported fields (the transport-fault `*TimeoutError` /
 `*ConnectionError` and the control-plane / token errors carry the same context). The suffix
 grammar is uniform `key=value` across the Go and Ruby SDKs; the Go SDK renders **`host=`**
-because its data-plane client holds the gateway host, where the Ruby coordinator uses
-**`sandbox=`** because its adapter holds the sandbox id (same Computer, different handle each
-layer already has). `op` is always `<METHOD> <path>` with the query string stripped.
+because its client holds the Computer's host, where the Ruby SDK uses **`sandbox=`** because
+it holds the sandbox id (same Computer, different handle each SDK already has). `op` is always `<METHOD> <path>` with the query string stripped.
 Portal token/attach errors additionally expose `Code` (the stable RFC 9457 problem type)
 and optional `Reason`; both are spec-defined and safe to branch on. Raw server exceptions
 are never part of those fields.
 
 If `CreateComputer` returns `*AttachAuthorizationCommittedError`, Portal advanced the
-binding revision before coordinator bind failed. retain its non-nil `Credentials` and inspect `SandboxID` before deciding whether
+binding revision before the attach failed. Retain its non-nil `Credentials` and inspect `SandboxID` before deciding whether
 to stop or recover the failed runtime;
 their diagnostic formatting redacts both private keys.
 
@@ -521,8 +518,8 @@ if _, err := sess.Agent().Run(ctx, "book the 9am slot"); err != nil {
 }
 ```
 
-When you file a report, **lead with the resource spine** — the durable key we pivot on across
-time via logs / metrics resource attrs / `./pine debug` / the portal:
+When you file a report, **lead with the resource spine** — the durable key Pine uses to find
+your Computer's records:
 
 1. **`computer_id`** (`computer.ID()`) — WHICH Computer. Add the **session name** (`sess.Name()`)
    and, for an agent-lane issue, the **`task_id`**.
@@ -540,8 +537,8 @@ time via logs / metrics resource attrs / `./pine debug` / the portal:
 - `internal/base/*` — generic, Computer-agnostic primitives (zone, transport,
   SSE, problem, spec-version); enforced to never import a domain package.
 - `internal/{bindhpke,bind,binder,tokens,controlplane,coordinator}` — the domain.
-- `interop/` — monorepo-only module proving the bind HPKE envelope is byte-
-  compatible with the coordinator's real implementation.
+- `interop/` — monorepo-only module proving the attach HPKE envelope is byte-
+  compatible with the Computer's implementation.
 
 ## Develop
 
@@ -553,7 +550,7 @@ time via logs / metrics resource attrs / `./pine debug` / the portal:
 ```
 go test -race ./...      # unit + conformance gates (route + schema drift)
 go vet ./... && gofmt -l .
-cd interop && go test ./...   # SDK ⇄ coord HPKE interop (needs the monorepo)
+cd interop && go test ./...   # SDK ⇄ Computer HPKE interop (needs the monorepo)
 ```
 
 The route/schema conformance gates read the `contract/computer-*.json` artifacts

@@ -140,8 +140,6 @@ func TestFacade_TokenRouting_Comprehensive(t *testing.T) {
 	_, _ = comp.PendingPasskeyCeremonies(ctx)
 	_ = comp.ApprovePasskeyCeremony(ctx, "pwc_abc")
 	_ = sess.DeclarePasskeyIntent(ctx, "example.com")
-	// token-less
-	_, _ = comp.Health(ctx)
 
 	expect := map[string]string{
 		// ps_ (session-scoped)
@@ -212,11 +210,17 @@ func TestFacade_TokenRouting_Comprehensive(t *testing.T) {
 		"POST /v1/passkeys/ceremonies/pwc_abc":  ct,
 		"POST /v1/sessions/s1/passkeys/intents": ps,
 		// token-less
-		"GET /health": "",
 	}
 
 	mu.Lock()
 	defer mu.Unlock()
+	// The SDK ships to customers: every request it sent, having called every
+	// wrapper, is a public route.
+	for key := range auth {
+		if public, ok := publicRoute(t, key); ok && !public {
+			t.Errorf("%s is not a public route", key)
+		}
+	}
 	for key, want := range expect {
 		got, called := auth[key]
 		if !called {

@@ -4,7 +4,7 @@
 // test loads a module-local copy and asserts every vector (drift fails CI).
 //
 // This is a generic base primitive (internal/base): it is Computer-agnostic and must
-// not import any domain package (the base ↛ domain boundary, design §3).
+// not import any domain package (the base ↛ domain boundary).
 package zone
 
 import (

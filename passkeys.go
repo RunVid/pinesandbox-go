@@ -16,8 +16,8 @@ const (
 )
 
 // ListPasskeys returns metadata for durable custodial passkeys held by this
-// Computer. Private key material remains inside the coordinator and encrypted
-// state component.
+// Computer. Private key material stays inside the Computer and its encrypted
+// saved state.
 func (c *Computer) ListPasskeys(ctx context.Context) ([]PasskeyCredential, error) {
 	coord, ct, err := c.bound()
 	if err != nil {

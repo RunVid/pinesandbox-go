@@ -546,7 +546,7 @@ func mustSnapshot(t *testing.T, ctx context.Context, comp *pine.Computer) map[st
 			return m
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("no snapshot after %v — capture did not land (coord→broker→GCS write NOT verified)", wait)
+			t.Fatalf("no snapshot after %v — capture did not land (state write NOT verified)", wait)
 		}
 		time.Sleep(poll)
 	}
@@ -628,7 +628,7 @@ func TestE2E_J6_ControlAndAdopt(t *testing.T) {
 	}
 }
 
-// J7 — per-session UID isolation (SESSION_ISOLATION_HARDENING.md §3). Two sessions on the
+// J7 — per-session UID isolation. Two sessions on the
 // SAME Computer must run as DISTINCT numeric UIDs, must not be able to read each other's
 // 0700 workdir, and a background survivor must be reaped when its session is destroyed
 // before its UID can be reused. This is the real split-pod drive against the live v3 pod —
@@ -696,7 +696,7 @@ func TestE2E_J7_SessionIsolation(t *testing.T) {
 		t.Fatalf("DestroySession a: %v", err)
 	}
 	// A SIGKILL'd survivor becomes a DEAD zombie (State Z) until PID 1 reaps it — the
-	// §3.2 "harmless, can't execute" state. Isolation holds the instant it's dead, so
+	// "harmless, can't execute" state. Isolation holds the instant it's dead, so
 	// accept gone-OR-zombie as reaped; only a still-RUNNING process (S/R/D) is a UID-reuse
 	// hole. (`/proc/<pid>/stat` field 3 is the State letter.)
 	gone := mustExec(t, ctx, b, fmt.Sprintf(
@@ -710,8 +710,8 @@ func TestE2E_J7_SessionIsolation(t *testing.T) {
 
 // TestE2E_J8_EscapeBattery is the adversarial counterpart to J7: instead of proving
 // the wall exists, it tries to CLIMB it. Every probe runs as the session UID over the
-// real exec lane against the live split-pod, and MUST be denied. Findings are from
-// SESSION_ISOLATION_REDTEAM.md; each failing assertion names the finding it regresses.
+// real exec lane against the live runtime, and MUST be denied. Each failing assertion
+// names the isolation finding it regresses.
 // (F3 symlink-chown is covered transitively: A1 squat-denial removes its precondition.)
 func TestE2E_J8_EscapeBattery(t *testing.T) {
 	c := newClient(t)
@@ -774,7 +774,7 @@ rm -rf /var/lib/sandbox/sessions/J8-SQUAT /var/lib/sandbox/J8-EVIL 2>/dev/null |
 		t.Errorf("execd access token READABLE by the session — root-RCE token leak (regression)")
 	}
 	// F4/HOLD on the pairing rail: the browser-locally MATERIALIZED secrets
-	// (coord-minted, delivered over the §6 pairing channel, written under
+	// (coord-minted, delivered over the pairing channel, written under
 	// /var/run/pine/pair) carry the same session-unreadable requirement as
 	// their shared-volume predecessors did.
 	if fieldVal(out, "A3B_RC") == "0" {
