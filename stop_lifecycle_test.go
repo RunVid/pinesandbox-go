@@ -209,7 +209,7 @@ func TestRecoveryUsesObservedVersionAndWaitsForCompute(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			handle := newSandboxHandle(conn.controlPlane, "sb-1", info.Status)
+			handle := newRuntimeHandle(conn.controlPlane, "sb-1", info.Status)
 			handle.sleeper = func(context.Context, time.Duration) error { return nil }
 			released, err := handle.releaseFailedRuntime(context.Background(), info)
 			if changed {
@@ -229,7 +229,7 @@ func TestRecoveryUsesObservedVersionAndWaitsForCompute(t *testing.T) {
 
 func TestRecoveryDoesNotDiscardAnUnsettledCapture(t *testing.T) {
 	conn := buildTestConnection(t, "http://unused", "http://unused")
-	handle := newSandboxHandle(conn.controlPlane, "sb-1", "unavailable")
+	handle := newRuntimeHandle(conn.controlPlane, "sb-1", "unavailable")
 	info := &controlplane.SandboxInfo{Status: "unavailable", Reason: "CaptureTimeout", ETag: `"uid/7"`}
 	if released, err := handle.releaseFailedRuntime(context.Background(), info); released || err == nil {
 		t.Fatal("capture timeout is not a settled failure")
@@ -238,7 +238,7 @@ func TestRecoveryDoesNotDiscardAnUnsettledCapture(t *testing.T) {
 
 func TestRecoveryWaitRespectsCallerDeadline(t *testing.T) {
 	get, _ := statusSequence("stopping")
-	handle := newSandboxHandle(&fakeCP{get: get}, "sb-1", "stopping")
+	handle := newRuntimeHandle(&fakeCP{get: get}, "sb-1", "stopping")
 	ctx, cancel := context.WithCancel(context.Background())
 	handle.sleeper = func(context.Context, time.Duration) error { cancel(); return nil }
 	released, err := handle.releaseFailedRuntime(ctx, &controlplane.SandboxInfo{Status: "stopping"})

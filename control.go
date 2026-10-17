@@ -43,16 +43,17 @@ func (s *Session) CloseTab(ctx context.Context, targetID string) error {
 	return s.coord.CloseTab(ctx, s.token, s.name, targetID)
 }
 
-// ---- control lease (ct_) ----
+// ---- control lease ----
 //
-// Changing control requires the Computer token (a ps_ gets 403) and the reads
-// accept either token, so every control call uses the ct_ and works on any
-// Session handle.
+// Changing control requires the Computer token (a ps_ gets 403). The reads, the
+// notification and the control events accept either token, so they use the session
+// token when the handle has one and the Computer token otherwise; every control call
+// works on any Session handle.
 
 // ControlState returns the session's control state + ETag (use the ETag as the next
 // UpdateControl If-Match).
 func (s *Session) ControlState(ctx context.Context) (*ControlState, error) {
-	return s.coord.GetControl(ctx, s.computerToken(), s.name)
+	return s.coord.GetControl(ctx, s.readToken(), s.name)
 }
 
 // UpdateControl applies a typed control patch (take/release control, pin idle).
@@ -135,9 +136,45 @@ func (s *Session) setController(ctx context.Context, controller string, opts []C
 	return nil, nil // unreachable
 }
 
-// NotifyHuman posts a control notification (If-Match required).
+// NotifyHuman asks a person to come back to the session. An empty ifMatch reads the
+// current control ETag first, as every other server SDK does; pass an ETag you already
+// hold to notify only if control has not changed since.
 func (s *Session) NotifyHuman(ctx context.Context, reason, detail, ifMatch string) error {
-	return s.coord.ControlNotify(ctx, s.token, s.name, reason, detail, ifMatch)
+	if ifMatch == "" {
+		current, err := s.ControlState(ctx)
+		if err != nil {
+			return err
+		}
+		ifMatch = current.ETag
+	}
+	return s.coord.ControlNotify(ctx, s.readToken(), s.name, reason, detail, ifMatch)
+}
+
+// TakeControl gives a human the control lease on the named session ("" means "main"),
+// so the desktop viewer can drive it, with TakeControl's options and 412 retry. It reads
+// the session with the Computer token, so it works on an adopted Computer.
+func (c *Computer) TakeControl(ctx context.Context, name string, opts ...ControlOption) (*ControlState, error) {
+	s, err := c.controlSession(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	return s.TakeControl(ctx, opts...)
+}
+
+// ReleaseControl returns the named session ("" means "main") to agent control.
+func (c *Computer) ReleaseControl(ctx context.Context, name string, opts ...ControlOption) (*ControlState, error) {
+	s, err := c.controlSession(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	return s.ReleaseControl(ctx, opts...)
+}
+
+func (c *Computer) controlSession(ctx context.Context, name string) (*Session, error) {
+	if name == "" {
+		name = "main"
+	}
+	return c.Session(ctx, name)
 }
 
 // DesktopToken mints a short-lived, browser-safe desktop-stream token (dt_) with the
@@ -146,25 +183,26 @@ func (s *Session) DesktopToken(ctx context.Context) (*DesktopToken, error) {
 	return s.coord.MintDesktopToken(ctx, s.computerToken(), s.name)
 }
 
-// ---- handoffs + control events (ct_) ----
+// ---- handoffs + control events ----
 
 // ListHandoffs returns a page of the session's control handoffs (summary-typed)
 // plus the pagination cursor in HandoffList.NextBefore — pass it back as `before`
 // to walk older pages ("" = no more). List items are summaries; use GetHandoff for
 // one handoff's full forensic detail. limit<=0 / before="" omit the bounds.
 func (s *Session) ListHandoffs(ctx context.Context, limit int, before string) (*HandoffList, error) {
-	return s.coord.ListHandoffs(ctx, s.computerToken(), s.name, limit, before)
+	return s.coord.ListHandoffs(ctx, s.readToken(), s.name, limit, before)
 }
 
 // GetHandoff returns one handoff with full forensic detail in Handoff.Raw.
 func (s *Session) GetHandoff(ctx context.Context, handoffID string) (*Handoff, error) {
-	return s.coord.GetHandoff(ctx, s.computerToken(), s.name, handoffID)
+	return s.coord.GetHandoff(ctx, s.readToken(), s.name, handoffID)
 }
 
 // ControlEvents streams the session's control-plane event feed (controller_changed /
 // idle_changed / handoff_*) as a typed, resuming iterator — same shape as AgentMode.Events.
-// Each ControlEvent's Type is the discriminator; Data holds the raw per-type payload. Pass
-// lastEventID to resume (""=from now); break to stop; cancel ctx to end cleanly.
+// Each ControlEvent's Type is the discriminator and its ID the stream's event id (save
+// the last one to resume); Data holds the raw per-type payload. Pass lastEventID to
+// resume (""=from now); break to stop; cancel ctx to end cleanly.
 func (s *Session) ControlEvents(ctx context.Context, lastEventID string) iter.Seq2[ControlEvent, error] {
-	return s.coord.ControlEvents(ctx, s.computerToken(), s.name, lastEventID)
+	return s.coord.ControlEvents(ctx, s.readToken(), s.name, lastEventID)
 }

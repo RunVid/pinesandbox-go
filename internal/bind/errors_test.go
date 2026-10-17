@@ -18,8 +18,8 @@ func TestErrorVocabulary(t *testing.T) {
 		{&BindError{base{409, "m", cause}}, "bind failed"},
 		{&BindAuthError{base{403, "m", cause}}, "bind rejected"},
 		{&ComputerAlreadyAttachedError{base{409, "m", cause}}, "already attached"},
-		{&PodPoisonedError{base{409, "m", cause}}, "runtime cannot be attached"},
-		{&BrokerUnreachableError{base{503, "m", cause}}, "saved state unavailable"},
+		{&RuntimeUnusableError{base{409, "m", cause}}, "runtime cannot be attached"},
+		{&SavedStateUnavailableError{base{503, "m", cause}}, "saved state unavailable"},
 		{&BindTimeoutError{base{0, "m", cause}}, "timeout"},
 		{&TokenRejectedError{base{401, "m", cause}}, "token rejected"},
 	}

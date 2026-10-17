@@ -1,7 +1,7 @@
 // Package coordinator is the data-plane client for a bound Computer: bind, session
-// lifecycle, agent, and drive operations on the coordinator (the per-pod gateway). The
-// bearer rides X-Pine-Auth (coord reads it and Authorization); every route is gated on a
-// ct_ (computer-tier) or ps_ (per-session) token, passed per call by the caller. Coord
+// lifecycle, agent, and drive operations on the coordinator (the runtime's gateway). The
+// token rides Authorization: Bearer; every route is gated on a ct_ (computer-tier) or
+// ps_ (per-session) token, passed per call by the caller. Coord
 // errors are RFC-9457, mapped to *problem.APIError. Domain package (uses
 // internal/base/{transport,spec,problem}). The hand-written wire types match
 // specs/computer-api.yaml; the route table is drift-checked against the spec.
@@ -37,7 +37,7 @@ func parseBindPubkey(body []byte) (*BindPubkey, error) {
 		return nil, fmt.Errorf("pinesandbox: unparseable bind-pubkey: %w", err)
 	}
 	if w.PodUID == "" || w.CoordBootID == "" {
-		return nil, fmt.Errorf("pinesandbox: bind-pubkey missing pod identity")
+		return nil, fmt.Errorf("pinesandbox: bind-pubkey missing the runtime identity")
 	}
 	pub, err := base64.RawURLEncoding.DecodeString(w.EphemPubX25519)
 	if err != nil {

@@ -27,10 +27,18 @@ type Client struct {
 	sleeper func(context.Context, time.Duration) error // the busy-create wait; tests capture it
 }
 
+// Option configures a Client.
+type Option func(*Client)
+
+// WithClock sets the clock the busy-create wait sleeps on (default wait.System).
+func WithClock(clock wait.Clock) Option {
+	return func(c *Client) { c.sleeper = wait.Or(clock).Sleep }
+}
+
 // NewClient builds a control-plane client over raw (pointed at the control host),
 // authenticating with src and negotiating the given spec-version major.
-func NewClient(raw *transport.Client, src TokenSource, specMajor int) *Client {
-	return &Client{
+func NewClient(raw *transport.Client, src TokenSource, specMajor int, opts ...Option) *Client {
+	c := &Client{
 		raw: raw,
 		src: src,
 		spec: spec.Negotiator{
@@ -40,6 +48,10 @@ func NewClient(raw *transport.Client, src TokenSource, specMajor int) *Client {
 		},
 		sleeper: wait.Sleep,
 	}
+	for _, o := range opts {
+		o(c)
+	}
+	return c
 }
 
 const (

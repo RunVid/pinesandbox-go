@@ -6,6 +6,7 @@ package tokens
 
 import (
 	"fmt"
+	"time"
 
 	"go.pinesandbox.io/computer/internal/base/problem"
 )
@@ -25,7 +26,10 @@ type tokenBase struct {
 	// public error contract; Reason is an optional spec-defined refinement.
 	Code   string
 	Reason string
-	Cause  error
+	// RetryAfter is the response's Retry-After, when it set one: how long Portal asked
+	// the caller to wait before trying again.
+	RetryAfter time.Duration
+	Cause      error
 }
 
 func (b tokenBase) Unwrap() error { return b.Cause }
@@ -49,14 +53,15 @@ func tokErr(label string, b tokenBase) string {
 // these, so WHICH portal + WHICH operation must survive the wrapping.
 func tokenBaseFrom(msg string, ae *problem.APIError) tokenBase {
 	return tokenBase{
-		Msg:       msg,
-		Status:    ae.Status,
-		RequestID: ae.RequestID,
-		Host:      ae.Host,
-		Op:        ae.Op,
-		Code:      ae.ProblemType,
-		Reason:    ae.Reason,
-		Cause:     ae,
+		Msg:        msg,
+		Status:     ae.Status,
+		RequestID:  ae.RequestID,
+		Host:       ae.Host,
+		Op:         ae.Op,
+		Code:       ae.ProblemType,
+		Reason:     ae.Reason,
+		RetryAfter: ae.RetryAfter,
+		Cause:      ae,
 	}
 }
 
@@ -87,7 +92,8 @@ func (e *ProjectAccessDenied) Error() string {
 	return tokErr("project access denied", e.tokenBase)
 }
 
-// RateLimited: the portal rate-limited the mint (429) and retries were exhausted.
+// RateLimited: the portal rate-limited the mint (429) and retries were exhausted, or it
+// asked for a longer wait (RetryAfter) than the SDK retries within.
 type RateLimited struct{ tokenBase }
 
 func (e *RateLimited) Error() string { return tokErr("control-token mint rate-limited", e.tokenBase) }
@@ -114,7 +120,12 @@ func (e *LocationDiscoveryError) Error() string {
 // must reload/adopt its winning database binding, not provision another pod.
 type BindingRevisionConflictError struct {
 	tokenBase
-	CurrentRevision  *int64
+	CurrentRevision *int64
+	// CurrentRuntimeID is the runtime the winning binding names.
+	CurrentRuntimeID string
+	// CurrentSandboxID is the former name of CurrentRuntimeID; both carry the same value.
+	//
+	// Deprecated: use CurrentRuntimeID.
 	CurrentSandboxID string
 }
 

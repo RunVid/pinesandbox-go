@@ -4,9 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 
 	"go.pinesandbox.io/computer/internal/base/transport"
+	"go.pinesandbox.io/computer/internal/base/wait"
 	"go.pinesandbox.io/computer/internal/base/zone"
+	"go.pinesandbox.io/computer/internal/binder"
 	"go.pinesandbox.io/computer/internal/controlplane"
 	"go.pinesandbox.io/computer/internal/coordinator"
 	"go.pinesandbox.io/computer/internal/tokens"
@@ -16,13 +19,36 @@ import (
 // Computers live and the clients that allocate and authorize them. Computer.Attach
 // takes one.
 type Connection struct {
-	zone           *zone.Zone
-	controlPlane   *controlplane.Client
-	attachProvider *tokens.AttachCredentialsSource
-	specMajor      int
-	// newCoord builds the coordinator client for a sandbox's data host. A field so tests
+	zone         *zone.Zone
+	controlPlane *controlplane.Client
+	// attachProvider issues attach credentials: Portal with the project key, or the
+	// caller's AttachCredentialsProvider.
+	attachProvider binder.Minter
+	// portal is the project-key Portal client for the Computer registry, location
+	// discovery and deletion; nil when the Client has no APIKey.
+	portal    *tokens.AttachCredentialsSource
+	specMajor int
+	// clock is the time every wait and backoff uses; nil means the system clock.
+	clock wait.Clock
+	// newCoord builds the coordinator client for a runtime's data host. A field so tests
 	// can point it at an httptest server instead of the derived gateway host.
 	newCoord func(sandboxID string) (*coordinator.Client, error)
+}
+
+// requirePortal returns the project-key Portal client, or an error naming what needs it.
+func (c *Connection) requirePortal(what string) (*tokens.AttachCredentialsSource, error) {
+	if c == nil || c.portal == nil {
+		return nil, fmt.Errorf("pinesandbox: %s needs the project key (ClientOptions.APIKey)", what)
+	}
+	return c.portal, nil
+}
+
+// runtimeHandle is the lifecycle handle for one runtime, on this connection's clock.
+func (c *Connection) runtimeHandle(runtimeID, status string) *RuntimeHandle {
+	h := newRuntimeHandle(c.controlPlane, runtimeID, status)
+	clock := wait.Or(c.clock)
+	h.clock, h.sleeper = clock.Now, clock.Sleep
+	return h
 }
 
 // Client is the SDK entry point. It holds the project credential (pk_) + endpoint once and
@@ -34,26 +60,83 @@ type Client struct {
 	projectKey      string
 }
 
+// ControlTokenProvider returns the project token (the control-plane JWS) for lifecycle
+// requests; forceRefresh asks for a newly minted token after the control plane rejected
+// the last one. It lets a backend mint project tokens without this process holding the pk_.
+type ControlTokenProvider func(ctx context.Context, forceRefresh bool) (string, error)
+
+// AttachCredentialsProvider issues the credentials for one attach instead of Portal with
+// the project key: an integrator acting as its own issuer. The receipt's BindingRevision
+// must exceed req.ExpectedBindingRevision, and a persistent attach needs KeyAssertion.
+type AttachCredentialsProvider func(ctx context.Context, req AttachCredentialsRequest) (*AttachCredentials, error)
+
+// AttachCredentialsRequest names the runtime incarnation one attach authorizes.
+type AttachCredentialsRequest struct {
+	ComputerID  string
+	PodUID      string
+	CoordBootID string
+	RuntimeID   string
+	// PKComputer is the base64url X25519 capture public key and KeyGeneration its
+	// generation; both are empty for an ephemeral attach.
+	PKComputer              string
+	KeyGeneration           int
+	ExpectedBindingRevision int64
+	// IdempotencyKey is stable for the runtime incarnation, so a resent request returns
+	// the same receipt.
+	IdempotencyKey string
+	Location       *ComputerLocation
+	Ephemeral      bool
+}
+
+// AttachCredentials is one attach authorization receipt.
+type AttachCredentials struct {
+	BindToken            string
+	BrokerGrant          string
+	BindTokenExpiresAt   string
+	BrokerGrantExpiresAt string
+	KeyAssertion         string // required for a persistent attach
+	BindingRevision      int64
+	Location             *ComputerLocation
+}
+
 // ClientOptions configures NewClient.
 type ClientOptions struct {
 	// Endpoint is the portal URL or domain the project was given (required), e.g.
 	// "https://pinesandbox.io".
 	Endpoint string
-	// APIKey is the project client key (pk_) — required.
+	// APIKey is the project client key (pk_). Required unless both ControlTokenProvider
+	// and AttachCredentialsProvider are set; without it, calls that need Portal with the
+	// project key (Start, Stop by id, Delete, registration, location discovery, project
+	// policy, diagnostics) return an error.
 	APIKey string
 	// ControlHost optionally overrides the derived control-plane host.
 	ControlHost string
 	// SpecVersion pins the Computer-API major (default: the SDK's SpecVersion).
 	SpecVersion int
+	// ControlTokenProvider supplies project tokens instead of minting them from APIKey.
+	ControlTokenProvider ControlTokenProvider
+	// AttachCredentialsProvider issues attach credentials instead of Portal with APIKey.
+	AttachCredentialsProvider AttachCredentialsProvider
+}
+
+// clientHooks are the test seams behind NewClient: the HTTP client every request goes
+// through and the clock every wait uses. The zero value is production.
+type clientHooks struct {
+	httpClient *http.Client
+	clock      wait.Clock
 }
 
 // NewClient wires the SDK from a pk_ + endpoint.
 func NewClient(opts ClientOptions) (*Client, error) {
+	return newClient(opts, clientHooks{})
+}
+
+func newClient(opts ClientOptions, hooks clientHooks) (*Client, error) {
 	if opts.Endpoint == "" {
 		return nil, fmt.Errorf("pinesandbox: Endpoint required (e.g. \"https://pinesandbox.io\")")
 	}
-	if opts.APIKey == "" {
-		return nil, fmt.Errorf("pinesandbox: APIKey required (a pk_ client key)")
+	if opts.APIKey == "" && (opts.ControlTokenProvider == nil || opts.AttachCredentialsProvider == nil) {
+		return nil, fmt.Errorf("pinesandbox: APIKey required (a pk_ client key) unless both ControlTokenProvider and AttachCredentialsProvider are set")
 	}
 	specMajor := opts.SpecVersion
 	if specMajor == 0 {
@@ -69,31 +152,102 @@ func NewClient(opts ClientOptions) (*Client, error) {
 		return nil, err
 	}
 
-	controlTransport := transport.New(z.HTTPScheme(), z.ControlHost())
-	tokenSource, err := tokens.NewControlTokenSource(controlTransport, opts.APIKey)
-	if err != nil {
+	clock := wait.Or(hooks.clock)
+	topts := []transport.Option{transport.WithClock(clock)}
+	if hooks.httpClient != nil {
+		topts = append(topts, transport.WithHTTPClient(hooks.httpClient))
+	}
+	controlTransport := transport.New(z.HTTPScheme(), z.ControlHost(), topts...)
+	var portal *tokens.AttachCredentialsSource
+	if opts.APIKey != "" {
+		if portal, err = tokens.NewAttachCredentialsSource(controlTransport, opts.APIKey); err != nil {
+			return nil, err
+		}
+	}
+	var tokenSource controlplane.TokenSource
+	if opts.ControlTokenProvider != nil {
+		tokenSource = tokens.NewCallableTokenSource(opts.ControlTokenProvider)
+	} else if tokenSource, err = tokens.NewControlTokenSource(controlTransport, opts.APIKey,
+		tokens.WithClock(clock.Now), tokens.WithSleeper(clock.Sleep), tokens.WithJitter(clock.Jitter)); err != nil {
 		return nil, err
 	}
-	attachProvider, err := tokens.NewAttachCredentialsSource(controlTransport, opts.APIKey)
-	if err != nil {
-		return nil, err
+	var attachProvider binder.Minter
+	if opts.AttachCredentialsProvider != nil {
+		attachProvider = tokens.NewCallableAttachSource(callableAttach(opts.AttachCredentialsProvider))
+	} else {
+		attachProvider = portal // non-nil: without the provider, APIKey is required above
 	}
-	cp := controlplane.NewClient(controlTransport, tokenSource, specMajor)
+	cp := controlplane.NewClient(controlTransport, tokenSource, specMajor, controlplane.WithClock(clock))
 
 	conn := &Connection{
 		zone:           z,
 		controlPlane:   cp,
 		attachProvider: attachProvider,
+		portal:         portal,
 		specMajor:      specMajor,
+		clock:          clock,
 		newCoord: func(sandboxID string) (*coordinator.Client, error) {
 			host, err := z.DataHost(sandboxID)
 			if err != nil {
 				return nil, err
 			}
-			return coordinator.NewClient(transport.New(z.HTTPScheme(), host), specMajor), nil
+			return coordinator.NewClient(transport.New(z.HTTPScheme(), host, topts...), specMajor,
+				coordinator.WithClock(clock)), nil
 		},
 	}
 	return &Client{zone: z, conn: conn, portalTransport: controlTransport, projectKey: opts.APIKey}, nil
+}
+
+// callableAttach converts between the public provider types and the internal mint types.
+func callableAttach(fn AttachCredentialsProvider) func(context.Context, tokens.CredentialsRequest) (*tokens.AttachCredentials, error) {
+	return func(ctx context.Context, req tokens.CredentialsRequest) (*tokens.AttachCredentials, error) {
+		pub := AttachCredentialsRequest{
+			ComputerID: req.ComputerID, PodUID: req.PodUID, CoordBootID: req.CoordBootID,
+			RuntimeID: req.SandboxID, PKComputer: req.PKComputer, KeyGeneration: req.KeyGeneration,
+			ExpectedBindingRevision: req.ExpectedBindingRevision, IdempotencyKey: req.IdempotencyKey,
+			Ephemeral: req.Ephemeral,
+		}
+		if req.Location != nil {
+			pub.Location = &ComputerLocation{Country: req.Location.Country, Mode: req.Location.Mode}
+		}
+		creds, err := fn(ctx, pub)
+		if err != nil || creds == nil {
+			return nil, err
+		}
+		out := &tokens.AttachCredentials{
+			BindToken: creds.BindToken, BrokerGrant: creds.BrokerGrant,
+			BindTokenExpiresAt: creds.BindTokenExpiresAt, BrokerGrantExpiresAt: creds.BrokerGrantExpiresAt,
+			KeyAssertion: creds.KeyAssertion, BindingRevision: creds.BindingRevision,
+			Location: tokenLocation(creds.Location),
+		}
+		return out, nil
+	}
+}
+
+// RegisterOptions configures Client.RegisterComputer.
+type RegisterOptions struct {
+	// Location is where the new Computer's browser reaches the internet from at first.
+	Location *ComputerLocation
+	// Ephemeral fixes the Computer as access-lease-only: no state is restored or saved.
+	Ephemeral bool
+}
+
+// RegisterComputer registers a Computer id with the project ahead of its first attach.
+// You rarely need it: CreateComputer attaches directly, which registers the Computer on
+// first use. Registering an id the project already owns succeeds; a deleted id, another
+// project's id, or a different persistence mode is a *ComputerRegistrationError.
+func (c *Client) RegisterComputer(ctx context.Context, id string, opts RegisterOptions) error {
+	if !computerIDRE.MatchString(id) {
+		return fmt.Errorf("pinesandbox: valid Computer ID required")
+	}
+	if err := validateLocation(opts.Location); err != nil {
+		return err
+	}
+	portal, err := c.conn.requirePortal("registration")
+	if err != nil {
+		return err
+	}
+	return portal.RegisterComputer(ctx, id, tokenLocation(opts.Location), opts.Ephemeral)
 }
 
 // CreateComputer provisions a NEW persistent Computer: a fresh UUIDv7 id +
@@ -169,7 +323,11 @@ func (c *Client) StopComputer(ctx context.Context, id string) (bool, error) {
 	if !computerIDRE.MatchString(id) {
 		return false, fmt.Errorf("pinesandbox: valid Computer ID required")
 	}
-	reference, err := c.conn.attachProvider.CurrentBinding(ctx, id)
+	portal, err := c.conn.requirePortal("stop")
+	if err != nil {
+		return false, err
+	}
+	reference, err := portal.CurrentBinding(ctx, id)
 	if err != nil {
 		var missing *UnknownComputerError
 		if errors.As(err, &missing) {
@@ -180,7 +338,7 @@ func (c *Client) StopComputer(ctx context.Context, id string) (bool, error) {
 	if reference.SandboxID == "" {
 		return true, nil
 	}
-	return newSandboxHandle(c.conn.controlPlane, reference.SandboxID, "").Stop(ctx)
+	return c.conn.runtimeHandle(reference.SandboxID, "").Stop(ctx)
 }
 
 // RecoverComputer explicitly releases a failed runtime before saved-state Start.
@@ -205,7 +363,11 @@ func (c *Client) startComputer(ctx context.Context, id string, key []byte, opts 
 	if err := validateIdentity(id, key); err != nil {
 		return nil, err
 	}
-	reference, err := c.conn.attachProvider.CurrentBinding(ctx, id)
+	portal, err := c.conn.requirePortal("start")
+	if err != nil {
+		return nil, err
+	}
+	reference, err := portal.CurrentBinding(ctx, id)
 	if err != nil {
 		return nil, err
 	}
@@ -222,7 +384,7 @@ func (c *Client) startComputer(ctx context.Context, id string, key []byte, opts 
 			if !recoverRuntime && info.Status != "stopping" {
 				return nil, &RuntimeRetainedError{RuntimeID: reference.SandboxID, State: info.Status}
 			}
-			handle := newSandboxHandle(c.conn.controlPlane, reference.SandboxID, info.Status)
+			handle := c.conn.runtimeHandle(reference.SandboxID, info.Status)
 			released, err := handle.releaseFailedRuntime(ctx, info)
 			if err != nil {
 				return nil, err
@@ -251,19 +413,25 @@ func (c *Client) startComputer(ctx context.Context, id string, key []byte, opts 
 }
 
 // AttachComputer is the compatibility name for saved-state Start.
+//
+// Deprecated: use StartComputer with the saved Credentials.
 func (c *Client) AttachComputer(ctx context.Context, id string, key []byte, opts AttachOptions) (*Computer, error) {
 	return c.startComputer(ctx, id, key, opts, false)
 }
 
 // DeleteComputer PERMANENTLY deletes the Computer with this id: its identity and saved
 // state end (Stop and Kill keep both). Portal tombstones the id at once, destroys any
-// bound sandbox asynchronously, purges saved state after 24 hours, and never accepts the
+// bound runtime asynchronously, purges saved state after 24 hours, and never accepts the
 // id again. Idempotent and non-disclosing: an unknown, already-deleted, or other project's
 // id also returns nil. There is no undelete. Use Computer.Delete to kill a live handle
 // first. Errors: *ComputerDeletionError (422 malformed id), *ProjectAccessDenied (403),
 // *AttachCredentialsError (401, 429, 5xx).
 func (c *Client) DeleteComputer(ctx context.Context, id string) error {
-	return c.conn.attachProvider.DeleteComputer(ctx, id)
+	portal, err := c.conn.requirePortal("delete")
+	if err != nil {
+		return err
+	}
+	return portal.DeleteComputer(ctx, id)
 }
 
 // attachClientError preserves Portal CAS state when a high-level Client call
@@ -279,6 +447,7 @@ func attachClientError(comp *Computer, initialRevision int64, credentials *Crede
 	}
 	return &AttachAuthorizationCommittedError{
 		BindingRevision: revision,
+		RuntimeID:       sandboxID,
 		SandboxID:       sandboxID,
 		Credentials:     credentials,
 		Err:             err,
@@ -292,7 +461,7 @@ type AdoptOptions struct {
 }
 
 // AdoptExisting reconstructs an attached Computer from its persisted
-// {id, key, sandboxID, computerToken} without allocating or attaching anything. Use it
+// {id, key, runtime id, computerToken} without allocating or attaching anything. Use it
 // to keep driving a running Computer across requests from a backend that saved its
 // ct_. An optional AdoptOptions
 // preserves ephemeral mode and binding revision; omission uses persistent mode

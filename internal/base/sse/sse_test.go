@@ -24,7 +24,7 @@ type vectorFile struct {
 	} `json:"vectors"`
 }
 
-var vectorFiles = []string{"agent-events.json", "control-events.json", "exec.json"}
+var vectorFiles = []string{"agent-events.json", "control-events.json", "exec.json", "framing.json"}
 
 func collect(t *testing.T, wire string) []Frame {
 	t.Helper()

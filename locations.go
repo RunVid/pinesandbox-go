@@ -14,7 +14,11 @@ type AvailableLocations struct {
 // AvailableLocations discovers country intents without exposing provider,
 // pool, allocation, or runtime-health details.
 func (c *Client) AvailableLocations(ctx context.Context) (*AvailableLocations, error) {
-	result, err := c.conn.attachProvider.AvailableLocations(ctx)
+	portal, err := c.conn.requirePortal("location discovery")
+	if err != nil {
+		return nil, err
+	}
+	result, err := portal.AvailableLocations(ctx)
 	if err != nil {
 		return nil, err
 	}

@@ -28,7 +28,7 @@ var (
 	// authority required by the attempted mutation.
 	ErrControlNotHeld = &problem.APIError{Status: 409, ProblemType: "/errors/control-not-held"}
 	// ErrSessionNotFound (404): the named session does not exist on this live
-	// Computer. It is deliberately distinct from SandboxGoneError.
+	// Computer. It is deliberately distinct from RuntimeGoneError.
 	ErrSessionNotFound = &problem.APIError{Status: 404, ProblemType: "/errors/session-not-found"}
 	// ErrTaskNotReady (409): a turn is in flight, the result isn't materialized — poll again.
 	ErrTaskNotReady = &problem.APIError{Status: 409, ProblemType: "/errors/task-not-ready"}
@@ -89,9 +89,13 @@ type (
 	// SpecVersionMismatch is returned when a Computer serves a different Computer API
 	// major version.
 	SpecVersionMismatch = spec.MismatchError
-	// SandboxGoneError means the runtime the Computer was attached to is gone. It
+	// RuntimeGoneError means the runtime the Computer was attached to is gone. It
 	// wraps APIError, preserving host/op/request-id diagnostics via errors.As.
-	SandboxGoneError = coordinator.SandboxGoneError
+	RuntimeGoneError = coordinator.RuntimeGoneError
+	// SandboxGoneError is the former name of RuntimeGoneError.
+	//
+	// Deprecated: use RuntimeGoneError.
+	SandboxGoneError = RuntimeGoneError
 	// AgentProtocolUnsupportedError is a local capability refusal, not an APIError.
 	AgentProtocolUnsupportedError = coordinator.AgentProtocolUnsupportedError
 	// RunUnconfirmedError is a run whose response never arrived; send it again
@@ -101,7 +105,7 @@ type (
 )
 
 // IsRetryable returns the server's retry judgment for a data-plane API error,
-// including errors wrapped by SandboxGoneError or TokenRejectedError. It does
+// including errors wrapped by RuntimeGoneError or TokenRejectedError. It does
 // not guess replay safety for transport failures: callers must apply the
 // operation-specific retry policy for timeouts and connection errors.
 func IsRetryable(err error) bool {
@@ -123,16 +127,28 @@ func IsRetryable(err error) bool {
 // The underlying typed attach error remains reachable with errors.Is/errors.As.
 type AttachAuthorizationCommittedError struct {
 	BindingRevision int64
-	SandboxID       string
-	Credentials     *Credentials
-	Err             error
+	// RuntimeID is the runtime the committed authorization named.
+	RuntimeID string
+	// SandboxID is the former name of RuntimeID; both carry the same value.
+	//
+	// Deprecated: use RuntimeID.
+	SandboxID   string
+	Credentials *Credentials
+	Err         error
 }
 
 func (e *AttachAuthorizationCommittedError) Error() string {
 	return fmt.Sprintf(
-		"pinesandbox: attach authorization committed at revision %d for sandbox %s, but the attach did not complete: %v",
-		e.BindingRevision, e.SandboxID, e.Err,
+		"pinesandbox: attach authorization committed at revision %d for runtime %s, but the attach did not complete: %v",
+		e.BindingRevision, e.runtimeID(), e.Err,
 	)
+}
+
+func (e *AttachAuthorizationCommittedError) runtimeID() string {
+	if e.RuntimeID != "" {
+		return e.RuntimeID
+	}
+	return e.SandboxID
 }
 
 func (e *AttachAuthorizationCommittedError) Unwrap() error { return e.Err }
@@ -145,19 +161,28 @@ type (
 	BindAuthError = bind.BindAuthError
 	// ComputerAlreadyAttachedError means another runtime already holds this Computer.
 	ComputerAlreadyAttachedError = bind.ComputerAlreadyAttachedError
-	// PodPoisonedError means the runtime is attached to a different Computer or can't
-	// be reused. Start a fresh runtime; don't retry this one.
-	PodPoisonedError = bind.PodPoisonedError
-	// BrokerUnreachableError means the Computer's saved state couldn't be restored
+	// RuntimeUnusableError means the runtime is attached to a different Computer or
+	// can't be reused. Start a fresh runtime; don't retry this one.
+	RuntimeUnusableError = bind.RuntimeUnusableError
+	// PodPoisonedError is the former name of RuntimeUnusableError.
+	//
+	// Deprecated: use RuntimeUnusableError.
+	PodPoisonedError = RuntimeUnusableError
+	// SavedStateUnavailableError means the Computer's saved state couldn't be restored
 	// because the state service is unavailable.
-	BrokerUnreachableError = bind.BrokerUnreachableError
+	SavedStateUnavailableError = bind.SavedStateUnavailableError
+	// BrokerUnreachableError is the former name of SavedStateUnavailableError.
+	//
+	// Deprecated: use SavedStateUnavailableError.
+	BrokerUnreachableError = SavedStateUnavailableError
 	// BindTimeoutError means the runtime wasn't ready to attach within the readiness
 	// budget.
 	BindTimeoutError = bind.BindTimeoutError
-	// TokenRejectedError: a 401 on a ct_/ps_ that worked before — a report that the
-	// Computer did not recognize the token, not an instruction to re-attach. On a
-	// live current runtime this is binding_auth_lost; attach only on confirmed
-	// sandbox-gone evidence. (Renamed from RebindRequiredError in 0.3.9.)
+	// TokenRejectedError: a 401 on the binding's Computer token (ct_) — a report that
+	// the runtime no longer recognizes the binding, not an instruction to re-attach. On
+	// a live current runtime this is binding_auth_lost; attach only on confirmed
+	// runtime-gone evidence. A 401 on a session token (ps_) is a plain *APIError.
+	// (Renamed from RebindRequiredError in 0.3.9.)
 	TokenRejectedError = bind.TokenRejectedError
 )
 
@@ -203,25 +228,47 @@ var ErrCapacityExceeded = controlplane.ErrCapacityExceeded
 // says how long to wait before starting another.
 var ErrCreateRateLimited = controlplane.ErrCreateRateLimited
 
-// SandboxFailedError: the runtime reported failed, terminated or unavailable
+// RuntimeFailedError: the runtime reported failed, terminated or unavailable
 // before completing the requested lifecycle operation. Unavailable may be retryable.
-type SandboxFailedError struct {
+type RuntimeFailedError struct {
+	RuntimeID string
+	// SandboxID is the former name of RuntimeID; both carry the same value.
+	//
+	// Deprecated: use RuntimeID.
 	SandboxID string
 	State     string
 }
 
-func (e *SandboxFailedError) Error() string {
-	return fmt.Sprintf("pinesandbox: Computer runtime %s reported %q before completing the lifecycle operation", e.SandboxID, e.State)
+func (e *RuntimeFailedError) Error() string {
+	return fmt.Sprintf("pinesandbox: Computer runtime %s reported %q before completing the lifecycle operation", firstNonEmpty(e.RuntimeID, e.SandboxID), e.State)
 }
+
+// SandboxFailedError is the former name of RuntimeFailedError.
+//
+// Deprecated: use RuntimeFailedError.
+type SandboxFailedError = RuntimeFailedError
 
 // ReadyTimeoutError: allocation or a memory lifecycle operation exceeded its budget.
 type ReadyTimeoutError struct {
+	RuntimeID string
+	// SandboxID is the former name of RuntimeID; both carry the same value.
+	//
+	// Deprecated: use RuntimeID.
 	SandboxID string
 	LastState string
 }
 
 func (e *ReadyTimeoutError) Error() string {
-	return fmt.Sprintf("pinesandbox: Computer runtime %s did not complete the lifecycle operation in time (last state %q)", e.SandboxID, e.LastState)
+	return fmt.Sprintf("pinesandbox: Computer runtime %s did not complete the lifecycle operation in time (last state %q)", firstNonEmpty(e.RuntimeID, e.SandboxID), e.LastState)
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // RuntimeRetainedError means Start observed an existing runtime. Inspect State

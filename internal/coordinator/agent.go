@@ -81,7 +81,8 @@ const maxTurnHold = 25 * time.Second
 
 // AgentWait reads a turn, holding while it is running or canceling. It repeats the
 // bounded server wait until the turn leaves those states or timeout elapses, then
-// returns the turn as it is; a zero timeout reads once. A read whose response was
+// returns the turn as it is; a zero timeout reads once. A read that returns before its
+// hold is followed by a pause of up to a second, so the loop never spins. A read whose response was
 // lost, or whose problem is marked retryable, is read again within the timeout
 // after retryDelay; any other error is returned. It never cancels the turn or
 // follows NextTurnID. ctx bounds the whole call.
@@ -90,19 +91,21 @@ func (c *Client) AgentWait(ctx context.Context, token, name, turnID string, time
 		return nil, fmt.Errorf("pinesandbox: turn ID is required")
 	}
 	path := c.agentPath(name, "/turns/"+url.PathEscape(turnID))
-	deadline := time.Now().Add(timeout)
+	deadline := c.clock.Now().Add(timeout)
+	until := func() time.Duration { return deadline.Sub(c.clock.Now()) }
 	failures := 0
 	for {
-		hold := min(time.Until(deadline)/time.Second, maxTurnHold/time.Second)
-		raw, err := c.getJSON(ctx, path+"?wait_seconds="+strconv.Itoa(max(int(hold), 0)), token)
+		hold := max(int(min(until(), maxTurnHold)/time.Second), 0)
+		readStarted := c.clock.Now()
+		raw, err := c.getJSON(ctx, path+"?wait_seconds="+strconv.Itoa(hold), token)
 		if err != nil {
 			var apiErr *problem.APIError
 			retryable := lostResponse(err) || (errors.As(err, &apiErr) && apiErr.Retryable)
-			if !retryable || !time.Now().Before(deadline) {
+			if !retryable || until() <= 0 {
 				return nil, err
 			}
 			failures++
-			if serr := c.sleep(ctx, min(retryDelay(failures, err), time.Until(deadline))); serr != nil {
+			if serr := c.clock.Sleep(ctx, min(retryDelay(failures, err), until())); serr != nil {
 				return nil, errors.Join(err, serr)
 			}
 			continue
@@ -112,18 +115,22 @@ func (c *Client) AgentWait(ctx context.Context, token, name, turnID string, time
 		if err != nil {
 			return nil, err
 		}
-		if (turn.State != "running" && turn.State != "canceling") || !time.Now().Before(deadline) {
+		if (turn.State != "running" && turn.State != "canceling") || until() <= 0 {
 			return turn, nil
 		}
-		if hold <= 0 {
-			// The Computer holds whole seconds: wait out a remainder under a
-			// second here, then read the turn once more as it is.
-			if err := c.sleep(ctx, time.Until(deadline)); err != nil {
+		// The Computer holds a read for whole seconds. A read that answered sooner than
+		// its hold, or a hold of 0 inside the last second, waits up to a second before
+		// the next read, so Wait never spins against a server that ignores the hold.
+		if hold == 0 || c.clock.Now().Sub(readStarted) < time.Duration(hold)*time.Second {
+			if err := c.clock.Sleep(ctx, min(waitPollFloor, until())); err != nil {
 				return nil, err
 			}
 		}
 	}
 }
+
+// waitPollFloor is the shortest gap between two turn reads that did not hold.
+const waitPollFloor = time.Second
 
 // AgentSteerOptions deliver secrets with the steer (same SessionSecrets contract as
 // AgentRunOptions.Secrets), only once the steer passes every check.
@@ -216,6 +223,70 @@ func (c *Client) AgentTurns(ctx context.Context, token, name string, opts AgentT
 	return turns, nil
 }
 
+// AgentEventsPageOptions select a page of retained public activity.
+type AgentEventsPageOptions struct {
+	// After returns events with an event ID greater than this (0 = from the start).
+	After int64
+	// Limit bounds the history records examined (0 = the Computer's default, 200;
+	// at most 500), not the events returned.
+	Limit int
+	// ExpectedTaskID binds the cursor to the Task it was read from.
+	ExpectedTaskID string
+	// SkipFrames leaves frame events out; their IDs still advance NextAfter.
+	SkipFrames bool
+}
+
+// AgentEventsPage is one page of retained public activity. Advance with NextAfter until
+// it reaches LatestEventID: an empty or short page does not mean history is exhausted.
+type AgentEventsPage struct {
+	Events        []AgentEvent
+	NextAfter     int64
+	LatestEventID int64
+	Raw           json.RawMessage
+}
+
+// AgentEventsPage reads one page of the session's retained public activity by cursor.
+func (c *Client) AgentEventsPage(ctx context.Context, token, name string, opts AgentEventsPageOptions) (*AgentEventsPage, error) {
+	q := url.Values{}
+	if opts.After > 0 {
+		q.Set("after", strconv.FormatInt(opts.After, 10))
+	}
+	if opts.Limit > 0 {
+		q.Set("limit", strconv.Itoa(opts.Limit))
+	}
+	if opts.ExpectedTaskID != "" {
+		q.Set("expected_task_id", opts.ExpectedTaskID)
+	}
+	if opts.SkipFrames {
+		q.Set("frames", "none")
+	}
+	path := c.agentPath(name, "/events/page")
+	if len(q) != 0 {
+		path += "?" + q.Encode()
+	}
+	raw, err := c.getJSON(ctx, path, token)
+	if err != nil {
+		return nil, err
+	}
+	var w struct {
+		Events        []json.RawMessage `json:"events"`
+		NextAfter     int64             `json:"next_after"`
+		LatestEventID int64             `json:"latest_event_id"`
+	}
+	if err := json.Unmarshal(raw, &w); err != nil {
+		return nil, fmt.Errorf("pinesandbox: decode agent events page: %w", err)
+	}
+	page := &AgentEventsPage{NextAfter: w.NextAfter, LatestEventID: w.LatestEventID, Raw: raw,
+		Events: make([]AgentEvent, 0, len(w.Events))}
+	for _, item := range w.Events {
+		// One undecodable event costs only itself, as on the stream.
+		if ev, ok := decodeAgentEvent(sse.Frame{Data: string(item)}); ok {
+			page.Events = append(page.Events, ev)
+		}
+	}
+	return page, nil
+}
+
 func (c *Client) guardedAgentPath(name, suffix, taskID string) string {
 	path := c.agentPath(name, suffix)
 	if taskID != "" {
@@ -224,9 +295,10 @@ func (c *Client) guardedAgentPath(name, suffix, taskID string) string {
 	return path
 }
 
-// resendBudget bounds the waits before agent work whose response was lost is
-// sent again: long enough to outlast a coordinator restart. ctx can end it
-// sooner.
+// resendBudget bounds how long agent work whose response was lost keeps being
+// sent again, measured from the first send: long enough to outlast a coordinator
+// restart. It counts every wait, the transport's retries inside a send included
+// (x-pine-retry.client.lost_response). ctx can end it sooner.
 const resendBudget = 30 * time.Second
 
 // retryDelay is the wait before retry attempt after err: growing from a second
@@ -239,29 +311,20 @@ func retryDelay(attempt int, err error) time.Duration {
 	return max(min(time.Second<<min(attempt-1, 3), 5*time.Second), retryAfter)
 }
 
-func sleepCtx(ctx context.Context, d time.Duration) error {
-	timer := time.NewTimer(d)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
-	}
-}
-
 // postAgentTurn POSTs body and decodes the turn every agent work mutation returns.
 // Set resend only when sending the request again names the same turn: a run with
-// its key, an answer, a cancel. A lost response is then sent again.
+// its key, an answer, a cancel — the operations the contract marks replay-safe. A
+// transient fault is then retried at once by the transport, and a lost response is
+// sent again under the resend budget.
 func (c *Client) postAgentTurn(ctx context.Context, path, token string, body any, headers map[string]string, resend bool) (*AgentTurn, error) {
 	b, err := json.Marshal(body)
 	if err != nil {
 		return nil, fmt.Errorf("pinesandbox: marshal request body: %w", err)
 	}
-	var waited time.Duration
+	started := c.clock.Now()
 	for attempt := 1; ; attempt++ {
 		resp, err := c.send(ctx, coordReq{method: "POST", path: path, token: token, body: b,
-			contentType: "application/json", headers: headers})
+			contentType: "application/json", headers: headers, retryTransient: resend})
 		if err == nil {
 			return parseAgentTurn(resp.Body)
 		}
@@ -269,11 +332,10 @@ func (c *Client) postAgentTurn(ctx context.Context, path, token string, body any
 			return nil, err
 		}
 		wait := retryDelay(attempt, err)
-		if waited+wait > resendBudget {
+		if c.clock.Now().Sub(started)+wait > resendBudget {
 			return nil, err
 		}
-		waited += wait
-		if serr := c.sleep(ctx, wait); serr != nil {
+		if serr := c.clock.Sleep(ctx, wait); serr != nil {
 			// The response is still lost; keep it beside ctx's error.
 			return nil, errors.Join(err, serr)
 		}
@@ -373,42 +435,7 @@ func (c *Client) getJSON(ctx context.Context, path, token string) (json.RawMessa
 	return json.RawMessage(resp.Body), nil
 }
 
-// streamJSONEvents is the shared driver for the agent (and, later, author) event feeds:
-// open the streaming GET with Last-Event-ID, parse SSE frames, skip empty-data frames,
-// track the id cursor, and hand each frame's data JSON to fn.
-func (c *Client) streamJSONEvents(ctx context.Context, path, token, lastEventID string, fn func(data []byte) error) (string, error) {
-	var extra map[string]string
-	if lastEventID != "" {
-		extra = map[string]string{"Last-Event-ID": lastEventID}
-	}
-	sr, err := c.openSSE(ctx, "GET", path, token, nil, extra)
-	if err != nil {
-		return lastEventID, err
-	}
-	defer sr.Body.Close()
-
-	latest := lastEventID
-	for frame, ferr := range sse.Frames(sr.Body) {
-		if ferr != nil {
-			return latest, ferr // a read error (NOT a clean EOF — Frames just stops on EOF)
-		}
-		if frame.ID != "" {
-			// Advance the resume cursor for ANY id-bearing frame, BEFORE the empty-data
-			// skip — mirrors pumpFrames (stream.go) so a reconnect can't replay a frame
-			// we've already seen and skipped (an id-bearing keepalive).
-			latest = frame.ID
-		}
-		if frame.Data == "" {
-			continue
-		}
-		if err := fn([]byte(frame.Data)); err != nil {
-			return latest, err
-		}
-	}
-	return latest, nil
-}
-
-// ErrStop, when returned from an AuthorEvents callback, stops the stream; streamJSONEvents
+// ErrStop, when returned from an AuthorEvents callback, stops the stream; AuthorEvents
 // returns it unchanged so the caller can distinguish a deliberate stop (errors.Is) from a
-// real failure. (The agent/control feeds are iterators now — they stop on a range break.)
+// real failure. (The agent/control feeds are iterators — they stop on a range break.)
 var ErrStop = errors.New("pinesandbox: stream stopped by caller")

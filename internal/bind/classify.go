@@ -60,7 +60,7 @@ func Classify(o Outcome) (Class, error) {
 	// 3–5. Problem-type-driven. Gateway routing and clean pre-bind egress
 	// qualification failures are readiness signals ONLY here, inside the attach
 	// deadline. Normal data-plane calls surface sandbox-not-found as
-	// SandboxGoneError.
+	// RuntimeGoneError.
 	switch {
 	case o.ProblemType == "/errors/sandbox-not-found",
 		o.ProblemType == "/errors/sandbox-not-ready",
@@ -77,7 +77,7 @@ func Classify(o Outcome) (Class, error) {
 		case o.Status >= 500:
 			return ClassReadiness, nil
 		default:
-			return ClassTerminal, &BrokerUnreachableError{base{o.Status, o.Message, nil}}
+			return ClassTerminal, &SavedStateUnavailableError{base{o.Status, o.Message, nil}}
 		}
 	}
 
@@ -95,7 +95,7 @@ func Classify(o Outcome) (Class, error) {
 		// single-use sandbox id.
 		return ClassTerminal, &BindError{base{o.Status, o.Message, nil}}
 	case "/errors/already-bound-different-cid", "/errors/pod-tainted":
-		return ClassTerminal, &PodPoisonedError{base{o.Status, o.Message, nil}}
+		return ClassTerminal, &RuntimeUnusableError{base{o.Status, o.Message, nil}}
 	}
 
 	// 7. A problem type we don't specifically map → status fallback.
@@ -111,7 +111,7 @@ func (o Outcome) statusFallback() error {
 	case o.Status == http.StatusConflict:
 		return &BindError{b}
 	case o.Status == http.StatusServiceUnavailable:
-		return &BrokerUnreachableError{b}
+		return &SavedStateUnavailableError{b}
 	default:
 		return &BindError{b}
 	}

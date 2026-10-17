@@ -71,7 +71,12 @@ type APIError struct {
 	// Attach authorization conflict extensions. They identify the winning
 	// integrator-side binding to reload/adopt; Portal never returns a ct_.
 	CurrentBindingRevision *int64
-	CurrentSandboxID       string
+	// CurrentRuntimeID is the runtime the winning binding names (wire current_sandbox_id).
+	CurrentRuntimeID string
+	// CurrentSandboxID is the former name of CurrentRuntimeID; both carry the same value.
+	//
+	// Deprecated: use CurrentRuntimeID.
+	CurrentSandboxID string
 }
 
 func (e *APIError) Error() string {
@@ -156,6 +161,7 @@ func Parse(status int, body []byte, headerRequestID string) *APIError {
 	if json.Unmarshal(body, &wp) == nil {
 		e.ProblemType, e.Title, e.Detail, e.Reason = wp.Type, wp.Title, wp.Detail, wp.Reason
 		e.CurrentBindingRevision = wp.CurrentBindingRevision
+		e.CurrentRuntimeID = wp.CurrentSandboxID
 		e.CurrentSandboxID = wp.CurrentSandboxID
 		if wp.RequestID != "" {
 			e.RequestID = wp.RequestID

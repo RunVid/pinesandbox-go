@@ -4,9 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/url"
-	"time"
 
 	"go.pinesandbox.io/computer/internal/base/problem"
 )
@@ -52,23 +50,13 @@ func (c *Client) DiscardOrphanDownload(ctx context.Context, token, guid string) 
 	return err
 }
 
-// Finish closes browser work and confirms its terminal save. A failed request
-// must not fall back to ordinary capture or sandbox deletion.
-func (c *Client) Finish(ctx context.Context, token string) error {
-	ctx, cancel := context.WithTimeout(ctx, 50*time.Second)
-	defer cancel()
-	raw, err := c.postJSON(ctx, "/v1/coord/finish", token, map[string]any{})
-	if err != nil {
-		return err
-	}
-	var result struct {
-		Saved bool `json:"saved"`
-	}
-	if err := json.Unmarshal(raw, &result); err != nil {
-		return err
-	}
-	if !result.Saved {
-		return fmt.Errorf("stop did not confirm a complete save")
-	}
-	return nil
+// ListOrphanTabs lists the browser tabs no session owns (ct_, raw).
+func (c *Client) ListOrphanTabs(ctx context.Context, token string) (json.RawMessage, error) {
+	return c.getJSON(ctx, "/orphans", token)
+}
+
+// CloseOrphanTab closes one tab no session owns (ct_).
+func (c *Client) CloseOrphanTab(ctx context.Context, token, targetID string) error {
+	_, err := c.do(ctx, "DELETE", "/orphans/"+url.PathEscape(targetID), token, nil)
+	return err
 }

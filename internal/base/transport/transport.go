@@ -1,9 +1,10 @@
 // Package transport is the HTTP client one host (a coord data host or the control-plane
-// host) talks through. It carries the bearer as X-Pine-Auth (coord reads it; the gateway
-// forwards it unchanged), decodes non-2xx into a typed *problem.APIError, captures the
-// request-id, and normalizes transport faults into typed *TimeoutError / *ConnectionError
-// so an integrator never sees a raw net/url error. Generic base primitive (internal/base)
-// — Computer-agnostic, must not import a domain package.
+// host) talks through. It carries the request token as Authorization: Bearer (the
+// gateway forwards it unchanged to the coordinator), decodes non-2xx into a typed
+// *problem.APIError, captures the request-id and Retry-After, and normalizes transport
+// faults into typed *TimeoutError / *ConnectionError so an integrator never sees a raw
+// net/url error. Generic base primitive (internal/base) — Computer-agnostic, must not
+// import a domain package.
 package transport
 
 import (
@@ -13,13 +14,14 @@ import (
 	"fmt"
 	"io"
 	"math"
-	"math/rand"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"go.pinesandbox.io/computer/internal/base/problem"
+	"go.pinesandbox.io/computer/internal/base/wait"
 )
 
 // defaultTimeout is the FALLBACK deadline for a unary call whose caller passed no context
@@ -37,8 +39,16 @@ const defaultTimeout = 30 * time.Second
 const streamHeaderTimeout = 60 * time.Second
 
 // defaultMaxAttempts is the total send count for a retry-eligible request (1 try + 2
-// retries) on a transient transport fault. Matches the Ruby SDK's transient-retry budget.
+// retries) on a transient transport fault: the shared client policy (computer-api.yaml
+// x-pine-retry.client) every server SDK follows.
 const defaultMaxAttempts = 3
+
+// The shared transient backoff: 200ms·2^(attempt-1) plus up to 100ms of jitter, capped at 2s.
+const (
+	transientBase   = 200 * time.Millisecond
+	transientJitter = 100 * time.Millisecond
+	transientCap    = 2 * time.Second
+)
 
 // Client issues unary requests against scheme://host.
 type Client struct {
@@ -47,7 +57,8 @@ type Client struct {
 	streamHC     *http.Client
 	unaryTimeout time.Duration // fallback deadline applied only when the caller set none
 	maxAttempts  int
-	backoff      func(attempt int) time.Duration
+	backoff      func(attempt int) time.Duration // nil = the shared transient backoff
+	clock        wait.Clock
 }
 
 // Option configures a Client.
@@ -64,20 +75,23 @@ func WithHTTPClient(hc *http.Client) Option { return func(c *Client) { c.hc = hc
 func WithUnaryTimeout(d time.Duration) Option { return func(c *Client) { c.unaryTimeout = d } }
 
 // WithRetry overrides the transient-retry budget + backoff (tests inject a zero backoff so
-// they don't actually sleep). attempts < 1 disables retry.
+// they don't actually sleep). attempts < 1 disables retry; a nil backoff keeps the shared one.
 func WithRetry(attempts int, backoff func(attempt int) time.Duration) Option {
 	return func(c *Client) { c.maxAttempts = attempts; c.backoff = backoff }
 }
 
-// defaultBackoff is bounded exponential with small jitter, capped at 2s (mirrors the Ruby
-// SDK's transient_backoff: 0.2·2^(n-1) + jitter, cap 2s).
-func defaultBackoff(attempt int) time.Duration {
-	base := 0.2 * math.Pow(2, float64(attempt-1))
-	d := base + rand.Float64()*0.1
-	if d > 2.0 {
-		d = 2.0
+// WithClock sets the clock the retry backoff sleeps on and draws its jitter from
+// (default wait.System).
+func WithClock(clock wait.Clock) Option { return func(c *Client) { c.clock = clock } }
+
+// transientBackoff is the shared bounded exponential with jitter.
+func (c *Client) transientBackoff(attempt int) time.Duration {
+	if c.backoff != nil {
+		return c.backoff(attempt)
 	}
-	return time.Duration(d * float64(time.Second))
+	d := time.Duration(float64(transientBase)*math.Pow(2, float64(attempt-1))) +
+		time.Duration(c.clock.Jitter()*float64(transientJitter))
+	return min(d, transientCap)
 }
 
 // New builds a Client for scheme://host (host may include a local-dev port).
@@ -90,11 +104,11 @@ func New(scheme, host string, opts ...Option) *Client {
 		hc:           &http.Client{},
 		unaryTimeout: defaultTimeout,
 		maxAttempts:  defaultMaxAttempts,
-		backoff:      defaultBackoff,
 	}
 	for _, o := range opts {
 		o(c)
 	}
+	c.clock = wait.Or(c.clock)
 	// Streaming reuses the unary client's Transport (TLS/proxy config) but drops the total
 	// timeout — an SSE stream is long-lived and cancelled via context. It adds a
 	// response-header-timeout floor so a connect-but-never-respond server can't leak forever.
@@ -132,8 +146,8 @@ func (c *Client) Host() string {
 // ws/wss scheme from it rather than guessing).
 func (c *Client) BaseURL() string { return c.base }
 
-// Request is one unary call. Token "" omits X-Pine-Auth (bind-pubkey/health are
-// token-less). Headers carries extras (Idempotency-Key, If-Match, …).
+// Request is one unary call. Token is sent as Authorization: Bearer; "" omits it
+// (bind-pubkey and bind are token-less). Headers carries extras (Idempotency-Key, If-Match, …).
 type Request struct {
 	Token       string
 	Accept      string // default "application/json"
@@ -142,9 +156,10 @@ type Request struct {
 	Headers     map[string]string
 	// RetryOnTransient opts a NON-idempotent method (POST/PATCH) into the bounded
 	// transient-fault retry. Idempotent methods (GET/DELETE/HEAD) retry automatically;
-	// set this only for a POST/PATCH the caller knows is safe to replay — an idempotent
-	// mint/register, or a create carrying a stable Idempotency-Key the server dedupes.
-	// A keyless create must NOT set it (a reset may have applied → double-provision).
+	// set this only for an operation the contract marks replay-safe (operations.json
+	// replay_safe, x-pine-replay-safe): an idempotent mint/register, agent work that
+	// names the same turn when sent again, or a create carrying a stable key the server
+	// dedupes. A keyless create must NOT set it (a reset may have applied → double-provision).
 	RetryOnTransient bool
 }
 
@@ -172,9 +187,7 @@ func (c *Client) DoRaw(ctx context.Context, method, path string, r Request) (*Re
 		}
 		// Transient transport fault on a retry-eligible request: back off, then retry.
 		// A ctx cancellation during the wait ends it, returning the transient fault.
-		select {
-		case <-time.After(c.backoff(attempt)):
-		case <-ctx.Done():
+		if c.clock.Sleep(ctx, c.transientBackoff(attempt)) != nil {
 			return nil, err
 		}
 	}
@@ -223,7 +236,7 @@ func isTransientFault(err error) bool {
 	return errors.As(err, &ce) || errors.As(err, &te)
 }
 
-// newRequest builds the *http.Request with the standard headers (Accept, X-Pine-Auth,
+// newRequest builds the *http.Request with the standard headers (Accept, Authorization,
 // Content-Type, extras). Shared by DoRaw and Stream.
 func (c *Client) newRequest(ctx context.Context, method, path string, r Request) (*http.Request, error) {
 	var body io.Reader
@@ -240,7 +253,7 @@ func (c *Client) newRequest(ctx context.Context, method, path string, r Request)
 	}
 	req.Header.Set("Accept", accept)
 	if r.Token != "" {
-		req.Header.Set("X-Pine-Auth", r.Token)
+		req.Header.Set("Authorization", "Bearer "+r.Token)
 	}
 	if r.ContentType != "" {
 		req.Header.Set("Content-Type", r.ContentType)
@@ -290,9 +303,7 @@ func (c *Client) StreamWithRetry(ctx context.Context, method, path string, r Req
 		if err == nil || !isTransientFault(err) || attempt >= attempts {
 			return sr, err
 		}
-		select {
-		case <-time.After(c.backoff(attempt)):
-		case <-ctx.Done():
+		if c.clock.Sleep(ctx, c.transientBackoff(attempt)) != nil {
 			return nil, err
 		}
 	}
@@ -326,8 +337,19 @@ func (c *Client) Do(ctx context.Context, method, path string, r Request) (*Respo
 		ae := problem.Parse(resp.Status, resp.Body, resp.Headers.Get("X-Request-Id"))
 		ae.Host = c.Host()
 		ae.Op = Operation(method, path)
+		ae.RetryAfter = RetryAfter(resp.Headers)
 		return nil, ae
 	}
+}
+
+// RetryAfter is the response's integer-seconds Retry-After, or 0 when it is absent,
+// non-positive or not an integer (the HTTP-date form is not used by Pine).
+func RetryAfter(h http.Header) time.Duration {
+	n, err := strconv.ParseInt(strings.TrimSpace(h.Get("Retry-After")), 10, 64)
+	if err != nil || n <= 0 || n > math.MaxInt64/int64(time.Second) {
+		return 0
+	}
+	return time.Duration(n) * time.Second
 }
 
 // normalizeFault maps a Go transport error to a typed SDK error. A caller-initiated

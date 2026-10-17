@@ -25,6 +25,11 @@ type fakeTokenSource struct{}
 
 func (fakeTokenSource) Token(context.Context, bool) (string, error) { return "jws", nil }
 
+// bearerToken is the token a request carried in Authorization: Bearer ("" without one).
+func bearerToken(r *http.Request) string {
+	return strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+}
+
 // buildTestConnection wires a Connection at two httptest servers: controlSrv (control plane
 // + portal attach-credentials) and coordSrv (the data plane). newCoord is overridden to
 // point at coordSrv (the real zone derives an un-routable gateway host).
@@ -40,6 +45,7 @@ func buildTestConnection(t *testing.T, controlURL, coordURL string) *Connection 
 	return &Connection{
 		controlPlane:   cp,
 		attachProvider: attach,
+		portal:         attach,
 		specMajor:      1,
 		newCoord: func(string) (*coordinator.Client, error) {
 			return coordinator.NewClient(transport.New("http", coordHost), 1), nil
@@ -164,13 +170,13 @@ func TestAttachEndToEnd(t *testing.T) {
 			openedKeyVersion, openedBrokerGrant = p.CKC.Version, p.BrokerGrant
 			fmt.Fprintf(w, `{"computer_token":%q,"epoch":1}`, ct)
 		case r.URL.Path == "/sessions" && r.Method == "POST":
-			createAuth = r.Header.Get("X-Pine-Auth")
+			createAuth = bearerToken(r)
 			fmt.Fprintf(w, `{"session":{"name":"s1","token":%q}}`, ps)
 		case r.URL.Path == "/v2/sessions/s1/agent/run":
-			agentAuth, agentKey = r.Header.Get("X-Pine-Auth"), r.Header.Get("Idempotency-Key")
+			agentAuth, agentKey = bearerToken(r), r.Header.Get("Idempotency-Key")
 			fmt.Fprint(w, `{"turn_id":"turn_t1_1","state":"running","started_at":"2026-01-02T03:04:05Z","first_event_id":1,"last_event_id":1}`)
 		case r.URL.Path == "/v1/sessions/s1/observe":
-			observeAuth = r.Header.Get("X-Pine-Auth")
+			observeAuth = bearerToken(r)
 			fmt.Fprint(w, `{"tree":"..."}`)
 		default:
 			t.Errorf("coordSrv: unexpected %s %s", r.Method, r.URL.Path)
@@ -590,7 +596,7 @@ func TestSession_TokenRouting(t *testing.T) {
 	const ct, ps = "ct_x", "ps_sess"
 	auth := map[string]string{}
 	coordSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		auth[r.Method+" "+r.URL.Path] = r.Header.Get("X-Pine-Auth")
+		auth[r.Method+" "+r.URL.Path] = bearerToken(r)
 		switch r.URL.Path {
 		case "/sessions":
 			fmt.Fprintf(w, `{"session":{"name":"s1","token":%q}}`, ps)

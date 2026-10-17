@@ -114,18 +114,19 @@ func (s *AttachCredentialsSource) CurrentBinding(ctx context.Context, computerID
 }
 
 // RegisterComputer registers computer_id into the portal ownership registry (idempotent
-// for the same project; 409/422 for a cross-project duplicate).
-func (s *AttachCredentialsSource) RegisterComputer(ctx context.Context, computerID string, location *ComputerLocation) error {
+// for the same project; 409/422 for a cross-project duplicate, a deleted id, or a
+// different persistence mode). ephemeral fixes the Computer as access-lease-only.
+func (s *AttachCredentialsSource) RegisterComputer(ctx context.Context, computerID string, location *ComputerLocation, ephemeral bool) error {
 	if computerID == "" {
 		return fmt.Errorf("pinesandbox: computer_id required")
 	}
 	if err := validateLocation(location); err != nil {
 		return err
 	}
-	body := struct {
-		ComputerID string            `json:"computer_id"`
-		Location   *ComputerLocation `json:"location,omitempty"`
-	}{ComputerID: computerID, Location: location}
+	body := registerRequestWire{ComputerID: computerID, Location: location}
+	if ephemeral {
+		body.PersistenceMode = "ephemeral"
+	}
 	_, err := s.post(ctx, registerPath, body)
 	if err == nil {
 		return nil
@@ -255,7 +256,8 @@ func (s *AttachCredentialsSource) Credentials(ctx context.Context, req Credentia
 				return nil, &BindingRevisionConflictError{
 					tokenBase:        tokenBaseFrom("reload and adopt the winning binding", ae),
 					CurrentRevision:  ae.CurrentBindingRevision,
-					CurrentSandboxID: ae.CurrentSandboxID,
+					CurrentRuntimeID: ae.CurrentRuntimeID,
+					CurrentSandboxID: ae.CurrentRuntimeID,
 				}
 			}
 			return nil, s.generic(ae, "attach-credentials mint")
@@ -277,6 +279,12 @@ func (s *AttachCredentialsSource) Credentials(ctx context.Context, req Credentia
 		BindTokenExpiresAt: out.BindTokenExpiresAt, BrokerGrantExpiresAt: out.BrokerGrantExpiresAt,
 		KeyAssertion: out.KeyAssertion, BindingRevision: out.BindingRevision, Location: out.Location,
 	}, nil
+}
+
+type registerRequestWire struct {
+	ComputerID      string            `json:"computer_id"`
+	PersistenceMode string            `json:"persistence_mode,omitempty"`
+	Location        *ComputerLocation `json:"location,omitempty"`
 }
 
 // These exact wire structs are intentionally reflected by

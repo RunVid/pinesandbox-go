@@ -110,8 +110,8 @@ func TestE2E_J1_Lifecycle(t *testing.T) {
 
 	// Persistence endpoint reachable (nil = nothing captured yet is fine; a 503 = not
 	// configured would error).
-	if _, err := comp.LatestSnapshot(ctx); err != nil {
-		t.Errorf("LatestSnapshot errored (persistence not configured?): %v", err)
+	if _, err := comp.Snapshot(ctx); err != nil {
+		t.Errorf("Snapshot errored (persistence not configured?): %v", err)
 	}
 
 	// Browser-safe delegation: computer_host must be a FULL URI (scheme included) per
@@ -173,7 +173,9 @@ func TestE2E_J2_Persistence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	details, err := comp.RuntimeDetails(ctx1)
+	// Lifecycle can report "allocated" for a moment after browsing while the runtime's
+	// readiness catches up.
+	details, err := runningSoon(ctx1, comp)
 	if err != nil || details.ID != binding.RuntimeID || details.State != "running" {
 		t.Fatalf("reconnected runtime: %+v %v", details, err)
 	}
@@ -182,9 +184,9 @@ func TestE2E_J2_Persistence(t *testing.T) {
 	if !errors.As(err, &retained) || retained.RuntimeID != binding.RuntimeID {
 		t.Fatalf("Start should retain live runtime: %v", err)
 	}
-	if _, err := comp.Capture(ctx1); err != nil {
+	if _, err := comp.Checkpoint(ctx1); err != nil {
 		teardown(comp)
-		t.Fatalf("Capture: %v", err)
+		t.Fatalf("Checkpoint: %v", err)
 	}
 	snap := mustSnapshot(t, ctx1, comp)
 	// Persistent Computers default to the asymmetric capture-key envelope.
@@ -233,7 +235,7 @@ func TestE2E_J2_Persistence(t *testing.T) {
 		t.Fatalf("re-attach (restore) failed: %v", err)
 	}
 	defer teardown(re)
-	if re.SandboxID() == binding.RuntimeID {
+	if re.RuntimeID() == binding.RuntimeID {
 		t.Fatal("Start reused the old generation")
 	}
 	stale, err := c.ReconnectComputer(ctx2, loaded, loadedBinding)
@@ -243,7 +245,7 @@ func TestE2E_J2_Persistence(t *testing.T) {
 	if released, err := stale.Stop(ctx2); err != nil || !released {
 		t.Fatalf("stale Stop: %v %v", released, err)
 	}
-	if details, err := re.RuntimeDetails(ctx2); err != nil || details.State != "running" {
+	if details, err := runningSoon(ctx2, re); err != nil || details.State != "running" {
 		t.Fatalf("stale worker affected successor: %+v %v", details, err)
 	}
 	if !strings.HasPrefix(re.ComputerToken(), "ct_") {
@@ -542,7 +544,7 @@ func TestE2E_J5_AgentEventStream(t *testing.T) {
 
 // --- helpers ---
 
-// mustSnapshot polls LatestSnapshot until present, failing loud past the budget (the
+// mustSnapshot polls Snapshot until present, failing loud past the budget (the
 // capture/persistence chain didn't land — never skip-as-green). PINE_CHECKPOINT_WAIT /
 // _POLL tune the window (a newly deployed environment's first capture can lag).
 func mustSnapshot(t *testing.T, ctx context.Context, comp *pine.Computer) map[string]any {
@@ -551,9 +553,9 @@ func mustSnapshot(t *testing.T, ctx context.Context, comp *pine.Computer) map[st
 	poll := envDuration("PINE_CHECKPOINT_POLL", 15*time.Second)
 	deadline := time.Now().Add(wait)
 	for {
-		raw, err := comp.LatestSnapshot(ctx)
+		raw, err := comp.Snapshot(ctx)
 		if err != nil {
-			t.Fatalf("LatestSnapshot: %v", err)
+			t.Fatalf("Snapshot: %v", err)
 		}
 		if raw != nil {
 			var m map[string]any
@@ -670,8 +672,9 @@ func TestE2E_J7_SessionIsolation(t *testing.T) {
 		t.Fatalf("CreateSession b: %v", err)
 	}
 
-	// a: record its UID + write a secret into its own 0700 workdir.
-	ra := mustExec(t, ctx, a, `echo "AUID=$(id -u)"; echo TOPSECRET-A > files/secret.txt`)
+	// a: record its UID + write a secret into its own 0700 workdir. Exec already runs in
+	// the session's files/ directory (/var/lib/sandbox/sessions/<name>/files).
+	ra := mustExec(t, ctx, a, `echo "AUID=$(id -u)"; echo TOPSECRET-A > secret.txt`)
 	uidA := extractInt(t, ra, "AUID=")
 	if uidA < 2000 {
 		t.Fatalf("session a UID %d is not an isolation UID (>=2000); stdout=%q", uidA, ra)
@@ -820,13 +823,40 @@ rm -rf /var/lib/sandbox/sessions/J8-SQUAT /var/lib/sandbox/J8-EVIL 2>/dev/null |
 
 // mustExec runs cmd in the session over the real exec lane and returns accumulated stdout,
 // failing on transport/exec error.
+// mustExec runs cmd and returns its stdout, failing unless it exits 0: a script whose
+// setup failed must not let the assertions after it pass vacuously. Scripts that expect
+// a step to fail end that step with `|| true`.
 func mustExec(t *testing.T, ctx context.Context, s *pine.Session, cmd string) string {
 	t.Helper()
 	res, err := s.Exec(ctx, cmd, pine.ExecOptions{}, nil)
 	if err != nil {
 		t.Fatalf("Exec %q: %v", cmd, err)
 	}
+	if res.ExitCode == nil || *res.ExitCode != 0 {
+		code := "none"
+		if res.ExitCode != nil {
+			code = strconv.Itoa(*res.ExitCode)
+		}
+		t.Fatalf("Exec %q exited %s: stderr=%q error=%q", cmd, code, res.Stderr, res.Error)
+	}
 	return res.Stdout
+}
+
+// runningSoon polls the runtime until lifecycle reports it running, for up to a minute,
+// and returns the last details it read.
+func runningSoon(ctx context.Context, comp *pine.Computer) (*pine.RuntimeDetails, error) {
+	deadline := time.Now().Add(time.Minute)
+	for {
+		details, err := comp.RuntimeDetails(ctx)
+		if err != nil || details.State == "running" || time.Now().After(deadline) {
+			return details, err
+		}
+		select {
+		case <-ctx.Done():
+			return details, ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
+	}
 }
 
 // extractInt pulls the integer following prefix out of stdout (e.g. "AUID=2001" → 2001).
@@ -871,9 +901,9 @@ func TestE2E_J9_Delete(t *testing.T) {
 		t.Fatalf("CreateComputer: %v", err)
 	}
 	driveALittle(t, ctx, comp, "delete")
-	if _, err := comp.Capture(ctx); err != nil {
+	if _, err := comp.Checkpoint(ctx); err != nil {
 		teardown(comp)
-		t.Fatalf("Capture: %v", err)
+		t.Fatalf("Checkpoint: %v", err)
 	}
 	mustSnapshot(t, ctx, comp)
 	if _, err := comp.Stop(ctx); err != nil {
@@ -881,10 +911,7 @@ func TestE2E_J9_Delete(t *testing.T) {
 		t.Fatalf("Stop: %v", err)
 	}
 
-	re, err := c.AttachComputer(ctx, credentials.ID, credentials.Key, pine.AttachOptions{
-		BindingRevision: comp.BindingRevision(),
-		CaptureKeypair:  credentials.CaptureKeypair,
-	})
+	re, err := c.StartComputer(ctx, credentials, pine.StartOptions{})
 	if err != nil {
 		t.Fatalf("re-attach (restore) failed: %v", err)
 	}
@@ -919,10 +946,7 @@ func TestE2E_J9_Delete(t *testing.T) {
 	// allocation timeout is retried; any other outcome fails.
 	var unknown *pine.UnknownComputerError
 	for attempt := 1; ; attempt++ {
-		again, err := c.AttachComputer(ctx, credentials.ID, credentials.Key, pine.AttachOptions{
-			BindingRevision: re.BindingRevision(),
-			CaptureKeypair:  credentials.CaptureKeypair,
-		})
+		again, err := c.StartComputer(ctx, credentials, pine.StartOptions{})
 		if errors.As(err, &unknown) {
 			break
 		}

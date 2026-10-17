@@ -33,7 +33,8 @@ var ErrStreamLost = coordinator.ErrStreamLost
 //	next, err := ag.Answer(ctx, turnID, reply, pine.AnswerOptions{}) // persist next.TurnID
 //
 // Mutations (Run/Steer/Answer/Cancel/Reset) use the Computer token (ct_); reads
-// (Wait/Status/Turns/Events) use the session token (ps_).
+// (Wait/Status/Turns/Events/EventsPage) use the session token (ps_), or the Computer
+// token for a handle without one.
 type AgentMode struct {
 	s *Session
 }
@@ -84,7 +85,7 @@ type (
 	AgentActivity = coordinator.AgentActivity
 	// ActivityFacts are what a step acted on (AgentActivity.Facts).
 	ActivityFacts = coordinator.ActivityFacts
-	// ActivityPage is a page a browser step opened.
+	// ActivityPage is the page a browser step ended on.
 	ActivityPage = coordinator.ActivityPage
 	// ActivityTarget is an element a browser step acted on.
 	ActivityTarget = coordinator.ActivityTarget
@@ -98,6 +99,13 @@ type (
 
 // EventsOptions tunes AgentMode.Events.
 type EventsOptions = coordinator.AgentEventsOptions
+
+// EventsPageOptions select a page of retained activity for AgentMode.EventsPage, and
+// AgentEventsPage is one such page.
+type (
+	EventsPageOptions = coordinator.AgentEventsPageOptions
+	AgentEventsPage   = coordinator.AgentEventsPage
+)
 
 // Run starts a turn toward goal and returns it; save its TurnID. errors.Is(err,
 // ErrSessionBusy) ⇒ a turn is already running; errors.Is(err, ErrActionNotImplemented) ⇒
@@ -123,13 +131,14 @@ func (a *AgentMode) Run(ctx context.Context, goal string, opts RunOptions) (*Age
 
 // Wait returns the turn once it ends, with its result or its question, or after
 // timeout with the turn still running or canceling; a zero timeout reads it once. A read
+// that comes back before its server-side hold is followed by a pause of up to a second. A read
 // whose response was lost (a network fault, a 408, or a gateway 502, 503 or 504), or
 // whose problem is marked retryable, is read again until the timeout; any other error
 // is returned. Wait never cancels the turn and never follows NextTurnID. An answered
 // turn means someone already answered its question: continue with NextTurnID instead of
 // presenting it again.
 func (a *AgentMode) Wait(ctx context.Context, turnID string, timeout time.Duration) (*AgentTurn, error) {
-	return a.s.coord.AgentWait(ctx, a.s.token, a.s.name, turnID, timeout)
+	return a.s.coord.AgentWait(ctx, a.s.readToken(), a.s.name, turnID, timeout)
 }
 
 // Answer answers the question that ended turnID and returns the turn the answer opened,
@@ -163,12 +172,12 @@ func (a *AgentMode) Reset(ctx context.Context, opts TaskOptions) (*AgentTask, er
 // Status returns the session's Task and its latest turn, for discovering work. Answer,
 // steer and cancel the turn you saved, not whichever turn is latest.
 func (a *AgentMode) Status(ctx context.Context, opts TaskOptions) (*AgentTask, error) {
-	return a.s.coord.AgentTask(ctx, a.s.token, a.s.name, opts)
+	return a.s.coord.AgentTask(ctx, a.s.readToken(), a.s.name, opts)
 }
 
 // Turns lists the session's retained turns, oldest first, with the IDs events carry.
 func (a *AgentMode) Turns(ctx context.Context, opts TaskOptions) ([]AgentTurn, error) {
-	return a.s.coord.AgentTurns(ctx, a.s.token, a.s.name, opts)
+	return a.s.coord.AgentTurns(ctx, a.s.readToken(), a.s.name, opts)
 }
 
 // Events streams the session's public activity as a typed, resuming iterator, for
@@ -184,5 +193,13 @@ func (a *AgentMode) Turns(ctx context.Context, opts TaskOptions) ([]AgentTurn, e
 // process restart ("" replays retained history). Save both TaskID and cursor.
 // Break to stop; cancel ctx to end cleanly.
 func (a *AgentMode) Events(ctx context.Context, lastEventID string, opts EventsOptions) iter.Seq2[AgentEvent, error] {
-	return a.s.coord.AgentEvents(ctx, a.s.token, a.s.name, lastEventID, opts)
+	return a.s.coord.AgentEvents(ctx, a.s.readToken(), a.s.name, lastEventID, opts)
+}
+
+// EventsPage reads one page of the session's retained public activity after
+// opts.After: the same history Events streams, for a reader that pages instead of
+// holding a stream open. Advance with the page's NextAfter until it reaches
+// LatestEventID; an empty or short page does not mean history is exhausted.
+func (a *AgentMode) EventsPage(ctx context.Context, opts EventsPageOptions) (*AgentEventsPage, error) {
+	return a.s.coord.AgentEventsPage(ctx, a.s.readToken(), a.s.name, opts)
 }

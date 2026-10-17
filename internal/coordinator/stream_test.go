@@ -438,9 +438,10 @@ func TestAgentEvents_CtxCancelCleanExit(t *testing.T) {
 	}
 }
 
-// TestControlEvents_TypedDecode: control events are discriminated by the SSE event: line; a
-// frame without a type (keepalive / "message") is skipped, the typed ones carry Type + raw
-// Data, and the route is the control feed.
+// TestControlEvents_TypedDecode: control events are discriminated by the SSE event: line and
+// take their ID from the SSE id: line (the body id is only a fallback); a frame without a
+// type (keepalive / "message") is skipped, the typed ones carry Type + raw Data, and the
+// route is the control feed.
 func TestControlEvents_TypedDecode(t *testing.T) {
 	c := streamTestClient(t, 5, func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasSuffix(r.URL.Path, "/control/events") {
@@ -448,7 +449,8 @@ func TestControlEvents_TypedDecode(t *testing.T) {
 		}
 		fmt.Fprint(w, "data: {\"keepalive\":true}\n\n") // no event: line → skipped
 		fmt.Fprint(w, "id: 7\nevent: controller_changed\ndata: {\"id\":7,\"controller\":\"agent\"}\n\n")
-		fmt.Fprint(w, "id: 8\nevent: idle_changed\ndata: {\"id\":8,\"idle\":true}\n\n")
+		fmt.Fprint(w, "id: 8\nevent: idle_changed\ndata: {\"idle\":true}\n\n")
+		fmt.Fprint(w, "event: handoff_completed\ndata: {\"id\":9}\n\n")
 	})
 	var got []ControlEvent
 	for ev, err := range c.ControlEvents(context.Background(), "ps_", "s", "") {
@@ -456,12 +458,15 @@ func TestControlEvents_TypedDecode(t *testing.T) {
 			t.Fatalf("unexpected err: %v", err)
 		}
 		got = append(got, ev)
-		if len(got) == 2 {
+		if len(got) == 3 {
 			break
 		}
 	}
-	if len(got) != 2 {
-		t.Fatalf("got %d events, want 2 (keepalive skipped)", len(got))
+	if len(got) != 3 {
+		t.Fatalf("got %d events, want 3 (keepalive skipped)", len(got))
+	}
+	if got[2].Type != "handoff_completed" || got[2].ID != 9 {
+		t.Errorf("ev2 = %+v, want handoff_completed/9 from the body id", got[2])
 	}
 	if got[0].Type != "controller_changed" || got[0].ID != 7 {
 		t.Errorf("ev0 = %+v, want controller_changed/7", got[0])

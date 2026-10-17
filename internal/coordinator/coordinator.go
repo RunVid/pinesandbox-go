@@ -8,13 +8,13 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"time"
 
 	"go.pinesandbox.io/computer/internal/base/problem"
 	"go.pinesandbox.io/computer/internal/base/spec"
 	"go.pinesandbox.io/computer/internal/base/transport"
+	"go.pinesandbox.io/computer/internal/base/wait"
 	"go.pinesandbox.io/computer/internal/bind"
 )
 
@@ -26,14 +26,21 @@ type Client struct {
 	// tests in this package override them so a reconnect doesn't actually sleep.
 	streamBackoff func(attempt int) time.Duration
 	streamBudget  int
-	// sleep is every agent wait between requests: before lost agent work is
-	// sent again (postAgentTurn) and between turn reads (AgentWait); tests
-	// record the waits instead of sleeping.
-	sleep func(ctx context.Context, d time.Duration) error
+	// clock is every wait between requests — before lost agent work is sent again
+	// (postAgentTurn), between turn reads (AgentWait) and between stream reconnects —
+	// the time those budgets are measured on, and the reconnect jitter. Tests use a
+	// virtual clock that records the waits instead of sleeping.
+	clock wait.Clock
 	// discoveryToken reads the capability manifest that qualifies an untyped
 	// V2 404; a session token cannot read it (QualifyWith).
 	discoveryToken string
 }
+
+// Option configures a Client.
+type Option func(*Client)
+
+// WithClock sets the clock every wait, deadline and backoff jitter uses (default wait.System).
+func WithClock(clock wait.Clock) Option { return func(c *Client) { c.clock = clock } }
 
 // QualifyWith names the Computer token that reads the capability manifest when
 // a request's own token cannot. Call it before the client is shared.
@@ -41,18 +48,22 @@ func (c *Client) QualifyWith(computerToken string) { c.discoveryToken = computer
 
 // NewClient builds a coordinator client over raw (pointed at the Computer's data host),
 // sending the legacy gateway marker. Runtime support uses capability discovery.
-func NewClient(raw *transport.Client, specMajor int) *Client {
-	return &Client{
+func NewClient(raw *transport.Client, specMajor int, opts ...Option) *Client {
+	c := &Client{
 		raw: raw,
 		spec: spec.Negotiator{
 			RequestHeader:  "Computer-Spec-Version",
 			ResponseHeader: "X-Computer-Spec-Version",
 			SupportedMajor: specMajor,
 		},
-		streamBackoff: defaultStreamBackoff,
-		streamBudget:  defaultReconnectBudget,
-		sleep:         sleepCtx,
+		streamBudget: defaultReconnectBudget,
 	}
+	for _, o := range opts {
+		o(c)
+	}
+	c.clock = wait.Or(c.clock)
+	c.streamBackoff = c.defaultStreamBackoff
+	return c
 }
 
 // Host returns the data host this coordinator client targets (the public gateway host in
@@ -225,6 +236,9 @@ type coordReq struct {
 	body                []byte
 	contentType, accept string
 	headers             map[string]string
+	// retryTransient marks an operation the contract declares replay-safe
+	// (operations.json replay_safe), so a transient fault is sent again.
+	retryTransient bool
 }
 
 // do is the JSON common case: a request whose body (if any) is JSON, no extra headers.
@@ -236,20 +250,23 @@ func (c *Client) do(ctx context.Context, method, path, token string, body []byte
 	return c.send(ctx, r)
 }
 
-// send is the single coordinator request-and-validate path: X-Pine-Auth bearer (omitted when
-// token==""), the spec-version header (+ caller extras), a caller-chosen Content-Type/Accept,
-// and the non-2xx → typed-error mapping. Gateway markers cannot qualify a runtime.
+// send is the single coordinator request-and-validate path: the Authorization bearer
+// (omitted when token==""), the spec-version header (+ caller extras), a caller-chosen
+// Content-Type/Accept, and the non-2xx → typed-error mapping. retryTransient opts a
+// replay-safe POST into the transport's transient-fault retry.
+// Gateway markers cannot qualify a runtime.
 func (c *Client) send(ctx context.Context, r coordReq) (*transport.Response, error) {
 	accept := r.accept
 	if accept == "" {
 		accept = "application/json"
 	}
 	resp, err := c.raw.DoRaw(ctx, r.method, r.path, transport.Request{
-		Token:       r.token,
-		Accept:      accept,
-		ContentType: r.contentType,
-		Body:        r.body,
-		Headers:     c.baseHeaders(r.headers),
+		Token:            r.token,
+		Accept:           accept,
+		ContentType:      r.contentType,
+		Body:             r.body,
+		Headers:          c.baseHeaders(r.headers),
+		RetryOnTransient: r.retryTransient,
 	})
 	if err != nil {
 		return nil, err
@@ -258,9 +275,7 @@ func (c *Client) send(ctx context.Context, r coordReq) (*transport.Response, err
 		err := c.respError(resp.Status, resp.Body, resp.Headers.Get("X-Request-Id"), r.token, transport.Operation(r.method, r.path))
 		var apiErr *problem.APIError
 		if errors.As(err, &apiErr) {
-			if seconds, perr := strconv.Atoi(strings.TrimSpace(resp.Headers.Get("Retry-After"))); perr == nil && seconds > 0 {
-				apiErr.RetryAfter = time.Duration(seconds) * time.Second
-			}
+			apiErr.RetryAfter = transport.RetryAfter(resp.Headers)
 		}
 		return nil, c.agentProtocolError(ctx, r.path, r.token, err)
 	}
@@ -270,7 +285,7 @@ func (c *Client) send(ctx context.Context, r coordReq) (*transport.Response, err
 // agentProtocolError qualifies only ambiguous V2 404s. A successful request
 // needs no discovery round trip, and the original operation is never retried.
 func (c *Client) agentProtocolError(ctx context.Context, path, token string, original error) error {
-	var gone *SandboxGoneError
+	var gone *RuntimeGoneError
 	var apiErr *problem.APIError
 	if !strings.HasPrefix(path, "/v2/") || errors.As(original, &gone) ||
 		!errors.As(original, &apiErr) || apiErr.Status != http.StatusNotFound || apiErr.ProblemType != "" {
@@ -344,28 +359,29 @@ func (c *Client) openSSE(ctx context.Context, method, path, token string, body [
 	return c.openStream(ctx, method, path, token, "text/event-stream", false, body, extra)
 }
 
-// respError maps a non-2xx coordinator response to a typed error: a 401 on a token'd call is
-// a *bind.TokenRejectedError — a REPORT that the coordinator did not recognize the bound
-// ct_/ps_, not an instruction to re-attach. On a live current sandbox that is
-// binding_auth_lost; only confirmed sandbox-gone evidence justifies an attach, and the SDK
-// never implicitly rebinds (a fresh pod invalidates every ps_ and fences the old pod). The
-// underlying *problem.APIError is wrapped, so errors.As still reaches it. A gateway
-// /errors/sandbox-not-found response becomes SandboxGoneError for every buffered and
-// streaming data-plane operation; attach still classifies its wrapped APIError as a
-// phase-specific readiness signal. Everything else remains the RFC-9457
-// *problem.APIError. Token-less routes (bind/health) never hit the 401 branch. op
-// is "<METHOD> <path>"; it + the data host stamp WHICH operation on WHICH Computer failed
-// (the primary spine) onto the typed error, so a generic handler is self-describing.
+// respError maps a non-2xx coordinator response to a typed error: a 401 on a call made
+// with the Computer token (ct_) is a *bind.TokenRejectedError — a REPORT that the
+// coordinator no longer recognizes the binding's ct_, not an instruction to re-attach. On
+// a live current runtime that is binding_auth_lost; only confirmed runtime-gone evidence
+// justifies an attach, and the SDK never implicitly rebinds (a fresh runtime invalidates
+// every ps_ and fences the old one). A 401 on a session token (ps_) says nothing about
+// the binding and stays the plain *problem.APIError. The underlying *problem.APIError is
+// wrapped, so errors.As still reaches it. A gateway /errors/sandbox-not-found response
+// becomes RuntimeGoneError for every buffered and streaming data-plane operation; attach
+// still classifies its wrapped APIError as a phase-specific readiness signal. Everything
+// else remains the RFC-9457 *problem.APIError. op is "<METHOD> <path>"; it + the data
+// host stamp WHICH operation on WHICH Computer failed (the primary spine) onto the typed
+// error, so a generic handler is self-describing.
 func (c *Client) respError(status int, body []byte, requestID, token, op string) error {
 	ae := problem.Parse(status, body, requestID)
 	ae.Host = c.Host()
 	ae.Op = op
-	if status == 401 && token != "" {
-		return bind.NewTokenRejectedError(401, "the bound token was rejected by the coordinator (binding_auth_lost on a live sandbox; re-attach ONLY on confirmed sandbox-gone evidence)", ae)
+	if status == 401 && strings.HasPrefix(token, "ct_") {
+		return bind.NewTokenRejectedError(401, "the Computer token was rejected by the runtime (binding_auth_lost on a live runtime; re-attach ONLY on confirmed runtime-gone evidence)", ae)
 	}
 	if ae.ProblemType == "/errors/sandbox-not-found" ||
 		(status == http.StatusNotFound && ae.ProblemType == "" && op == "GET /sessions") {
-		return newSandboxGoneError(ae)
+		return newRuntimeGoneError(ae)
 	}
 	return ae
 }

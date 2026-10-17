@@ -5,6 +5,109 @@ package `pinesandbox`) are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/). The current beta compatibility
 line is `v0.3.x`; review release notes before adopting a new minor version.
 
+## [0.3.18] — 2026-10-17
+
+### Added
+
+- `Computer.Skills()` returns the Computer's skill catalog: `List`, `Get`,
+  `SetEnabled`, `Drafts`, `Versions`, `Version`, `Activate`, `Deactivate` and
+  `DeleteVersion`. Versions are integers.
+- `Session.StartLearn`, `StartTeach` and `StartRefine` start an authoring run
+  and return the accepted `*AuthorRun` (its `AuthorID`, `TaskID` and, for
+  teach, `HandoffID`); follow it with `AuthorEvents`.
+- `Computer.TakeControl` and `ReleaseControl` take or release control of a
+  session by name (`""` is `main`), with the same options and retry as the
+  session's own.
+- `Computer.Snapshot` and `Checkpoint`; `Computer.OrphanTabs` and
+  `CloseOrphanTab` list and close browser tabs no session owns;
+  `Computer.OrphanDownloads` lists unclaimed downloads.
+- `AgentMode.EventsPage` reads retained activity a page at a time, after a
+  cursor, as an alternative to holding the stream open.
+- `Client.RegisterComputer` registers a Computer id ahead of its first attach,
+  optionally ephemeral or with a location.
+- `ClientOptions.ControlTokenProvider` and `AttachCredentialsProvider` let a
+  backend mint project tokens and issue attach credentials itself, so the
+  process using the SDK need not hold the project key. With both set,
+  `APIKey` is optional; calls that need Portal with the project key (Start,
+  Stop by id, Delete, registration, location discovery, project policy and
+  diagnostics) then return an error.
+- Runtime names, one per concept across the Pine SDKs: `Computer.RuntimeID`,
+  `RuntimeHandle`, `RuntimeGoneError`, `RuntimeFailedError`,
+  `RuntimeUnusableError` and `SavedStateUnavailableError`, and `RuntimeID`
+  fields on `RuntimeFailedError`, `ReadyTimeoutError` and
+  `AttachAuthorizationCommittedError` (`CurrentRuntimeID` on
+  `BindingRevisionConflictError` and `APIError`). The former fields stay and
+  carry the same value.
+- Portal errors (`RateLimited`, `ControlTokenError`, `AttachCredentialsError`
+  and the rest) carry the response's `Retry-After` as `RetryAfter`.
+
+### Changed
+
+- A browser step's page (`ActivityFacts.Page`, an `ActivityPage`) is the page
+  the step ended on, read from the browser's selected tab when the call ends.
+  Clicks, reads and fills carry one too, and consecutive steps that ended on
+  one page are one visit to it. Before, only a step that navigated carried a
+  page, the one it opened. The field and its type are unchanged.
+- Requests to a Computer send the token as `Authorization: Bearer` instead of
+  `X-Pine-Auth`, as every Pine SDK does.
+- `TokenRejectedError` now means only that the Computer rejected the binding's
+  Computer token (`ct_`). A 401 on a session token (`ps_`) says nothing about
+  the binding and is the plain `*APIError` with status 401.
+- Reads that accept either token use the session token when the session
+  handle has one, and the Computer token otherwise: control state, the
+  notification, control events, handoffs, author events, agent reads
+  (`Wait`, `Status`, `Turns`, `Events`, `EventsPage`), files, artifacts and
+  `Observe`. Control reads and author events used the Computer token before;
+  files, artifacts, agent reads and `Observe` now also work on a handle from
+  `Computer.Session` or `Computer.Sessions`, whose session token is redacted.
+- `Run`, `Answer` and `Cancel` resend a request whose connection failed at
+  once, on the shared backoff (200 ms, then 400 ms), before the slower
+  lost-response resend. Every other request Pine marks safe to repeat already
+  did. The 30-second resend budget is measured from the first send, so it
+  counts those quick retries too and is never overrun.
+- `Session.AuthorEvents` resumes a stream that closes or drops before the
+  run's result: it reopens from the last event id after the shared reconnect
+  backoff and ends at the result, or with `ErrStreamLost` after five
+  reconnects in a row that deliver nothing. A frame that is not valid JSON is
+  skipped, as on the agent stream. It returns the context's error when the
+  context ends first.
+- `AgentMode.Wait` pauses up to a second before reading again when a read of
+  a running turn returns before the hold it asked for, so it never loops
+  without waiting.
+- `Session.NotifyHuman` with an empty `ifMatch` reads the current control
+  ETag itself.
+- Error messages name the Computer's runtime instead of a sandbox or pod.
+
+### Deprecated
+
+These keep working until the next pool minor (0.4):
+
+- `Computer.SandboxID` (use `RuntimeID`), `SandboxHandle` (`RuntimeHandle`),
+  `SandboxGoneError` (`RuntimeGoneError`), `SandboxFailedError`
+  (`RuntimeFailedError`), `PodPoisonedError` (`RuntimeUnusableError`),
+  `BrokerUnreachableError` (`SavedStateUnavailableError`), and the
+  `SandboxID` / `CurrentSandboxID` error fields.
+- `Computer.ListSkills`, `GetSkill`, `SetSkillEnabled`, `ListSkillDrafts`,
+  `ListSkillVersions`, `GetSkillVersion`, `ActivateSkill`, `DeactivateSkill`
+  and `DeleteSkillVersion`: use `Computer.Skills()`.
+- `Computer.LatestSnapshot` (use `Snapshot`), `Capture` (`Checkpoint`) and
+  `ListOrphanDownloads` (`OrphanDownloads`); `Client.AttachComputer` (use
+  `StartComputer`).
+- `Session.Learn`, `Teach` and `Refine` still return as soon as the run is
+  accepted. At the next pool minor they wait for the authoring result, as in
+  the other Pine SDKs; use `StartLearn`, `StartTeach` and `StartRefine` for the
+  asynchronous form.
+
+### Fixed
+
+- `ActivateSkill` sent the version as a JSON string, which the Computer
+  rejects; it now sends the integer the API requires.
+- `ControlEvent.ID` comes from the stream's event id, so resuming from a saved
+  control event works; it was 0 when the event's body carried no id.
+- The project-token mint waits at least the `Retry-After` Pine asks for
+  before trying again. A `Retry-After` longer than its 10-second backoff limit
+  ends the mint at once with the error, whose `RetryAfter` carries the wait.
+
 ## [0.3.17] — 2026-10-17
 
 ### Changed

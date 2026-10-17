@@ -15,6 +15,7 @@ import (
 
 	"go.pinesandbox.io/computer/internal/base/problem"
 	"go.pinesandbox.io/computer/internal/base/transport"
+	"go.pinesandbox.io/computer/internal/base/wait"
 )
 
 const turnJSON = `{"turn_id":"turn_t_1","state":"running","started_at":"2026-01-02T03:04:05Z","first_event_id":1,"last_event_id":1}`
@@ -23,7 +24,7 @@ func TestAgentRun_BodyPathAndKey(t *testing.T) {
 	var body map[string]any
 	var path, auth, key string
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		path, auth, key = r.URL.Path, r.Header.Get("X-Pine-Auth"), r.Header.Get("Idempotency-Key")
+		path, auth, key = r.URL.Path, bearer(r), r.Header.Get("Idempotency-Key")
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		w.WriteHeader(http.StatusAccepted)
 		fmt.Fprint(w, turnJSON)
@@ -187,10 +188,10 @@ func TestAgentMutationRetries(t *testing.T) {
 			}
 			w.WriteHeader(http.StatusServiceUnavailable)
 		})
-		var waits []time.Duration
-		c.sleep = func(_ context.Context, d time.Duration) error { waits = append(waits, d); return nil }
 		var apiErr *problem.APIError
-		if err := calls["answer"](c); !errors.As(err, &apiErr) || apiErr.Status != http.StatusServiceUnavailable ||
+		err := calls["answer"](c)
+		waits := sleepsOf(t, c)
+		if !errors.As(err, &apiErr) || apiErr.Status != http.StatusServiceUnavailable ||
 			int(sent.Load()) != len(tc.waits)+1 || !slices.Equal(waits, tc.waits) {
 			t.Errorf("Retry-After %q: sent=%d waits=%v err=%v", tc.retryAfter, sent.Load(), waits, err)
 		}
@@ -225,7 +226,7 @@ func TestAgentResendStopsWithItsContext(t *testing.T) {
 		cancel()
 		w.WriteHeader(http.StatusServiceUnavailable)
 	})
-	c.sleep = sleepCtx
+	c.clock = wait.System
 	if _, err := c.AgentCancel(ctx, "ct_", "s", "turn_t_1"); !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v", err)
 	}
@@ -241,7 +242,7 @@ func TestAgentRun_ContextEndKeepsItsKey(t *testing.T) {
 		sent.Add(1)
 		w.WriteHeader(http.StatusBadGateway)
 	})
-	c.sleep = sleepCtx
+	c.clock = wait.System // the real deadline must pass during a real wait
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 	_, err := c.AgentRun(ctx, "ct_a", "s", "g", AgentRunOptions{IdempotencyKey: "message-41"})
@@ -272,8 +273,8 @@ func TestAgentWait(t *testing.T) {
 	var holds []string
 	reads := 0
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v2/sessions/s/agent/turns/turn_t_1" || r.Header.Get("X-Pine-Auth") != "ps_" {
-			t.Errorf("read %s auth=%q", r.URL.Path, r.Header.Get("X-Pine-Auth"))
+		if r.URL.Path != "/v2/sessions/s/agent/turns/turn_t_1" || bearer(r) != "ps_" {
+			t.Errorf("read %s auth=%q", r.URL.Path, bearer(r))
 		}
 		holds = append(holds, r.URL.Query().Get("wait_seconds"))
 		reads++
@@ -288,17 +289,18 @@ func TestAgentWait(t *testing.T) {
 			fmt.Fprint(w, `{"turn_id":"turn_t_1","state":"answered","next_turn_id":"turn_t_8","result":{"terminal_reason":"needs_input","summary":"Which account?","artifacts":[],"usage":{}},"started_at":"2026-01-02T03:04:05Z","ended_at":"2026-01-02T03:04:09Z","first_event_id":1,"last_event_id":6}`)
 		}
 	})
-	var sleeps []time.Duration
-	c.sleep = func(_ context.Context, d time.Duration) error { sleeps = append(sleeps, d); return nil }
 	turn, err := c.AgentWait(context.Background(), "ps_", "s", "turn_t_1", time.Minute)
+	sleeps := sleepsOf(t, c)
 	if err != nil || turn.State != "answered" || turn.NextTurnID != "turn_t_8" || turn.Question() != "Which account?" || turn.EndedAt == nil {
 		t.Fatalf("turn=%+v err=%v", turn, err)
 	}
 	if len(holds) != 3 || holds[0] != "25" || holds[2] != "25" {
 		t.Errorf("holds = %v, want the bounded server wait each time", holds)
 	}
-	if !slices.Equal(sleeps, []time.Duration{time.Second}) {
-		t.Errorf("sleeps = %v, want one retry delay", sleeps)
+	// The retry delay after the 503, then a second's pause after the running read
+	// that returned before its hold.
+	if !slices.Equal(sleeps, []time.Duration{time.Second, time.Second}) {
+		t.Errorf("sleeps = %v, want the retry delay and one poll pause", sleeps)
 	}
 
 	// A zero timeout reads once; an expired wait returns the running turn.
@@ -318,12 +320,8 @@ func TestAgentWait_SubsecondTimeout(t *testing.T) {
 		holds = append(holds, r.URL.Query().Get("wait_seconds"))
 		fmt.Fprint(w, strings.Replace(turnJSON, `"running"`, `"`+state+`"`, 1))
 	})
-	var sleeps []time.Duration
-	c.sleep = func(ctx context.Context, d time.Duration) error {
-		sleeps = append(sleeps, d)
-		return sleepCtx(ctx, d)
-	}
 	turn, err := c.AgentWait(context.Background(), "ps_", "s", "turn_t_1", 300*time.Millisecond)
+	sleeps := sleepsOf(t, c)
 	if err != nil || turn.State != "running" {
 		t.Fatalf("turn=%+v err=%v", turn, err)
 	}
@@ -334,10 +332,10 @@ func TestAgentWait_SubsecondTimeout(t *testing.T) {
 		t.Fatalf("sleeps = %v, want the remainder of the timeout", sleeps)
 	}
 
-	holds, sleeps, state = nil, nil, "completed"
+	holds, state = nil, "completed"
 	if turn, err := c.AgentWait(context.Background(), "ps_", "s", "turn_t_1", 300*time.Millisecond); err != nil ||
-		turn.State != "completed" || len(holds) != 1 || len(sleeps) != 0 {
-		t.Fatalf("ended turn: %+v %v, holds %v, sleeps %v", turn, err, holds, sleeps)
+		turn.State != "completed" || len(holds) != 1 || len(sleepsOf(t, c)) != 0 {
+		t.Fatalf("ended turn: %+v %v, holds %v", turn, err, holds)
 	}
 }
 

@@ -102,7 +102,7 @@ func (z *Zone) ControlHost() string { return z.controlHost }
 // DataHost is <sandbox_id>.computer.<zone>, port-suffixed on non-secure local zones.
 func (z *Zone) DataHost(sandboxID string) (string, error) {
 	if len(sandboxID) > maxSandboxIDLen || !sandboxIDRE.MatchString(sandboxID) {
-		return "", fmt.Errorf("zone: invalid sandbox id %q", sandboxID)
+		return "", fmt.Errorf("zone: invalid runtime id %q", sandboxID)
 	}
 	h := sandboxID + ".computer." + z.zone
 	if !z.secure {

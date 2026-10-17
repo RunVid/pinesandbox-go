@@ -1,0 +1,76 @@
+{
+  "stream": "framing",
+  "description": "Framing edge cases every SDK's SSE reader must decode identically, whatever the stream. A block dispatches a frame when it carried any field (even an id alone or an unknown field), so readers skip empty-data frames after advancing their resume cursor. A trailing block without its closing blank line is discarded, never flushed.",
+  "vectors": [
+    {
+      "name": "unterminated-tail-discarded",
+      "generation": "both",
+      "whatwg_valid": true,
+      "note": "the stream ended mid-frame; only complete frames are delivered",
+      "wire": "id: 1\ndata: {\"n\":1}\n\nid: 2\ndata: {\"n\":2}",
+      "frames": [
+        {"event": "message", "data": "{\"n\":1}", "id": "1"}
+      ]
+    },
+    {
+      "name": "id-only-block",
+      "generation": "both",
+      "whatwg_valid": true,
+      "note": "dispatches an empty-data frame; readers advance the cursor to 5 and deliver nothing",
+      "wire": "id: 5\n\ndata: {\"n\":6}\n\n",
+      "frames": [
+        {"event": "message", "data": "", "id": "5"},
+        {"event": "message", "data": "{\"n\":6}"}
+      ]
+    },
+    {
+      "name": "keepalive-comment",
+      "generation": "both",
+      "whatwg_valid": true,
+      "note": "the 20s `: ka` comment is not a frame",
+      "wire": ": ka\n\nid: 3\ndata: {\"n\":3}\n\n: ka\n\n",
+      "frames": [
+        {"event": "message", "data": "{\"n\":3}", "id": "3"}
+      ]
+    },
+    {
+      "name": "crlf-line-endings",
+      "generation": "both",
+      "whatwg_valid": true,
+      "wire": "id: 9\r\nevent: idle_changed\r\ndata: {\"idle_paused\":true}\r\n\r\n",
+      "frames": [
+        {"event": "idle_changed", "data": "{\"idle_paused\":true}", "id": "9"}
+      ]
+    },
+    {
+      "name": "multi-line-data",
+      "generation": "both",
+      "whatwg_valid": true,
+      "note": "data lines join with a single newline",
+      "wire": "data: line one\ndata: line two\n\n",
+      "frames": [
+        {"event": "message", "data": "line one\nline two"}
+      ]
+    },
+    {
+      "name": "colon-spacing",
+      "generation": "both",
+      "whatwg_valid": true,
+      "note": "exactly one leading space after the colon is removed",
+      "wire": "data:no-space\n\ndata:  two-spaces\n\n",
+      "frames": [
+        {"event": "message", "data": "no-space"},
+        {"event": "message", "data": " two-spaces"}
+      ]
+    },
+    {
+      "name": "unknown-fields-ignored",
+      "generation": "both",
+      "whatwg_valid": true,
+      "wire": "retry: 1000\nfuture: value\nid: 4\ndata: {\"n\":4}\n\n",
+      "frames": [
+        {"event": "message", "data": "{\"n\":4}", "id": "4"}
+      ]
+    }
+  ]
+}

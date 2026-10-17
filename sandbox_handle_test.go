@@ -135,8 +135,8 @@ func statusSequence(states ...string) (func(context.Context, string) (*controlpl
 	}, &calls
 }
 
-func newTestHandle(cp sandboxControl, status string) (*SandboxHandle, *time.Time) {
-	h := newSandboxHandle(cp, "sb-1", status)
+func newTestHandle(cp sandboxControl, status string) (*RuntimeHandle, *time.Time) {
+	h := newRuntimeHandle(cp, "sb-1", status)
 	now := time.Unix(1700000000, 0)
 	h.clock = func() time.Time { return now }
 	h.sleeper = func(_ context.Context, d time.Duration) error { now = now.Add(d); return nil }
@@ -250,7 +250,7 @@ func TestTerminate_BoundsBlockedDeleteAndStatusRequests(t *testing.T) {
 					return nil, block(ctx)
 				},
 			}
-			h := newSandboxHandle(cp, "sb-1", "running")
+			h := newRuntimeHandle(cp, "sb-1", "running")
 			gone, err := h.Terminate(parent, 20*time.Millisecond, time.Second)
 			if gone || err != nil {
 				t.Fatalf("expired confirmation = %v, %v; want false, nil", gone, err)
@@ -284,7 +284,7 @@ func TestTerminate_ContextCancelAborts(t *testing.T) {
 		},
 		destroy: func(context.Context, string) error { return nil },
 	}
-	h := newSandboxHandle(cp, "sb-1", "running")
+	h := newRuntimeHandle(cp, "sb-1", "running")
 	ctx, cancel := context.WithCancel(context.Background())
 	calls := 0
 	// Real-clock handle; the sleeper cancels on the first poll and reports it (like wait.Sleep).

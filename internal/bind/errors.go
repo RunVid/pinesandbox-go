@@ -42,38 +42,41 @@ type BindAuthError struct{ base }
 
 func (e *BindAuthError) Error() string { return errMsg("bind rejected", e.Status, e.Msg) }
 
-// ComputerAlreadyAttachedError: another pod holds this Computer's epoch lease.
+// ComputerAlreadyAttachedError: another runtime holds this Computer's epoch lease.
 type ComputerAlreadyAttachedError struct{ base }
 
 func (e *ComputerAlreadyAttachedError) Error() string {
 	return errMsg("computer already attached elsewhere", e.Status, e.Msg)
 }
 
-// PodPoisonedError: a single-use pod bound elsewhere / tainted — recycle, never replay.
-type PodPoisonedError struct{ base }
+// RuntimeUnusableError: a single-use runtime bound elsewhere / tainted — start a fresh one,
+// never replay. bind-decision-table.json still names it PodPoisonedError.
+type RuntimeUnusableError struct{ base }
 
-func (e *PodPoisonedError) Error() string {
+func (e *RuntimeUnusableError) Error() string {
 	return errMsg("runtime cannot be attached", e.Status, e.Msg)
 }
 
-// BrokerUnreachableError: the broker / restore pipeline is unavailable (503 / non-epoch
-// bind-restore-failed).
-type BrokerUnreachableError struct{ base }
+// SavedStateUnavailableError: the saved-state service / restore pipeline is unavailable
+// (503 / non-epoch bind-restore-failed). bind-decision-table.json still names it
+// BrokerUnreachableError.
+type SavedStateUnavailableError struct{ base }
 
-func (e *BrokerUnreachableError) Error() string {
+func (e *SavedStateUnavailableError) Error() string {
 	return errMsg("saved state unavailable", e.Status, e.Msg)
 }
 
-// BindTimeoutError: the readiness deadline elapsed before the pod became ready (produced
-// by the attach loop, not the classifier).
+// BindTimeoutError: the readiness deadline elapsed before the runtime became ready
+// (produced by the attach loop, not the classifier).
 type BindTimeoutError struct{ base }
 
 func (e *BindTimeoutError) Error() string { return errMsg("bind readiness timeout", e.Status, e.Msg) }
 
-// TokenRejectedError: a 401 on a previously-bound ct_/ps_. Produced by the request layer.
-// A report, not an instruction: on a live, current sandbox this is binding_auth_lost —
-// reconcile; only confirmed sandbox-gone evidence justifies an attach. The SDK never
-// implicitly rebinds (a fresh pod invalidates every ps_ and fences the old pod's state).
+// TokenRejectedError: a 401 on the binding's Computer token (ct_). Produced by the request
+// layer. A report, not an instruction: on a live, current runtime this is
+// binding_auth_lost — reconcile; only confirmed runtime-gone evidence justifies an attach.
+// The SDK never implicitly rebinds (a fresh runtime invalidates every ps_ and fences the
+// old one's state).
 type TokenRejectedError struct{ base }
 
 func (e *TokenRejectedError) Error() string { return errMsg("token rejected", e.Status, e.Msg) }
@@ -92,7 +95,7 @@ func NewBindError(status int, msg string, cause error) *BindError {
 	return &BindError{base{Status: status, Msg: msg, Cause: cause}}
 }
 
-// NewTokenRejectedError builds a TokenRejectedError (a 401 on a previously-bound ct_/ps_).
+// NewTokenRejectedError builds a TokenRejectedError (a 401 on the binding's ct_).
 // cause is wrapped so callers can still errors.As to the underlying *problem.APIError.
 func NewTokenRejectedError(status int, msg string, cause error) *TokenRejectedError {
 	return &TokenRejectedError{base{Status: status, Msg: msg, Cause: cause}}

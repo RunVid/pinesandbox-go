@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"sync/atomic"
 	"testing"
 
 	"go.pinesandbox.io/computer/internal/base/problem"
@@ -69,11 +71,12 @@ func TestSkills_ServedAndVersions(t *testing.T) {
 	if gv, err := c.GetSkillVersion(ctx, "ct_", "book-flight", "2"); err != nil || !contains(string(gv), "# v2") {
 		t.Fatalf("GetSkillVersion = %s, %v", gv, err)
 	}
-	if _, err := c.ActivateSkill(ctx, "ct_", "book-flight", "2"); err != nil {
+	if _, err := c.ActivateSkill(ctx, "ct_", "book-flight", 2); err != nil {
 		t.Fatalf("ActivateSkill: %v", err)
 	}
-	if activateBody["version"] != "2" {
-		t.Errorf("activate body = %v", activateBody)
+	// spec ActivateSkillRequest.version is an integer; a JSON string is a 400.
+	if activateBody["version"] != float64(2) {
+		t.Errorf("activate body = %#v, want an integer version", activateBody)
 	}
 	if _, err := c.DeactivateSkill(ctx, "ct_", "book-flight"); err != nil {
 		t.Fatalf("DeactivateSkill: %v", err)
@@ -144,24 +147,52 @@ func TestSkills_Authoring(t *testing.T) {
 	}
 }
 
+// TestSkills_AuthorEvents: the author feed is finite but resumable — a stream that closes
+// before the result reopens from the last event id after the reconnect backoff, and the
+// result event ends it with the cursor.
 func TestSkills_AuthorEvents(t *testing.T) {
+	var opens []string
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v2/sessions/s/skills/author/au1/events" {
 			t.Errorf("path = %s", r.URL.Path)
 		}
-		_, _ = io.WriteString(w, "id: 1\ndata: {\"type\":\"progress\"}\n\n")
-		_, _ = io.WriteString(w, "id: 2\ndata: {\"terminal\":true}\n\n")
+		opens = append(opens, r.Header.Get("Last-Event-ID"))
+		if len(opens) == 1 {
+			_, _ = io.WriteString(w, "id: 1\ndata: {\"type\":\"progress\",\"event_id\":1}\n\n")
+			return // closes before the result
+		}
+		_, _ = io.WriteString(w, "id: 2\ndata: {\"type\":\"result\",\"event_id\":2}\n\n")
+		_, _ = io.WriteString(w, "id: 3\ndata: {\"type\":\"progress\",\"event_id\":3}\n\n")
 	})
-	var n int
+	var types []string
 	last, err := c.AuthorEvents(context.Background(), "ps_", "s", "au1", "", func(data []byte) error {
-		n++
+		var ev struct{ Type string }
+		_ = json.Unmarshal(data, &ev)
+		types = append(types, ev.Type)
 		return nil
 	})
 	if err != nil {
 		t.Fatalf("AuthorEvents: %v", err)
 	}
-	if n != 2 || last != "2" {
-		t.Errorf("events=%d cursor=%q, want 2/2", n, last)
+	if fmt.Sprint(types) != "[progress result]" || last != "2" {
+		t.Errorf("events=%v cursor=%q, want [progress result] and 2 (nothing after the result)", types, last)
+	}
+	if fmt.Sprint(opens) != "[ 1]" {
+		t.Errorf("opens sent Last-Event-ID %q, want none then 1", opens)
+	}
+	if sleeps := sleepsOf(t, c); fmt.Sprint(sleeps) != "[500ms]" {
+		t.Errorf("sleeps = %v, want the 500ms reconnect backoff", sleeps)
+	}
+}
+
+// TestSkills_AuthorEvents_StreamLost: a feed that keeps closing without delivering an
+// event ends with ErrStreamLost after the shared reconnect budget.
+func TestSkills_AuthorEvents_StreamLost(t *testing.T) {
+	var opens atomic.Int32
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) { opens.Add(1) })
+	_, err := c.AuthorEvents(context.Background(), "ps_", "s", "au1", "7", func([]byte) error { return nil })
+	if !errors.Is(err, ErrStreamLost) || opens.Load() != defaultReconnectBudget+1 {
+		t.Fatalf("err = %v after %d opens, want ErrStreamLost after %d", err, opens.Load(), defaultReconnectBudget+1)
 	}
 }
 
@@ -232,9 +263,9 @@ func TestAuthorQualificationPreservesGoneComputer(t *testing.T) {
 		_, _ = io.WriteString(w, `{"type":"/errors/sandbox-not-found","status":404,"detail":"runtime gone"}`)
 	})
 	err := c.RequirePublicAgent(context.Background(), "ct_")
-	var gone *SandboxGoneError
+	var gone *RuntimeGoneError
 	if !errors.As(err, &gone) {
-		t.Fatalf("got %T (%v), want SandboxGoneError", err, err)
+		t.Fatalf("got %T (%v), want RuntimeGoneError", err, err)
 	}
 }
 
@@ -271,7 +302,7 @@ func TestV2RequestsQualifyOnlyAmbiguousNotFound(t *testing.T) {
 			_, run := c.AgentRun(ctx, "ct_", "s", "g", AgentRunOptions{IdempotencyKey: "message-41"})
 			for _, err := range []error{learn, teach, refine, cancel, run} {
 				var unsupported *AgentProtocolUnsupportedError
-				var gone *SandboxGoneError
+				var gone *RuntimeGoneError
 				if errors.As(err, &unsupported) != tc.unsupported || errors.As(err, &gone) != tc.gone {
 					t.Fatalf("unexpected error %T: %v", err, err)
 				}
@@ -298,8 +329,8 @@ func TestAgentReadQualifiesWithTheComputerToken(t *testing.T) {
 	var discoveredWith []string
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/capabilities" {
-			discoveredWith = append(discoveredWith, r.Header.Get("X-Pine-Auth"))
-			if r.Header.Get("X-Pine-Auth") != "ct_" {
+			discoveredWith = append(discoveredWith, bearer(r))
+			if bearer(r) != "ct_" {
 				w.WriteHeader(http.StatusUnauthorized)
 				return
 			}

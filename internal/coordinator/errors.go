@@ -7,26 +7,26 @@ import (
 	"go.pinesandbox.io/computer/internal/base/problem"
 )
 
-// SandboxGoneError means the gateway can no longer route the bound sandbox.
+// RuntimeGoneError means the gateway can no longer route the bound runtime.
 // It wraps the original APIError so callers retain host, operation, request id,
 // and wire diagnostics through errors.As.
-type SandboxGoneError struct {
+type RuntimeGoneError struct {
 	cause error
 }
 
-func (e *SandboxGoneError) Error() string {
+func (e *RuntimeGoneError) Error() string {
 	var apiErr *problem.APIError
 	if errors.As(e.cause, &apiErr) {
-		return "pinesandbox: bound sandbox is gone" +
+		return "pinesandbox: the Computer's runtime is gone" +
 			problem.ContextSuffix(apiErr.Host, apiErr.Op, apiErr.RequestID)
 	}
-	return fmt.Sprintf("pinesandbox: bound sandbox is gone: %v", e.cause)
+	return fmt.Sprintf("pinesandbox: the Computer's runtime is gone: %v", e.cause)
 }
 
-func (e *SandboxGoneError) Unwrap() error { return e.cause }
+func (e *RuntimeGoneError) Unwrap() error { return e.cause }
 
-func newSandboxGoneError(cause error) *SandboxGoneError {
-	return &SandboxGoneError{cause: cause}
+func newRuntimeGoneError(cause error) *RuntimeGoneError {
+	return &RuntimeGoneError{cause: cause}
 }
 
 // RunUnconfirmedError is a run whose response never arrived: it may have

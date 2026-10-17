@@ -11,7 +11,7 @@ import (
 func TestPasskeyRoutesAndTypes(t *testing.T) {
 	var bodies = map[string]map[string]string{}
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("X-Pine-Auth") == "" {
+		if bearer(r) == "" {
 			t.Errorf("%s %s missing auth", r.Method, r.URL.Path)
 		}
 		if r.Body != nil {

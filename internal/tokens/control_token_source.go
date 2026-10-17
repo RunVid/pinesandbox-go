@@ -31,7 +31,9 @@ const (
 // goroutine-safe with single-flight refresh: concurrent callers serialize on the mint and
 // reuse its result. The cached expiry is taken from the minted JWS's own exp claim when
 // present, falling back to the portal response expiry (expires_in / expires_at) otherwise.
-// 429/5xx are retried with bounded jittered backoff; 401/403 are terminal. The pk_ and the
+// 429/5xx are retried with bounded jittered backoff, waiting at least the response's
+// Retry-After; a Retry-After beyond the backoff ceiling ends the mint at once with the
+// error, whose RetryAfter carries the server's wait. 401/403 are terminal. The pk_ and the
 // minted JWS never appear in the String() form.
 type ControlTokenSource struct {
 	client *transport.Client
@@ -138,18 +140,16 @@ func (s *ControlTokenSource) mint(ctx context.Context) (string, error) {
 			return "", &InvalidClientKey{tokenBaseFrom("unknown or revoked project client key", ae)}
 		case ae.Status == 403:
 			return "", &InsufficientScope{tokenBaseFrom("this key may not mint control-plane tokens (needs pk_session/pk_admin)", ae)}
-		case ae.Status == 429:
-			if last {
-				return "", &RateLimited{tokenBaseFrom("portal rate-limited the control-token mint", ae)}
-			}
-			if serr := s.sleeper(ctx, s.backoff(i+1)); serr != nil {
-				return "", serr
-			}
-		case ae.Status >= 500 && ae.Status <= 599:
-			if last {
+		case ae.Status == 429 || (ae.Status >= 500 && ae.Status <= 599):
+			// Retry-After is a floor on the wait. One beyond the backoff ceiling ends the
+			// mint with the server's wait (the error's RetryAfter) instead of retrying early.
+			if last || ae.RetryAfter > maxBackoff {
+				if ae.Status == 429 {
+					return "", &RateLimited{tokenBaseFrom("portal rate-limited the control-token mint", ae)}
+				}
 				return "", &ControlTokenError{tokenBaseFrom("portal error minting control token", ae)}
 			}
-			if serr := s.sleeper(ctx, s.backoff(i+1)); serr != nil {
+			if serr := s.sleeper(ctx, max(s.backoff(i+1), ae.RetryAfter)); serr != nil {
 				return "", serr
 			}
 		default:
@@ -241,7 +241,7 @@ func controlTokenExpiry(token string) (time.Time, bool) {
 }
 
 // backoff is bounded jittered exponential: 0.2·2^(attempt-1) seconds + up to 100ms jitter,
-// capped at maxBackoff. (Retry-After, capped at the same ceiling, is not separately honored.)
+// capped at maxBackoff.
 func (s *ControlTokenSource) backoff(attempt int) time.Duration {
 	base := 0.2 * math.Pow(2, float64(attempt-1))
 	d := time.Duration((base + s.rng()*0.1) * float64(time.Second))

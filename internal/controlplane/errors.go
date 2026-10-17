@@ -1,5 +1,5 @@
 // Package controlplane is the project-scoped control plane client: create / inspect /
-// destroy / pause / resume a Computer's pod at https://api.<zone>/sandboxes, authenticated
+// destroy / pause / resume a Computer's runtime at https://api.<zone>/sandboxes, authenticated
 // with a project JWS (Authorization: Bearer) from a TokenSource. Pine-owned — NOT the base
 // gem's lifecycle adapter (which bakes in the wrong API key + a /v1 prefix). Control-plane
 // errors are {code,message} (NOT RFC-9457), so this layer maps status → typed error using
@@ -63,12 +63,12 @@ type ForbiddenError struct{ cpBase }
 
 func (e *ForbiddenError) Error() string { return cpErr(e.cpBase) }
 
-// NotFoundError: 404 — no such sandbox.
+// NotFoundError: 404 — no such runtime.
 type NotFoundError struct{ cpBase }
 
 func (e *NotFoundError) Error() string { return cpErr(e.cpBase) }
 
-// ConflictError: 409 — e.g. pausing an already-paused sandbox.
+// ConflictError: 409 — e.g. pausing an already-paused runtime.
 type ConflictError struct{ cpBase }
 
 func (e *ConflictError) Error() string { return cpErr(e.cpBase) }

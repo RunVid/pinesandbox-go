@@ -41,8 +41,9 @@ func (c *Client) GetSkillVersion(ctx context.Context, token, name, version strin
 	return c.getJSON(ctx, "/v1/skills/"+url.PathEscape(name)+"/versions/"+url.PathEscape(version), token)
 }
 
-// ActivateSkill serves a reviewed draft version (operator gate; raw).
-func (c *Client) ActivateSkill(ctx context.Context, token, name, version string) (json.RawMessage, error) {
+// ActivateSkill serves a reviewed draft version (operator gate; raw). The version is a
+// JSON integer (spec ActivateSkillRequest.version).
+func (c *Client) ActivateSkill(ctx context.Context, token, name string, version int) (json.RawMessage, error) {
 	return c.postJSON(ctx, "/v1/skills/"+url.PathEscape(name)+"/activate", token, map[string]any{"version": version})
 }
 
@@ -75,7 +76,7 @@ func (c *Client) Capabilities(ctx context.Context, token string) (json.RawMessag
 func (c *Client) RequirePublicAgent(ctx context.Context, token string) error {
 	raw, err := c.Capabilities(ctx, token)
 	var apiErr *problem.APIError
-	var gone *SandboxGoneError
+	var gone *RuntimeGoneError
 	if errors.As(err, &gone) {
 		return err
 	}
@@ -170,9 +171,29 @@ func (c *Client) AuthorSkillDraft(ctx context.Context, token, name, skillName, s
 	return c.postJSON(ctx, "/v1/sessions/"+url.PathEscape(name)+"/skills", token, body)
 }
 
-// AuthorEvents streams public activity from an in-flight skill author run.
+// AuthorEvents streams public activity from a skill author run until its result event,
+// handing fn each event's data JSON. The feed is finite but resumable: a stream that closes
+// or drops before the result reopens from the last event id under the shared reconnect
+// budget (ErrStreamLost when it is spent). It returns the resume cursor; fn returning an
+// error (ErrStop to stop cleanly) ends the stream with that error, and so does ctx.
 func (c *Client) AuthorEvents(ctx context.Context, token, name, authorID, lastEventID string, fn func(data []byte) error) (string, error) {
-	return c.streamJSONEvents(ctx, "/v2/sessions/"+url.PathEscape(name)+"/skills/author/"+url.PathEscape(authorID)+"/events", token, lastEventID, fn)
+	path := "/v2/sessions/" + url.PathEscape(name) + "/skills/author/" + url.PathEscape(authorID) + "/events"
+	cursor := lastEventID
+	var failure error
+	ended := false
+	resumeStream(ctx, c, path, token, &cursor, decodeAgentEvent,
+		func(ev AgentEvent) bool { ended = ev.Type == "result"; return ended },
+		func(ev AgentEvent, err error) bool {
+			if err == nil {
+				err = fn(ev.Raw)
+			}
+			failure = err
+			return err == nil
+		})
+	if failure == nil && !ended {
+		failure = ctx.Err()
+	}
+	return cursor, failure
 }
 
 // CancelAuthor cancels a running author-codex task (raw 202 body).

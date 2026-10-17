@@ -61,7 +61,7 @@ type sandboxWire struct {
 func ParseSandboxInfo(body []byte) (*SandboxInfo, error) {
 	var w sandboxWire
 	if err := json.Unmarshal(body, &w); err != nil {
-		return nil, fmt.Errorf("pinesandbox: control plane returned an unparseable sandbox: %w", err)
+		return nil, fmt.Errorf("pinesandbox: control plane returned an unparseable runtime: %w", err)
 	}
 	info := &SandboxInfo{
 		ID:              w.ID,

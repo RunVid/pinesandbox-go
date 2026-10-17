@@ -49,7 +49,7 @@ func TestRegisterComputer(t *testing.T) {
 		w.WriteHeader(201)
 		fmt.Fprint(w, `{"computer_id":"c1"}`)
 	})
-	if err := s.RegisterComputer(context.Background(), "c1", &ComputerLocation{Country: "US"}); err != nil {
+	if err := s.RegisterComputer(context.Background(), "c1", &ComputerLocation{Country: "US"}, false); err != nil {
 		t.Fatalf("RegisterComputer: %v", err)
 	}
 	if gotAuth != "Bearer pk_test" || gotPath != "/v1/computers" {
@@ -60,6 +60,15 @@ func TestRegisterComputer(t *testing.T) {
 	}
 	if gotBody["location"].(map[string]any)["country"] != "US" {
 		t.Errorf("location = %v", gotBody["location"])
+	}
+	if _, sent := gotBody["persistence_mode"]; sent {
+		t.Errorf("a persistent registration sent persistence_mode: %v", gotBody)
+	}
+	if err := s.RegisterComputer(context.Background(), "c1", nil, true); err != nil {
+		t.Fatalf("RegisterComputer ephemeral: %v", err)
+	}
+	if gotBody["persistence_mode"] != "ephemeral" {
+		t.Errorf("ephemeral registration body = %v", gotBody)
 	}
 }
 
@@ -77,7 +86,7 @@ func TestDirectLocationWire(t *testing.T) {
 		}
 		fmt.Fprint(w, `{"bind_token":"b","broker_grant":"g","key_assertion":"k","binding_revision":1,"location":{"mode":"direct"}}`)
 	})
-	if err := s.RegisterComputer(context.Background(), "c1", &ComputerLocation{Mode: "direct"}); err != nil {
+	if err := s.RegisterComputer(context.Background(), "c1", &ComputerLocation{Mode: "direct"}, false); err != nil {
 		t.Fatal(err)
 	}
 	req := validCredentialsRequest()
@@ -103,7 +112,7 @@ func TestRegisterComputer_Conflict(t *testing.T) {
 		fmt.Fprint(w, `{"message":"owned by another project"}`)
 	})
 	var e *ComputerRegistrationError
-	if err := s.RegisterComputer(context.Background(), "c1", nil); !errors.As(err, &e) {
+	if err := s.RegisterComputer(context.Background(), "c1", nil, false); !errors.As(err, &e) {
 		t.Fatalf("err = %T (%v), want *ComputerRegistrationError", err, err)
 	} else if e.Status != 409 {
 		t.Errorf("status = %d", e.Status)
@@ -299,8 +308,8 @@ func TestCredentials_BindingRevisionConflictIsTerminalAndCarriesWinner(t *testin
 	if _, err := s.Credentials(context.Background(), validCredentialsRequest()); !errors.As(err, &e) {
 		t.Fatalf("err = %T (%v), want *BindingRevisionConflictError", err, err)
 	}
-	if e.CurrentRevision == nil || *e.CurrentRevision != 7 || e.CurrentSandboxID != "sb-winner" {
-		t.Fatalf("winner = revision %v sandbox %q", e.CurrentRevision, e.CurrentSandboxID)
+	if e.CurrentRevision == nil || *e.CurrentRevision != 7 || e.CurrentRuntimeID != "sb-winner" || e.CurrentSandboxID != "sb-winner" {
+		t.Fatalf("winner = revision %v runtime %q (deprecated field %q)", e.CurrentRevision, e.CurrentRuntimeID, e.CurrentSandboxID)
 	}
 	if e.Code != "urn:pinesandbox:problem:binding-revision-conflict" || e.Reason != "binding_revision_changed" {
 		t.Fatalf("code/reason = %q/%q", e.Code, e.Reason)

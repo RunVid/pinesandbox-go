@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -31,11 +32,15 @@ func disconnectingServer(t *testing.T) *httptest.Server {
 	return srv
 }
 
-// TestDo_AuthHeaderAndBody: the bearer rides X-Pine-Auth (never the URL); 2xx body returns.
+// TestDo_AuthHeaderAndBody: the token rides Authorization: Bearer (never the URL, never
+// the legacy X-Pine-Auth); 2xx body returns.
 func TestDo_AuthHeaderAndBody(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.Header.Get("X-Pine-Auth"); got != "ct_abc" {
-			t.Errorf("X-Pine-Auth = %q, want ct_abc", got)
+		if got := r.Header.Get("Authorization"); got != "Bearer ct_abc" {
+			t.Errorf("Authorization = %q, want Bearer ct_abc", got)
+		}
+		if _, ok := r.Header["X-Pine-Auth"]; ok {
+			t.Errorf("X-Pine-Auth must not be sent")
 		}
 		if got := r.Header.Get("Accept"); got != "application/json" {
 			t.Errorf("Accept = %q", got)
@@ -54,11 +59,11 @@ func TestDo_AuthHeaderAndBody(t *testing.T) {
 	}
 }
 
-// TestDo_OmitsAuthWhenEmpty: token "" sends no X-Pine-Auth (bind-pubkey/health are token-less).
+// TestDo_OmitsAuthWhenEmpty: token "" sends no Authorization (bind-pubkey/bind are token-less).
 func TestDo_OmitsAuthWhenEmpty(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if _, ok := r.Header["X-Pine-Auth"]; ok {
-			t.Errorf("X-Pine-Auth must be absent for a token-less call")
+		if _, ok := r.Header["Authorization"]; ok {
+			t.Errorf("Authorization must be absent for a token-less call")
 		}
 		w.WriteHeader(200)
 	}))
@@ -121,11 +126,11 @@ func TestDoRaw_TransportFaultStillErrors(t *testing.T) {
 }
 
 // TestStream_LiveBodyAndHeaders: Stream returns the live, unbuffered body + status +
-// headers for any status; the caller reads + closes it. Sends X-Pine-Auth + extra headers.
+// headers for any status; the caller reads + closes it. Sends the bearer + extra headers.
 func TestStream_LiveBodyAndHeaders(t *testing.T) {
 	var gotAuth, gotLEI string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotAuth = r.Header.Get("X-Pine-Auth")
+		gotAuth = r.Header.Get("Authorization")
 		gotLEI = r.Header.Get("Last-Event-ID")
 		w.Header().Set("X-Computer-Spec-Version", "1")
 		w.WriteHeader(200)
@@ -142,7 +147,7 @@ func TestStream_LiveBodyAndHeaders(t *testing.T) {
 	if sr.Status != 200 || sr.Headers.Get("X-Computer-Spec-Version") != "1" {
 		t.Errorf("status/headers = %d %v", sr.Status, sr.Headers.Get("X-Computer-Spec-Version"))
 	}
-	if gotAuth != "ps_x" || gotLEI != "7" {
+	if gotAuth != "Bearer ps_x" || gotLEI != "7" {
 		t.Errorf("auth=%q lei=%q", gotAuth, gotLEI)
 	}
 	b, _ := io.ReadAll(sr.Body)
@@ -402,5 +407,68 @@ func TestRetry_PlainStreamStaysSingleShot(t *testing.T) {
 	}
 	if n != 1 {
 		t.Errorf("sends = %d, want 1 (single-shot)", n)
+	}
+}
+
+// recordingClock is a virtual clock: sleeps return at once and are recorded.
+type recordingClock struct {
+	jitter float64
+	sleeps []time.Duration
+}
+
+func (c *recordingClock) Now() time.Time  { return time.Unix(1_760_000_000, 0) }
+func (c *recordingClock) Jitter() float64 { return c.jitter }
+func (c *recordingClock) Sleep(ctx context.Context, d time.Duration) error {
+	c.sleeps = append(c.sleeps, d)
+	return ctx.Err()
+}
+
+// TestRetry_SharedBackoff pins the shared transient policy: three sends, waits of
+// 200ms·2^(n-1) plus the clock's jitter (up to 100ms), taken on the injected clock.
+func TestRetry_SharedBackoff(t *testing.T) {
+	for _, tc := range []struct {
+		jitter float64
+		want   []time.Duration
+	}{
+		{0, []time.Duration{200 * time.Millisecond, 400 * time.Millisecond}},
+		{0.5, []time.Duration{250 * time.Millisecond, 450 * time.Millisecond}},
+	} {
+		clock := &recordingClock{jitter: tc.jitter}
+		var sends int
+		c := New("http", "h", WithClock(clock), WithHTTPClient(&http.Client{Transport: rtFunc(func(*http.Request) (*http.Response, error) {
+			sends++
+			return nil, io.ErrUnexpectedEOF
+		})}))
+		_, err := c.Do(context.Background(), "GET", "/x", Request{})
+		var ce *ConnectionError
+		if !errors.As(err, &ce) {
+			t.Fatalf("want *ConnectionError after the budget, got %T %v", err, err)
+		}
+		if sends != 3 || !reflect.DeepEqual(clock.sleeps, tc.want) {
+			t.Errorf("jitter %v: sends=%d sleeps=%v, want 3 and %v", tc.jitter, sends, clock.sleeps, tc.want)
+		}
+	}
+	c := New("http", "h", WithClock(&recordingClock{jitter: 0.99}))
+	if got := c.transientBackoff(6); got != 2*time.Second {
+		t.Errorf("backoff(6) = %v, want the 2s cap", got)
+	}
+}
+
+// TestDo_RetryAfterOnAPIError: Do carries an integer Retry-After onto the APIError and
+// ignores a malformed one.
+func TestDo_RetryAfterOnAPIError(t *testing.T) {
+	for header, want := range map[string]time.Duration{"3": 3 * time.Second, "": 0, "soon": 0, "-1": 0} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if header != "" {
+				w.Header().Set("Retry-After", header)
+			}
+			w.WriteHeader(429)
+		}))
+		_, err := clientFor(t, srv).Do(context.Background(), "POST", "/v1/control-token", Request{})
+		srv.Close()
+		var ae *problem.APIError
+		if !errors.As(err, &ae) || ae.RetryAfter != want {
+			t.Errorf("Retry-After %q: got %v, want RetryAfter %v", header, err, want)
+		}
 	}
 }

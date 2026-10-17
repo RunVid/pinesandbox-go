@@ -16,7 +16,7 @@ func TestDiagnosticsUseProjectKeyWithoutStartingComputer(t *testing.T) {
 	var calls []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls = append(calls, r.Method+" "+r.URL.Path)
-		if r.Header.Get("Authorization") != "Bearer pk_private" || r.Header.Get("X-Pine-Auth") != "" {
+		if r.Header.Get("Authorization") != "Bearer pk_private" || r.Header.Get("X-Pine-Auth") != "" || len(r.Header.Values("Authorization")) != 1 {
 			t.Error("incorrect project authentication")
 		}
 		if r.Method == "POST" {

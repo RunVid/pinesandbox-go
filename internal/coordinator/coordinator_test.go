@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,14 +19,55 @@ import (
 	"go.pinesandbox.io/computer/internal/bind"
 )
 
+// newTestClient points a client at handler on a virtual clock (testClock): every wait
+// returns at once and is recorded, and the budgets measure virtual time.
 func newTestClient(t *testing.T, handler http.HandlerFunc, opts ...transport.Option) *Client {
 	t.Helper()
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
 	raw := transport.New("http", strings.TrimPrefix(srv.URL, "http://"), opts...)
-	c := NewClient(raw, 1)
-	c.sleep = func(context.Context, time.Duration) error { return nil }
-	return c
+	return NewClient(raw, 1, WithClock(&testClock{now: time.Unix(1_760_000_000, 0)}))
+}
+
+// testClock is a virtual clock: a sleep returns at once (or with ctx's error), advances
+// the time and is recorded.
+type testClock struct {
+	mu     sync.Mutex
+	now    time.Time
+	sleeps []time.Duration
+}
+
+func (c *testClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *testClock) Sleep(ctx context.Context, d time.Duration) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.sleeps = append(c.sleeps, d)
+	c.now = c.now.Add(d)
+	return nil
+}
+
+func (c *testClock) Jitter() float64 { return 0 }
+
+// sleepsOf returns the waits a newTestClient client recorded, and forgets them.
+func sleepsOf(t *testing.T, c *Client) []time.Duration {
+	t.Helper()
+	clock, ok := c.clock.(*testClock)
+	if !ok {
+		t.Fatalf("client clock is %T, not the test clock", c.clock)
+	}
+	clock.mu.Lock()
+	defer clock.mu.Unlock()
+	out := clock.sleeps
+	clock.sleeps = nil
+	return out
 }
 
 func TestBindPubkey(t *testing.T) {
@@ -35,7 +77,7 @@ func TestBindPubkey(t *testing.T) {
 		if r.URL.Path != "/v1/coord/bind-pubkey" || r.Method != "GET" {
 			t.Errorf("got %s %s", r.Method, r.URL.Path)
 		}
-		if _, ok := r.Header["X-Pine-Auth"]; ok {
+		if _, ok := r.Header["Authorization"]; ok {
 			t.Error("bind-pubkey must be token-less")
 		}
 		if got := r.Header.Get("Computer-Spec-Version"); got != "1" {
@@ -81,7 +123,7 @@ func TestBind(t *testing.T) {
 		if r.URL.Path != "/v1/coord/bind" || r.Method != "POST" {
 			t.Errorf("got %s %s", r.Method, r.URL.Path)
 		}
-		if _, ok := r.Header["X-Pine-Auth"]; ok {
+		if _, ok := r.Header["Authorization"]; ok {
 			t.Error("bind must be token-less")
 		}
 		_ = json.NewDecoder(r.Body).Decode(&got)
@@ -123,7 +165,7 @@ func TestCreateSession_BodyAndAuth(t *testing.T) {
 		if r.URL.Path != "/sessions" || r.Method != "POST" {
 			t.Errorf("got %s %s (want POST /sessions, no v1)", r.Method, r.URL.Path)
 		}
-		auth = r.Header.Get("X-Pine-Auth")
+		auth = bearer(r)
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		fmt.Fprint(w, `{"session":{"name":"s1","token":"ps_abc","browser":{"primary_tab_id":"t1","window_id":42},"created_at":"2026-01-01T00:00:00Z"}}`)
 	})
@@ -133,7 +175,7 @@ func TestCreateSession_BodyAndAuth(t *testing.T) {
 		t.Fatalf("CreateSession: %v", err)
 	}
 	if auth != "ct_admin" {
-		t.Errorf("X-Pine-Auth = %q, want ct_admin", auth)
+		t.Errorf("bearer = %q, want ct_admin", auth)
 	}
 	// name + label omitted (empty); browser always present; blind omitted (false).
 	if _, ok := body["name"]; ok {
@@ -314,7 +356,7 @@ func TestError_RFC9457Mapping(t *testing.T) {
 	}
 }
 
-func TestSandboxNotFoundMapsToSandboxGoneError(t *testing.T) {
+func TestSandboxNotFoundMapsToRuntimeGoneError(t *testing.T) {
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/problem+json")
 		w.WriteHeader(http.StatusNotFound)
@@ -322,28 +364,28 @@ func TestSandboxNotFoundMapsToSandboxGoneError(t *testing.T) {
 	})
 
 	_, err := c.ListSessions(context.Background(), "ct_bound")
-	var gone *SandboxGoneError
+	var gone *RuntimeGoneError
 	if !errors.As(err, &gone) {
-		t.Fatalf("sandbox-not-found → %T (%v), want *SandboxGoneError", err, err)
+		t.Fatalf("sandbox-not-found → %T (%v), want *RuntimeGoneError", err, err)
 	}
 	var ae *problem.APIError
 	if !errors.As(err, &ae) || ae.ProblemType != "/errors/sandbox-not-found" || ae.RequestID != "rid-gone" {
 		t.Errorf("wrapped APIError diagnostics lost: %+v", ae)
 	}
 	if msg := err.Error(); !strings.Contains(msg, "op=GET /sessions") || !strings.Contains(msg, "request_id=rid-gone") {
-		t.Errorf("SandboxGoneError message lost operation/request context: %q", msg)
+		t.Errorf("RuntimeGoneError message lost operation/request context: %q", msg)
 	}
 }
 
-func TestLegacyBareListSessions404MapsToSandboxGoneError(t *testing.T) {
+func TestLegacyBareListSessions404MapsToRuntimeGoneError(t *testing.T) {
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Computer not found", http.StatusNotFound)
 	})
 
 	_, err := c.ListSessions(context.Background(), "ct_bound")
-	var gone *SandboxGoneError
+	var gone *RuntimeGoneError
 	if !errors.As(err, &gone) {
-		t.Fatalf("legacy bare gateway 404 → %T (%v), want *SandboxGoneError", err, err)
+		t.Fatalf("legacy bare gateway 404 → %T (%v), want *RuntimeGoneError", err, err)
 	}
 
 	// A bare 404 on a named session is ambiguous on an old coordinator and
@@ -362,7 +404,7 @@ func TestSessionNotFoundRemainsAPIError(t *testing.T) {
 	})
 
 	_, err := c.GetSession(context.Background(), "ct_bound", "gone")
-	var gone *SandboxGoneError
+	var gone *RuntimeGoneError
 	if errors.As(err, &gone) {
 		t.Fatal("session-not-found must not be classified as a missing sandbox")
 	}
@@ -372,23 +414,32 @@ func TestSessionNotFoundRemainsAPIError(t *testing.T) {
 	}
 }
 
-// TestTokenRejectedOn401 verifies a token'd 401 maps to *bind.TokenRejectedError (a report
-// of binding_auth_lost, never an attach instruction), with the underlying *problem.APIError
-// still reachable.
+// TestTokenRejectedOn401 verifies a 401 on the Computer token (ct_) maps to
+// *bind.TokenRejectedError (a report of binding_auth_lost, never an attach instruction),
+// with the underlying *problem.APIError still reachable, and that a 401 on a session token
+// (ps_) stays the plain *problem.APIError: it says nothing about the binding.
 func TestTokenRejectedOn401(t *testing.T) {
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/problem+json")
 		w.WriteHeader(401)
 		fmt.Fprint(w, `{"type":"/errors/unauthorized","status":401,"detail":"token rejected"}`)
 	})
-	_, err := c.GetSession(context.Background(), "ps_stale", "s")
+	_, err := c.GetSession(context.Background(), "ct_stale", "s")
 	var rr *bind.TokenRejectedError
 	if !errors.As(err, &rr) {
-		t.Fatalf("token'd 401 → %T (%v), want *bind.TokenRejectedError", err, err)
+		t.Fatalf("ct_ 401 → %T (%v), want *bind.TokenRejectedError", err, err)
 	}
 	var ae *problem.APIError
 	if !errors.As(err, &ae) || ae.Status != 401 {
 		t.Errorf("underlying *problem.APIError not reachable via unwrap: %v", err)
+	}
+
+	_, err = c.GetSession(context.Background(), "ps_stale", "s")
+	if errors.As(err, &rr) {
+		t.Fatalf("ps_ 401 → %T, want the plain *problem.APIError", err)
+	}
+	if !errors.As(err, &ae) || ae.Status != 401 || ae.ProblemType != "/errors/unauthorized" {
+		t.Errorf("ps_ 401 → %T (%v), want *problem.APIError 401", err, err)
 	}
 }
 
@@ -453,4 +504,9 @@ func TestGatewayMarkerDoesNotOverrideRuntimeContract(t *testing.T) {
 	if _, err := c.ListSessions(context.Background(), "ct_"); err != nil {
 		t.Fatalf("gateway marker rejected a runtime response: %v", err)
 	}
+}
+
+// bearer is the token a request carried in Authorization: Bearer.
+func bearer(r *http.Request) string {
+	return strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 }

@@ -20,7 +20,7 @@ func TestAdoptSession_DrivesWithProvidedPs(t *testing.T) {
 	auth := map[string]string{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
-		auth[r.Method+" "+r.URL.Path] = r.Header.Get("X-Pine-Auth")
+		auth[r.Method+" "+r.URL.Path] = bearerToken(r)
 		mu.Unlock()
 		fmt.Fprint(w, `{}`)
 	}))
@@ -55,7 +55,7 @@ func TestAdoptSession_DrivesWithProvidedPs(t *testing.T) {
 func TestAdoptSession_AgentReadQualifiesWithComputerToken(t *testing.T) {
 	const ct, ps = "ct_tok", "ps_persisted"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/v1/capabilities" && r.Header.Get("X-Pine-Auth") == ct {
+		if r.URL.Path == "/v1/capabilities" && bearerToken(r) == ct {
 			fmt.Fprint(w, `{}`)
 			return
 		}

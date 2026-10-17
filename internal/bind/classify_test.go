@@ -64,11 +64,12 @@ func matchesErrorClass(err error, className string) bool {
 	case "ComputerAlreadyAttachedError":
 		var e *ComputerAlreadyAttachedError
 		return errors.As(err, &e)
-	case "PodPoisonedError":
-		var e *PodPoisonedError
+	// The table predates the runtime names; both spellings name the same Go type.
+	case "RuntimeUnusableError", "PodPoisonedError":
+		var e *RuntimeUnusableError
 		return errors.As(err, &e)
-	case "BrokerUnreachableError":
-		var e *BrokerUnreachableError
+	case "SavedStateUnavailableError", "BrokerUnreachableError":
+		var e *SavedStateUnavailableError
 		return errors.As(err, &e)
 	default:
 		return false
@@ -176,7 +177,7 @@ func fallbackStatuses(t *testing.T, raw json.RawMessage) []int {
 
 // TestClassify_PlainServiceUnavailableIsReadiness pins the precedence subtlety the table
 // encodes: a PLAIN 503 (no problem body) is an ingress readiness signal, NOT the
-// status-fallback BrokerUnreachableError that a 503-with-a-problem-type yields.
+// status-fallback SavedStateUnavailableError that a 503-with-a-problem-type yields.
 func TestClassify_PlainServiceUnavailableIsReadiness(t *testing.T) {
 	if c, _ := Classify(Outcome{Status: 503}); c != ClassReadiness {
 		t.Errorf("plain 503 → %s, want readiness", c)
@@ -185,9 +186,9 @@ func TestClassify_PlainServiceUnavailableIsReadiness(t *testing.T) {
 	if c != ClassTerminal {
 		t.Fatalf("503 with unmapped problem_type → %s, want terminal", c)
 	}
-	var bu *BrokerUnreachableError
+	var bu *SavedStateUnavailableError
 	if !errors.As(err, &bu) {
-		t.Errorf("503 with unmapped problem_type → %T, want *BrokerUnreachableError", err)
+		t.Errorf("503 with unmapped problem_type → %T, want *SavedStateUnavailableError", err)
 	}
 }
 
@@ -209,13 +210,13 @@ func TestClassify_BindRestoreFailedBranches(t *testing.T) {
 	if c, _ := Classify(Outcome{Status: 502, ProblemType: pt, Message: "broker timeout"}); c != ClassReadiness {
 		t.Errorf("transient bind-restore-failed → %s, want readiness", c)
 	}
-	// <500, non-epoch → terminal BrokerUnreachableError.
+	// <500, non-epoch → terminal SavedStateUnavailableError.
 	if c, err := Classify(Outcome{Status: 409, ProblemType: pt, Message: "restore pipeline declined"}); c != ClassTerminal {
 		t.Errorf("<500 bind-restore-failed → %s, want terminal", c)
 	} else {
-		var e *BrokerUnreachableError
+		var e *SavedStateUnavailableError
 		if !errors.As(err, &e) {
-			t.Errorf("<500 bind-restore-failed → %T, want *BrokerUnreachableError", err)
+			t.Errorf("<500 bind-restore-failed → %T, want *SavedStateUnavailableError", err)
 		}
 	}
 }

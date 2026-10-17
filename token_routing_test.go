@@ -12,14 +12,16 @@ import (
 
 // TestFacade_TokenRouting_Comprehensive asserts the ct_ vs ps_ choice for each
 // token-bearing facade wrapper — the facade's core authorization decision. A coord
-// stub records the X-Pine-Auth it received per (method, path); we call every
+// stub records the bearer it received per (method, path); we call every
 // wrapper (ignoring response-parse errors — only the sent token matters) and check
 // each against its expected token class:
-//   - Computer-level ops + agent MUTATIONS + the control lease (state/patch/events/
-//     handoffs) + the skills-authoring lifecycle (learn/teach/refine/author/cancel + its
-//     event stream) + desktop-token mint → the Computer's ct_ (the operator surface)
-//   - session-scoped reads + drive + files/artifacts/tabs + control/notify → ps_
-//   - health → token-less
+//   - Computer-level ops + agent MUTATIONS + the control patch + the skills-authoring
+//     mutations (learn/teach/refine/author/cancel) + desktop-token mint → the
+//     Computer's ct_ (the operator surface)
+//   - session-scoped reads + drive + files/artifacts/tabs → ps_
+//   - routes that accept either token (control state/notify/events, handoffs, agent
+//     reads, files, artifacts, observe, author events) → the handle's ps_, and the ct_
+//     for a handle read without one (checked separately below)
 //
 // The expected token for each route is the COORD's contract, not the SDK's: it
 // must match RouteClass in components/session-coordinator/pkg/server/route_classify.go
@@ -33,7 +35,7 @@ func TestFacade_TokenRouting_Comprehensive(t *testing.T) {
 	auth := map[string]string{}
 	record := func(r *http.Request) {
 		mu.Lock()
-		auth[r.Method+" "+r.URL.Path] = r.Header.Get("X-Pine-Auth")
+		auth[r.Method+" "+r.URL.Path] = bearerToken(r)
 		mu.Unlock()
 	}
 	coordSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -49,7 +51,9 @@ func TestFacade_TokenRouting_Comprehensive(t *testing.T) {
 		if strings.HasSuffix(r.URL.Path, "/events") {
 			// One SSE frame so an event iterator yields once and the caller can break
 			// after a single (token-recording) request rather than reconnect-looping.
-			fmt.Fprint(w, "id: 1\ndata: {}\n\n")
+			// event: makes it a control event too (a typeless frame is skipped there), and
+			// the result type ends the finite author feed.
+			fmt.Fprint(w, "id: 1\nevent: controller_changed\ndata: {\"type\":\"result\"}\n\n")
 			return
 		}
 		fmt.Fprint(w, `{}`) // minimal; parse may fail downstream — we only assert the token
@@ -145,6 +149,19 @@ func TestFacade_TokenRouting_Comprehensive(t *testing.T) {
 	_, _ = comp.PendingPasskeyCeremonies(ctx)
 	_ = comp.ApprovePasskeyCeremony(ctx, "pwc_abc")
 	_ = sess.DeclarePasskeyIntent(ctx, "example.com")
+	// canonical forms of the deprecated Computer methods above, and the newer verbs
+	skills := comp.Skills()
+	_, _ = skills.List(ctx)
+	_, _ = skills.Version(ctx, "sk1", 2)
+	_, _ = skills.Activate(ctx, "sk1", 2)
+	_, _ = skills.DeleteVersion(ctx, "sk1", 2)
+	_, _ = comp.Snapshot(ctx)
+	_, _ = comp.Checkpoint(ctx)
+	_, _ = comp.OrphanTabs(ctx)
+	_ = comp.CloseOrphanTab(ctx, "T9")
+	_, _ = comp.OrphanDownloads(ctx)
+	_, _ = sess.Agent().EventsPage(ctx, EventsPageOptions{})
+	_, _ = sess.StartLearn(ctx, "")
 
 	expect := map[string]string{
 		// ps_ (session-scoped)
@@ -160,12 +177,12 @@ func TestFacade_TokenRouting_Comprehensive(t *testing.T) {
 		"POST /sessions/s1/tabs":                        ps,
 		"PATCH /sessions/s1/tabs/t1":                    ps,
 		"DELETE /sessions/s1/tabs/t1":                   ps,
-		"GET /v1/sessions/s1/control":                   ct,
+		"GET /v1/sessions/s1/control":                   ps,
 		"PATCH /v1/sessions/s1/control":                 ct,
 		"POST /v1/sessions/s1/control/notify":           ps,
-		"GET /v1/sessions/s1/handoffs":                  ct,
-		"GET /v1/sessions/s1/handoffs/h1":               ct,
-		"GET /v1/sessions/s1/control/events":            ct,
+		"GET /v1/sessions/s1/handoffs":                  ps,
+		"GET /v1/sessions/s1/handoffs/h1":               ps,
+		"GET /v1/sessions/s1/control/events":            ps,
 		"GET /sessions/s1/epoch":                        ps,
 		"POST /sessions/s1/focus":                       ps,
 		"POST /sessions/s1/terminal/recreate":           ps,
@@ -173,12 +190,13 @@ func TestFacade_TokenRouting_Comprehensive(t *testing.T) {
 		"POST /v2/sessions/s1/teach":                    ct,
 		"POST /v2/sessions/s1/refine":                   ct,
 		"POST /v1/sessions/s1/skills":                   ct,
-		"GET /v2/sessions/s1/skills/author/au1/events":  ct,
+		"GET /v2/sessions/s1/skills/author/au1/events":  ps,
 		"POST /v2/sessions/s1/skills/author/au1/cancel": ct,
 		"GET /v2/sessions/s1/agent":                     ps,
 		"GET /v2/sessions/s1/agent/turns":               ps,
 		"GET /v2/sessions/s1/agent/turns/turn_t_1":      ps,
 		"GET /v2/sessions/s1/agent/events":              ps,
+		"GET /v2/sessions/s1/agent/events/page":         ps,
 		"POST /v1/sessions/s1/observe":                  ps,
 		"POST /v1/sessions/s1/computer-use":             ps,
 		"POST /v1/sessions/s1/upload_file":              ps,
@@ -200,11 +218,15 @@ func TestFacade_TokenRouting_Comprehensive(t *testing.T) {
 		"GET /v1/skills/versions":               ct,
 		"GET /v1/skills/sk1/versions":           ct,
 		"GET /v1/skills/sk1/versions/1":         ct,
+		"GET /v1/skills/sk1/versions/2":         ct,
 		"POST /v1/skills/sk1/activate":          ct,
 		"POST /v1/skills/sk1/deactivate":        ct,
 		"PUT /v1/skills/sk1/enabled":            ct,
 		"GET /v1/capabilities":                  ct,
 		"DELETE /v1/skills/sk1/versions/1":      ct,
+		"DELETE /v1/skills/sk1/versions/2":      ct,
+		"GET /orphans":                          ct,
+		"DELETE /orphans/T9":                    ct,
 		"GET /state":                            ct,
 		"POST /v1/coord/capture":                ct,
 		"GET /downloads/orphans":                ct,
@@ -235,6 +257,62 @@ func TestFacade_TokenRouting_Comprehensive(t *testing.T) {
 		}
 		if got != want {
 			t.Errorf("%s used token %q, want %q", key, tokClass(got), tokClass(want))
+		}
+	}
+}
+
+// TestFacade_ReadTokenFallsBackToComputerToken: a session handle read without its ps_
+// (Computer.Session redacts it) still reads every route that accepts either token, with
+// the Computer token, and still sends no token it does not hold.
+func TestFacade_ReadTokenFallsBackToComputerToken(t *testing.T) {
+	const ct = "ct_tok"
+	var mu sync.Mutex
+	auth := map[string]string{}
+	coordSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		auth[r.Method+" "+r.URL.Path] = bearerToken(r)
+		mu.Unlock()
+		switch {
+		case r.URL.Path == "/sessions/s1":
+			fmt.Fprint(w, `{"session":{"name":"s1"}}`) // the ps_ is redacted on read
+		case strings.HasSuffix(r.URL.Path, "/events"):
+			fmt.Fprint(w, "id: 1\nevent: controller_changed\ndata: {\"type\":\"result\"}\n\n")
+		default:
+			w.Header().Set("ETag", `"e1"`)
+			fmt.Fprint(w, `{}`)
+		}
+	}))
+	defer coordSrv.Close()
+	conn := buildTestConnection(t, "http://unused", coordSrv.URL)
+	comp := newComputer("c1", make([]byte, 32))
+	if err := comp.adopt(conn, "sb-1", ct, "running"); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	sess, err := comp.Session(ctx, "s1")
+	if err != nil || sess.Token() != "" {
+		t.Fatalf("Session = %v (token %q), want a handle without a ps_", err, sess.Token())
+	}
+	_, _ = sess.ControlState(ctx)
+	_ = sess.NotifyHuman(ctx, "mfa", "", "")
+	_, _ = sess.ListHandoffs(ctx, 0, "")
+	for range sess.ControlEvents(ctx, "") {
+		break
+	}
+	_, _ = sess.ListFiles(ctx, ListFilesOptions{})
+	_, _ = sess.Agent().Wait(ctx, "t1", 0)
+	_, _ = sess.Agent().EventsPage(ctx, EventsPageOptions{})
+	_, _ = sess.Drive().Observe(ctx)
+	_, _ = comp.TakeControl(ctx, "s1")
+	mu.Lock()
+	defer mu.Unlock()
+	for _, key := range []string{
+		"GET /v1/sessions/s1/control", "POST /v1/sessions/s1/control/notify", "GET /v1/sessions/s1/handoffs",
+		"GET /v1/sessions/s1/control/events", "GET /v1/sessions/s1/files/list", "GET /v2/sessions/s1/agent/turns/t1",
+		"GET /v2/sessions/s1/agent/events/page", "POST /v1/sessions/s1/observe", "PATCH /v1/sessions/s1/control",
+	} {
+		if got, called := auth[key]; !called || got != ct {
+			t.Errorf("%s used %q (called=%v), want the Computer token", key, tokClass(got), called)
 		}
 	}
 }

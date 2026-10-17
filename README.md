@@ -173,7 +173,7 @@ runtime. `Retryable` is a pointer: nil means no verdict, not permission to retry
 
 - A connection error or `Alive` returning false does not prove the runtime is
   gone. Read `Status`; its `NotFoundError` confirms runtime-record absence.
-  A data-plane `SandboxGoneError` alone does not: paused/restoring Computers can
+  A data-plane `RuntimeGoneError` alone does not: paused/restoring Computers can
   temporarily have no route.
 - `RuntimeRetainedError` names the existing `RuntimeID` and `State` when Start
   cannot replace it. Match the ID to your saved binding, or reload the latest
@@ -292,20 +292,23 @@ Tokens split by tier: **`ct_` is your backend's Computer-wide token** — contro
 agent + skills-authoring mutations, lifecycle; **`ps_` is the session's own drive + reads**.
 The SDK attaches the right one per call.
 
-Skill authoring is asynchronous: `Session.Learn`, `Session.Teach`, and
-`Session.Refine` return the accepted author run; consume progress and its terminal
-draft through `Session.AuthorEvents`.
+Skill authoring is asynchronous: `Session.StartLearn`, `Session.StartTeach`, and
+`Session.StartRefine` return the accepted `*AuthorRun`; consume progress and its terminal
+draft through `Session.AuthorEvents(run.AuthorID, …)`. (`Learn`, `Teach` and `Refine`
+behave the same today and are deprecated: at the next pool minor they wait for the
+result.) Manage skills through `Computer.Skills()`.
 
-When the Computer rejects a token that worked before, the SDK surfaces a typed
+When the Computer rejects the binding's Computer token, the SDK surfaces a typed
 `*pine.TokenRejectedError` — a report, not an attach instruction (`ct_` lasts as long
 as the binding, so on a live runtime this is `binding_auth_lost`). It never silently
-re-mints (that would land a fresh runtime and invalidate every `ps_`). Reconcile, and
+re-mints (that would land a fresh runtime and invalidate every `ps_`). A rejected
+session token (`ps_`) is a plain `*pine.APIError` with status 401. Reconcile, and
 read `Status` before deciding on recovery. Start requires release or authoritative
 absence; it creates a new binding and new sessions. Persist that binding and
 reconcile unfinished work instead of replaying mutations automatically.
 
 A Computer that can no longer be reached surfaces as
-`*pine.SandboxGoneError`; `errors.As` still reaches its underlying `*pine.APIError`
+`*pine.RuntimeGoneError`; `errors.As` still reaches its underlying `*pine.APIError`
 for host, operation, request id, and wire detail. Reconcile it with `comp.Status(ctx)`:
 paused or restoring runtimes can't be reached, but their runtime record remains.
 A missing session on a live
@@ -497,7 +500,7 @@ and optional `Reason`; both are spec-defined and safe to branch on. Raw server e
 are never part of those fields.
 
 If `CreateComputer` returns `*AttachAuthorizationCommittedError`, Portal advanced the
-binding revision before the attach failed. Retain its non-nil `Credentials` and inspect `SandboxID` before deciding whether
+binding revision before the attach failed. Retain its non-nil `Credentials` and inspect `RuntimeID` before deciding whether
 to stop or recover the failed runtime;
 their diagnostic formatting redacts both private keys.
 

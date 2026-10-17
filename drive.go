@@ -8,7 +8,8 @@ import (
 )
 
 // DriveMode is the primitives for driving a session with your own agent loop — observe /
-// computer-use / upload_file — all with the session token (ps_).
+// computer-use / upload_file. Actions use the session token (ps_); Observe accepts either
+// token and uses the Computer token for a handle without a ps_.
 type DriveMode struct {
 	s *Session
 }
@@ -25,7 +26,7 @@ type (
 // Observe captures the session's current perception (the ObservationSnapshot: screenshot +
 // the coordinate metadata to map bbox/pixel actions).
 func (d *DriveMode) Observe(ctx context.Context) (*Observation, error) {
-	return d.s.coord.Observe(ctx, d.s.token, d.s.name)
+	return d.s.coord.Observe(ctx, d.s.readToken(), d.s.name)
 }
 
 // ComputerUse issues one low-level action; params are merged into the request body.

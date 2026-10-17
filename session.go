@@ -35,10 +35,11 @@ func (c *Computer) CreateSession(ctx context.Context, opts CreateSessionOptions)
 // Session fetches an existing session's metadata by name (with the ct_).
 //
 // The Computer redacts the session's ps_ on read (it's handed out only at
-// CreateSession), so the returned handle has no ps_: its ct_-routed ops work
-// (control, agent + authoring mutations), but ps_-routed ops (drive, agent/read
-// surfaces, files) 401. For reuse in a stateless backend, persist the ps_ from
-// CreateSession and rebuild with AdoptSession.
+// CreateSession), so the returned handle has no ps_: its ct_-routed ops (control,
+// agent + authoring mutations) and the reads that accept either token (control state
+// and events, agent reads, files, artifacts) work with the Computer token, but
+// session-only ops (exec, tabs, drive actions, session passkeys) need the ps_. For reuse
+// in a stateless backend, persist the ps_ from CreateSession and rebuild with AdoptSession.
 func (c *Computer) Session(ctx context.Context, name string) (*Session, error) {
 	coord, ct, err := c.bound()
 	if err != nil {
@@ -115,8 +116,9 @@ type SessionInfo = coordinator.Session
 // Browser is a session's browser-plane metadata (the SessionInfo.Browser field type).
 type Browser = coordinator.Browser
 
-// Session is the per-window slice of a Computer. It holds its ps_; agent mutations route
-// through the Computer's ct_ (one active driver at a time).
+// Session is the per-window slice of a Computer. It holds its ps_; agent, control and
+// authoring mutations route through the Computer's ct_ (one active driver at a time), and
+// reads that accept either token use the ps_ when the handle has one.
 type Session struct {
 	parent *Computer
 	coord  *coordinator.Client
@@ -157,3 +159,13 @@ func (s *Session) RecreateTerminal(ctx context.Context) error {
 
 // computerToken returns the parent Computer's ct_ (for ct_-only mutations).
 func (s *Session) computerToken() string { return s.parent.ComputerToken() }
+
+// readToken is the token for a route that accepts either token: the session's ps_ when
+// this handle has one, else the Computer's ct_ (a handle from Computer.Session or
+// Computer.Sessions, whose ps_ the Computer redacts on read).
+func (s *Session) readToken() string {
+	if s.token != "" {
+		return s.token
+	}
+	return s.computerToken()
+}

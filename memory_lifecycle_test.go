@@ -171,7 +171,7 @@ func TestMemoryTransitionCancellationBoundsRequestAndPoll(t *testing.T) {
 					return &controlplane.SandboxInfo{Status: "resuming"}, nil
 				},
 			}
-			h := newSandboxHandle(cp, "sb-1", statusRunning)
+			h := newRuntimeHandle(cp, "sb-1", statusRunning)
 			if err := h.transitionMemory(ctx, statusRunning); !errors.Is(err, context.DeadlineExceeded) {
 				t.Fatalf("caller deadline was not preserved: %v", err)
 			}

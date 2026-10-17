@@ -8,8 +8,8 @@ import (
 	"io"
 	"iter"
 	"math"
-	"math/rand"
 	"net/url"
+	"strconv"
 	"time"
 
 	"go.pinesandbox.io/computer/internal/base/problem"
@@ -158,7 +158,7 @@ type AgentActivity struct {
 // ActivityFacts are what a step acted on, from the Computer's own record of
 // the work: never a command line, tool argument or anything typed into a page.
 type ActivityFacts struct {
-	Page   *ActivityPage   `json:"page,omitempty"`   // the page a browser step opened
+	Page   *ActivityPage   `json:"page,omitempty"`   // the page a browser step ended on
 	Target *ActivityTarget `json:"target,omitempty"` // the element a browser step acted on
 	Files  []ActivityFile  `json:"files,omitempty"`  // work-directory files the step touched
 	Skill  *ActivitySkill  `json:"skill,omitempty"`  // one of your learned skills the step used
@@ -374,72 +374,89 @@ func decodeAgentEvent(f sse.Frame) (AgentEvent, bool) {
 }
 
 // decodeControlEvent reads the type off the SSE event: line (the v1 control discriminator)
-// + keeps the data payload raw. A frame without a type (keepalive/comment) is skipped.
+// and the ID off the SSE id: line (the resume cursor), keeping the data payload raw. A
+// body `id` is the fallback for a frame without an id: line. A frame without a type
+// (keepalive/comment) is skipped.
 func decodeControlEvent(f sse.Frame) (ControlEvent, bool) {
 	if f.Event == "" || f.Event == "message" {
 		return ControlEvent{}, false
 	}
-	var hdr struct {
-		ID int64 `json:"id"`
+	id, err := strconv.ParseInt(f.ID, 10, 64)
+	if err != nil {
+		var hdr struct {
+			ID int64 `json:"id"`
+		}
+		_ = json.Unmarshal([]byte(f.Data), &hdr)
+		id = hdr.ID
 	}
-	_ = json.Unmarshal([]byte(f.Data), &hdr)
-	return ControlEvent{ID: hdr.ID, Type: f.Event, Data: json.RawMessage(f.Data)}, true
+	return ControlEvent{ID: id, Type: f.Event, Data: json.RawMessage(f.Data)}, true
 }
 
 // errConsumerStopped is the internal signal that the caller broke out of the range loop
-// (yield returned false). It never escapes streamTyped.
+// (yield returned false). It never escapes the resume engine.
 var errConsumerStopped = errors.New("consumer stopped")
 
-// streamTyped is the shared resuming-iterator engine for the continuous event feeds. Two
-// failure surfaces are handled distinctly: a failure to OPEN is terminal unless it's a
-// transient transport fault (then bounded reconnect), while any end of an ESTABLISHED
-// stream — clean EOF or a mid-stream read fault — is by definition resumable for a
-// continuous feed, so it always reconnects from the cursor under the bounded budget. The
-// budget counts CONSECUTIVE no-progress reconnects and resets whenever a connection
-// delivers an event, so a healthy feed that the server periodically recycles streams
-// forever; only a feed that can't be re-established surfaces ErrStreamLost.
+// errTerminalFrame is the internal signal that a finite feed delivered its terminal event.
+var errTerminalFrame = errors.New("terminal frame")
+
+// streamTyped is the resuming iterator for a continuous event feed (agent and control
+// events): it never ends on its own.
 func streamTyped[T any](ctx context.Context, c *Client, path, token, lastID string, decode func(sse.Frame) (T, bool)) iter.Seq2[T, error] {
 	return func(yield func(T, error) bool) {
 		cursor := lastID
-		fails := 0
-		// host + op are the PRIMARY spine (WHICH Computer, WHICH feed) — constant for this
-		// iterator, so a terminal ErrStreamLost always names the resource that dropped even
-		// though the failing reconnects have no response to read from. requestID is the
-		// SECONDARY handle: the X-Request-Id of the most recently ESTABLISHED stream.
-		host := c.Host()
-		op := transport.Operation("GET", path)
-		requestID := ""
-		for {
-			sr, err := c.openSSE(ctx, "GET", path, token, nil, lastEventIDHeader(cursor))
-			if err != nil {
-				if ctx.Err() != nil {
-					return // caller cancelled while the open was in flight — end cleanly,
-					// not as a spurious context.Canceled error (transport returns it raw)
-				}
-				if !reconnectable(err) {
-					var zero T
-					yield(zero, err) // terminal: auth / session-gone / spec mismatch / non-2xx
-					return
-				}
-				if !streamRetry(ctx, c, &fails, err, host, op, requestID, yield) {
-					return
-				}
-				continue
+		resumeStream(ctx, c, path, token, &cursor, decode, nil, yield)
+	}
+}
+
+// resumeStream is the shared resuming engine for the event feeds. Two failure surfaces are
+// handled distinctly: a failure to OPEN is terminal unless it's a transient transport fault
+// (then bounded reconnect), while any end of an ESTABLISHED stream — clean EOF or a
+// mid-stream read fault — is resumable, so it reconnects from the cursor under the bounded
+// budget. The budget counts CONSECUTIVE no-progress reconnects and resets whenever a
+// connection delivers an event, so a healthy feed that the server periodically recycles
+// streams forever; only a feed that can't be re-established surfaces ErrStreamLost. A
+// finite feed names its terminal event: delivering it ends the stream. cursor holds the
+// resume position (the last SSE id seen) and is updated as frames arrive.
+func resumeStream[T any](ctx context.Context, c *Client, path, token string, cursor *string,
+	decode func(sse.Frame) (T, bool), terminal func(T) bool, yield func(T, error) bool) {
+	fails := 0
+	// host + op are the PRIMARY spine (WHICH Computer, WHICH feed) — constant for this
+	// stream, so a terminal ErrStreamLost always names the resource that dropped even
+	// though the failing reconnects have no response to read from. requestID is the
+	// SECONDARY handle: the X-Request-Id of the most recently ESTABLISHED stream.
+	host := c.Host()
+	op := transport.Operation("GET", path)
+	requestID := ""
+	for {
+		sr, err := c.openSSE(ctx, "GET", path, token, nil, lastEventIDHeader(*cursor))
+		if err != nil {
+			if ctx.Err() != nil {
+				return // caller cancelled while the open was in flight — end cleanly,
+				// not as a spurious context.Canceled error (transport returns it raw)
 			}
-			if rid := sr.Headers.Get("X-Request-Id"); rid != "" {
-				requestID = rid
-			}
-			delivered, ferr := pumpFrames(sr.Body, &cursor, decode, yield)
-			if errors.Is(ferr, errConsumerStopped) || ctx.Err() != nil {
+			if !reconnectable(err) {
+				var zero T
+				yield(zero, err) // terminal: auth / session-gone / spec mismatch / non-2xx
 				return
 			}
-			if delivered {
-				fails = 0
-			}
-			// The established stream ended (EOF or read fault) → reconnect under budget.
-			if !streamRetry(ctx, c, &fails, ferr, host, op, requestID, yield) {
+			if !streamRetry(ctx, c, &fails, err, host, op, requestID, yield) {
 				return
 			}
+			continue
+		}
+		if rid := sr.Headers.Get("X-Request-Id"); rid != "" {
+			requestID = rid
+		}
+		delivered, ferr := pumpFrames(sr.Body, cursor, decode, terminal, yield)
+		if errors.Is(ferr, errConsumerStopped) || errors.Is(ferr, errTerminalFrame) || ctx.Err() != nil {
+			return
+		}
+		if delivered {
+			fails = 0
+		}
+		// The established stream ended (EOF or read fault) → reconnect under budget.
+		if !streamRetry(ctx, c, &fails, ferr, host, op, requestID, yield) {
+			return
 		}
 	}
 }
@@ -447,8 +464,9 @@ func streamTyped[T any](ctx context.Context, c *Client, path, token, lastID stri
 // pumpFrames yields decoded events off one established SSE stream until it ends, advancing
 // the resume cursor as it goes. It always closes body. It returns whether any event was
 // delivered, plus the terminating cause: nil on clean EOF, errConsumerStopped if the caller
-// broke, or the raw read fault on a mid-stream drop.
-func pumpFrames[T any](body io.ReadCloser, cursor *string, decode func(sse.Frame) (T, bool), yield func(T, error) bool) (bool, error) {
+// broke, errTerminalFrame after a finite feed's terminal event, or the raw read fault on a
+// mid-stream drop.
+func pumpFrames[T any](body io.ReadCloser, cursor *string, decode func(sse.Frame) (T, bool), terminal func(T) bool, yield func(T, error) bool) (bool, error) {
 	defer body.Close()
 	delivered := false
 	for f, ferr := range sse.Frames(body) {
@@ -466,11 +484,14 @@ func pumpFrames[T any](body io.ReadCloser, cursor *string, decode func(sse.Frame
 		}
 		ev, ok := decode(f)
 		if !ok {
-			continue // malformed frame — one bad frame must not kill a continuous feed
+			continue // malformed frame — one bad frame must not kill a feed
 		}
 		delivered = true
 		if !yield(ev, nil) {
 			return delivered, errConsumerStopped
+		}
+		if terminal != nil && terminal(ev) {
+			return delivered, errTerminalFrame
 		}
 	}
 	return delivered, nil
@@ -536,23 +557,17 @@ func lastEventIDHeader(cursor string) map[string]string {
 	return map[string]string{"Last-Event-ID": cursor}
 }
 
-// streamWait sleeps the reconnect backoff, returning false if ctx ended during the wait.
+// streamWait sleeps the reconnect backoff on the client's clock, returning false if ctx
+// ended during the wait.
 func (c *Client) streamWait(ctx context.Context, attempt int) bool {
-	select {
-	case <-time.After(c.streamBackoff(attempt)):
-		return true
-	case <-ctx.Done():
-		return false
-	}
+	return c.clock.Sleep(ctx, c.streamBackoff(attempt)) == nil && ctx.Err() == nil
 }
 
-// defaultStreamBackoff is bounded exponential with jitter, capped at 5s — the reconnect
-// cadence for a dropped event feed.
-func defaultStreamBackoff(attempt int) time.Duration {
-	base := 0.5 * math.Pow(2, float64(attempt-1))
-	d := base + rand.Float64()*0.2
-	if d > 5.0 {
-		d = 5.0
-	}
-	return time.Duration(d * float64(time.Second))
+// defaultStreamBackoff is the shared reconnect cadence for a dropped event feed
+// (x-pine-retry.client.stream_reconnect): 500ms·2^(attempt-1) plus up to 200ms of
+// jitter, capped at 5s.
+func (c *Client) defaultStreamBackoff(attempt int) time.Duration {
+	d := time.Duration(float64(500*time.Millisecond)*math.Pow(2, float64(attempt-1))) +
+		time.Duration(c.clock.Jitter()*float64(200*time.Millisecond))
+	return min(d, 5*time.Second)
 }

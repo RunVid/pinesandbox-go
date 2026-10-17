@@ -24,8 +24,8 @@ func TestDelegateDesktop_CreatesAndDelegates(t *testing.T) {
 			created = true
 			fmt.Fprint(w, `{"session":{"name":"main","token":"ps_secret","browser":{"primary_tab_id":"t1"}}}`)
 		case r.URL.Path == "/v1/sessions/main/desktop-token" && r.Method == "POST":
-			if r.Header.Get("X-Pine-Auth") != "ct_x" {
-				t.Errorf("desktop-token auth = %q, want ct_x", r.Header.Get("X-Pine-Auth"))
+			if bearerToken(r) != "ct_x" {
+				t.Errorf("desktop-token auth = %q, want ct_x", bearerToken(r))
 			}
 			fmt.Fprint(w, `{"token":"dt_short","expires_at":"2026-01-01T00:00:30Z"}`)
 		default:

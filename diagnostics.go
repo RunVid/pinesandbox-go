@@ -83,6 +83,9 @@ func (c *Client) GetDiagnostic(ctx context.Context, id string) (*Diagnostic, err
 }
 
 func (c *Client) requestDiagnostic(ctx context.Context, method, path string, req transport.Request) (*Diagnostic, error) {
+	if c.projectKey == "" {
+		return nil, fmt.Errorf("pinesandbox: diagnostics need the project key (ClientOptions.APIKey)")
+	}
 	if req.Headers == nil {
 		req.Headers = make(map[string]string)
 	}

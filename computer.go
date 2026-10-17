@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"go.pinesandbox.io/computer/internal/base/wait"
 	"go.pinesandbox.io/computer/internal/bind"
 	"go.pinesandbox.io/computer/internal/binder"
 	"go.pinesandbox.io/computer/internal/coordinator"
@@ -99,7 +100,7 @@ type Computer struct {
 
 	mu            sync.Mutex
 	conn          *Connection
-	sandbox       *SandboxHandle
+	sandbox       *RuntimeHandle
 	coord         *coordinator.Client
 	computerToken string // ct_
 	// ephemeral records that this Computer was bound access-lease-only; Stop
@@ -201,8 +202,8 @@ func (c *Computer) Credentials() Credentials {
 	return result
 }
 
-// SandboxID is the id of the runtime the Computer is attached to (empty if not attached).
-func (c *Computer) SandboxID() string {
+// RuntimeID is the id of the runtime the Computer is attached to (empty if not attached).
+func (c *Computer) RuntimeID() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.sandbox == nil {
@@ -210,6 +211,11 @@ func (c *Computer) SandboxID() string {
 	}
 	return c.sandbox.ID()
 }
+
+// SandboxID is the former name of RuntimeID.
+//
+// Deprecated: use RuntimeID.
+func (c *Computer) SandboxID() string { return c.RuntimeID() }
 
 // ComputerToken is the Computer token (ct_) for the attached runtime (empty if not
 // attached). @api advanced — prefer the typed Session/Computer methods, which send the
@@ -238,7 +244,7 @@ func (c *Computer) String() string {
 	if c.sandbox != nil {
 		sid = c.sandbox.ID()
 	}
-	return fmt.Sprintf("Computer{id:%s attached:%t sandbox:%s key+ct_ redacted}", c.id, c.sandbox != nil, sid)
+	return fmt.Sprintf("Computer{id:%s attached:%t runtime:%s key+ct_ redacted}", c.id, c.sandbox != nil, sid)
 }
 
 // GoString redacts secrets under %#v.
@@ -447,7 +453,7 @@ func (c *Computer) Attach(ctx context.Context, conn *Connection, opts AttachOpti
 	if err != nil {
 		return err
 	}
-	sandbox := newSandboxHandle(conn.controlPlane, info.ID, info.Status)
+	sandbox := conn.runtimeHandle(info.ID, info.Status)
 	attached := false
 	defer func() {
 		if !attached {
@@ -467,7 +473,10 @@ func (c *Computer) Attach(ctx context.Context, conn *Connection, opts AttachOpti
 		return err
 	}
 	captureKPs, captureGen := c.captureKeypairsCopy()
+	clock := wait.Or(conn.clock)
 	res, err := binder.Bind(ctx, binder.Config{
+		Clock:           clock.Now,
+		Sleeper:         clock.Sleep,
 		Coord:           coord,
 		Minter:          conn.attachProvider,
 		ComputerID:      c.id,
@@ -512,13 +521,13 @@ func (c *Computer) Attach(ctx context.Context, conn *Connection, opts AttachOpti
 // deadline expire together, and the sleep between polls observes the context
 // first, so without this translation callers would see context.DeadlineExceeded
 // or a transport timeout instead. Caller cancellation stays distinguishable.
-func readinessBudgetError(callerCtx, readyCtx context.Context, err error, sandbox *SandboxHandle) error {
+func readinessBudgetError(callerCtx, readyCtx context.Context, err error, sandbox *RuntimeHandle) error {
 	var rt *ReadyTimeoutError
 	if errors.As(err, &rt) {
 		return err
 	}
 	if callerCtx.Err() == nil && errors.Is(readyCtx.Err(), context.DeadlineExceeded) {
-		return &ReadyTimeoutError{SandboxID: sandbox.id, LastState: sandbox.status}
+		return &ReadyTimeoutError{RuntimeID: sandbox.id, SandboxID: sandbox.id, LastState: sandbox.status}
 	}
 	return err
 }
@@ -540,7 +549,7 @@ func (c *Computer) adopt(conn *Connection, sandboxID, computerToken, status stri
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.conn = conn
-	c.sandbox = newSandboxHandle(conn.controlPlane, sandboxID, status)
+	c.sandbox = conn.runtimeHandle(sandboxID, status)
 	c.coord = coord
 	c.computerToken = computerToken
 	return nil
@@ -617,20 +626,24 @@ func (c *Computer) Kill(ctx context.Context) bool {
 	return ok
 }
 
-// Delete PERMANENTLY deletes this Computer (see Client.DeleteComputer): a live sandbox is
+// Delete PERMANENTLY deletes this Computer (see Client.DeleteComputer): a live runtime is
 // force-killed first — no final capture, the state is being deleted — then the id is
 // deleted through the Client connection that attached it. A failed kill does not block
-// the delete; Portal destroys any sandbox still bound to a deleted Computer. On success
+// the delete; Portal destroys any runtime still bound to a deleted Computer. On success
 // the local binding is dropped.
 func (c *Computer) Delete(ctx context.Context) error {
 	c.mu.Lock()
 	conn := c.conn
 	c.mu.Unlock()
-	if conn == nil || conn.attachProvider == nil {
+	if conn == nil {
 		return fmt.Errorf("pinesandbox: Computer %s has no Client connection; use Client.DeleteComputer", c.id)
 	}
+	portal, err := conn.requirePortal("delete")
+	if err != nil {
+		return err
+	}
 	c.Kill(ctx)
-	if err := conn.attachProvider.DeleteComputer(ctx, c.id); err != nil {
+	if err := portal.DeleteComputer(ctx, c.id); err != nil {
 		return err
 	}
 	c.reset()

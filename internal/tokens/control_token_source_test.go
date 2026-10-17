@@ -427,3 +427,68 @@ func TestString_Redacts(t *testing.T) {
 		t.Errorf("String() = %q, want it to report cached=true", got)
 	}
 }
+
+// TestToken_RetryAfterIsAFloorOnTheBackoff: a 429/503 Retry-After within the 10s ceiling
+// lengthens the mint wait beyond the jittered backoff; without one the backoff stands.
+func TestToken_RetryAfterIsAFloorOnTheBackoff(t *testing.T) {
+	var sleeps []time.Duration
+	var n int32
+	s, _ := newTestSource(t, func(w http.ResponseWriter, r *http.Request) {
+		switch atomic.AddInt32(&n, 1) {
+		case 1:
+			w.Header().Set("Retry-After", "3")
+			w.WriteHeader(429)
+		case 2:
+			w.Header().Set("Retry-After", "10")
+			w.WriteHeader(503)
+		case 3:
+			w.WriteHeader(503)
+		default:
+			fmt.Fprint(w, `{"token":"jws-ok","expires_in":3600}`)
+		}
+	}, WithSleeper(func(_ context.Context, d time.Duration) error { sleeps = append(sleeps, d); return nil }))
+	tok, err := s.Token(context.Background(), false)
+	if err != nil || tok != "jws-ok" {
+		t.Fatalf("Token = %q, %v", tok, err)
+	}
+	want := []time.Duration{3 * time.Second, maxBackoff, 800 * time.Millisecond}
+	if fmt.Sprint(sleeps) != fmt.Sprint(want) {
+		t.Errorf("sleeps = %v, want %v", sleeps, want)
+	}
+}
+
+// TestToken_RetryAfterBeyondTheCeilingEndsTheMint: a Retry-After longer than the backoff
+// ceiling is neither capped nor slept: the mint ends at once with the error carrying the
+// server's wait (429 → *RateLimited, 5xx → *ControlTokenError).
+func TestToken_RetryAfterBeyondTheCeilingEndsTheMint(t *testing.T) {
+	for _, status := range []int{429, 503} {
+		var hits int32
+		s, _ := newTestSource(t, func(w http.ResponseWriter, r *http.Request) {
+			atomic.AddInt32(&hits, 1)
+			w.Header().Set("Retry-After", "60")
+			w.WriteHeader(status)
+		}, WithSleeper(func(context.Context, time.Duration) error {
+			t.Errorf("%d: slept against a Retry-After beyond the ceiling", status)
+			return nil
+		}))
+		_, err := s.Token(context.Background(), false)
+		var base tokenBase
+		switch status {
+		case 429:
+			var rl *RateLimited
+			if !errors.As(err, &rl) {
+				t.Fatalf("429: err = %T %v, want *RateLimited", err, err)
+			}
+			base = rl.tokenBase
+		default:
+			var ce *ControlTokenError
+			if !errors.As(err, &ce) {
+				t.Fatalf("503: err = %T %v, want *ControlTokenError", err, err)
+			}
+			base = ce.tokenBase
+		}
+		if base.Status != status || base.RetryAfter != time.Minute || atomic.LoadInt32(&hits) != 1 {
+			t.Errorf("%d: status=%d retryAfter=%v hits=%d, want %d, 1m0s, 1", status, base.Status, base.RetryAfter, hits, status)
+		}
+	}
+}
