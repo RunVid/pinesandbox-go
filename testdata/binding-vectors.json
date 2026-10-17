@@ -1,0 +1,41 @@
+{
+  "valid": [
+    {"schema": 1,"computer_id": "0190aaaa-bbbb-7ccc-8ddd-eeeeffff0000","runtime_id": "saved-runtime","computer_token": "ct_saved","binding_revision": 7},
+    {"schema": 1,"computer_id": "0190aaaa-bbbb-7ccc-8ddd-eeeeffff0000","runtime_id": "saved-runtime","computer_token": "ct_saved","binding_revision": 0},
+    {"schema": 1,"computer_id": "0190aaaa-bbbb-7ccc-8ddd-eeeeffff0000","runtime_id": "saved-runtime","computer_token": "ct_saved","binding_revision": 9223372036854775807}
+  ],
+  "invalid": [
+    null,
+    [],
+    "not an object",
+    {},
+    {"computer_id": "0190aaaa-bbbb-7ccc-8ddd-eeeeffff0000","runtime_id": "saved-runtime","computer_token": "ct_saved","binding_revision": 7},
+    {"schema": null,"computer_id": "0190aaaa-bbbb-7ccc-8ddd-eeeeffff0000","runtime_id": "saved-runtime","computer_token": "ct_saved","binding_revision": 7},
+    {"schema": 0,"computer_id": "0190aaaa-bbbb-7ccc-8ddd-eeeeffff0000","runtime_id": "saved-runtime","computer_token": "ct_saved","binding_revision": 7},
+    {"schema": 2,"computer_id": "0190aaaa-bbbb-7ccc-8ddd-eeeeffff0000","runtime_id": "saved-runtime","computer_token": "ct_saved","binding_revision": 7},
+    {"schema": 1.0,"computer_id": "0190aaaa-bbbb-7ccc-8ddd-eeeeffff0000","runtime_id": "saved-runtime","computer_token": "ct_saved","binding_revision": 7},
+    {"schema": "1","computer_id": "0190aaaa-bbbb-7ccc-8ddd-eeeeffff0000","runtime_id": "saved-runtime","computer_token": "ct_saved","binding_revision": 7},
+    {"schema": 1,"runtime_id": "saved-runtime","computer_token": "ct_saved","binding_revision": 7},
+    {"schema": 1,"computer_id": "not-a-uuid","runtime_id": "saved-runtime","computer_token": "ct_saved","binding_revision": 7},
+    {"schema": 1,"computer_id": "0190AAAA-bbbb-7ccc-8ddd-eeeeffff0000","runtime_id": "saved-runtime","computer_token": "ct_saved","binding_revision": 7},
+    {"schema": 1,"computer_id": "0190aaaa-bbbb-7ccc-8ddd-eeeeffff0000","computer_token": "ct_saved","binding_revision": 7},
+    {"schema": 1,"computer_id": "0190aaaa-bbbb-7ccc-8ddd-eeeeffff0000","runtime_id": "","computer_token": "ct_saved","binding_revision": 7},
+    {"schema": 1,"computer_id": "0190aaaa-bbbb-7ccc-8ddd-eeeeffff0000","runtime_id": "bad--id","computer_token": "ct_saved","binding_revision": 7},
+    {"schema": 1,"computer_id": "0190aaaa-bbbb-7ccc-8ddd-eeeeffff0000","runtime_id": "trailing-","computer_token": "ct_saved","binding_revision": 7},
+    {"schema": 1,"computer_id": "0190aaaa-bbbb-7ccc-8ddd-eeeeffff0000","runtime_id": "../other","computer_token": "ct_saved","binding_revision": 7},
+    {"schema": 1,"computer_id": "0190aaaa-bbbb-7ccc-8ddd-eeeeffff0000","runtime_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","computer_token": "ct_saved","binding_revision": 7},
+    {"schema": 1,"computer_id": "0190aaaa-bbbb-7ccc-8ddd-eeeeffff0000","runtime_id": "saved-runtime","binding_revision": 7},
+    {"schema": 1,"computer_id": "0190aaaa-bbbb-7ccc-8ddd-eeeeffff0000","runtime_id": "saved-runtime","computer_token": "","binding_revision": 7},
+    {"schema": 1,"computer_id": "0190aaaa-bbbb-7ccc-8ddd-eeeeffff0000","runtime_id": "saved-runtime","computer_token": "ps_wrong","binding_revision": 7},
+    {"schema": 1,"computer_id": "0190aaaa-bbbb-7ccc-8ddd-eeeeffff0000","runtime_id": "saved-runtime","computer_token": "ct_","binding_revision": 7},
+    {"schema": 1,"computer_id": "0190aaaa-bbbb-7ccc-8ddd-eeeeffff0000","runtime_id": "saved-runtime","computer_token": "ct_line\n","binding_revision": 7},
+    {"schema": 1,"computer_id": "0190aaaa-bbbb-7ccc-8ddd-eeeeffff0000","runtime_id": "saved-runtime","computer_token": "ct_\u0000","binding_revision": 7},
+    {"schema": 1,"computer_id": "0190aaaa-bbbb-7ccc-8ddd-eeeeffff0000","runtime_id": "saved-runtime","computer_token": "ct_white space","binding_revision": 7},
+    {"schema": 1,"computer_id": "0190aaaa-bbbb-7ccc-8ddd-eeeeffff0000","runtime_id": "saved-runtime","computer_token": "ct_saved"},
+    {"schema": 1,"computer_id": "0190aaaa-bbbb-7ccc-8ddd-eeeeffff0000","runtime_id": "saved-runtime","computer_token": "ct_saved","binding_revision": null},
+    {"schema": 1,"computer_id": "0190aaaa-bbbb-7ccc-8ddd-eeeeffff0000","runtime_id": "saved-runtime","computer_token": "ct_saved","binding_revision": -1},
+    {"schema": 1,"computer_id": "0190aaaa-bbbb-7ccc-8ddd-eeeeffff0000","runtime_id": "saved-runtime","computer_token": "ct_saved","binding_revision": 1.0},
+    {"schema": 1,"computer_id": "0190aaaa-bbbb-7ccc-8ddd-eeeeffff0000","runtime_id": "saved-runtime","computer_token": "ct_saved","binding_revision": "7"},
+    {"schema": 1,"computer_id": "0190aaaa-bbbb-7ccc-8ddd-eeeeffff0000","runtime_id": "saved-runtime","computer_token": "ct_saved","binding_revision": 9223372036854775808}
+  ]
+}

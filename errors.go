@@ -92,6 +92,12 @@ type (
 	// SandboxGoneError means the runtime the Computer was attached to is gone. It
 	// wraps APIError, preserving host/op/request-id diagnostics via errors.As.
 	SandboxGoneError = coordinator.SandboxGoneError
+	// AgentProtocolUnsupportedError is a local capability refusal, not an APIError.
+	AgentProtocolUnsupportedError = coordinator.AgentProtocolUnsupportedError
+	// RunUnconfirmedError is a run whose response never arrived; send it again
+	// with its IdempotencyKey. It wraps the last transport or gateway error, and
+	// the context's error when the context ended first.
+	RunUnconfirmedError = coordinator.RunUnconfirmedError
 )
 
 // IsRetryable returns the server's retry judgment for a data-plane API error,
@@ -182,12 +188,20 @@ type (
 	ControlPlaneError        = controlplane.ControlPlaneError
 	// CapacityExceededError is the create refusal behind ErrCapacityExceeded.
 	CapacityExceededError = controlplane.CapacityExceededError
+	// CreateRateLimitedError is the create refusal behind ErrCreateRateLimited.
+	CreateRateLimitedError = controlplane.CreateRateLimitedError
 )
 
 // ErrCapacityExceeded (429 COMPUTER_CAPACITY_EXCEEDED): create/attach was refused because the
 // project is at its concurrent Computer limit, so nothing was provisioned. Not retried by the
 // SDK; stop another of the project's Computers first. errors.As reaches CapacityExceededError.
 var ErrCapacityExceeded = controlplane.ErrCapacityExceeded
+
+// ErrCreateRateLimited (429 COMPUTER_CREATE_RATE_LIMITED): create/attach was refused because the
+// project has started as many new Computers in the last minute as it may, so nothing was
+// provisioned. Not retried by the SDK; errors.As reaches CreateRateLimitedError, whose RetryAfter
+// says how long to wait before starting another.
+var ErrCreateRateLimited = controlplane.ErrCreateRateLimited
 
 // SandboxFailedError: the runtime reported failed, terminated or unavailable
 // before completing the requested lifecycle operation. Unavailable may be retryable.
@@ -208,4 +222,15 @@ type ReadyTimeoutError struct {
 
 func (e *ReadyTimeoutError) Error() string {
 	return fmt.Sprintf("pinesandbox: Computer runtime %s did not complete the lifecycle operation in time (last state %q)", e.SandboxID, e.LastState)
+}
+
+// RuntimeRetainedError means Start observed an existing runtime. Inspect State
+// and explicitly Stop it or Resume its retained memory; Start allocated nothing.
+type RuntimeRetainedError struct {
+	RuntimeID string
+	State     string
+}
+
+func (e *RuntimeRetainedError) Error() string {
+	return fmt.Sprintf("pinesandbox: Computer still has runtime %s (%s); Stop it or Resume retained memory before Start", e.RuntimeID, e.State)
 }

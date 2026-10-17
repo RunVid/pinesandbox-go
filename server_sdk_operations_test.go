@@ -12,7 +12,9 @@ import (
 // catalog must advance with the actual implementation in the same change.
 var implementedServerSDKOperations = map[string]any{
 	"createDiagnostic":             (*Client).CreateDiagnostic,
+	"getProjectPolicy":             (*Client).ProjectPolicy,
 	"getDiagnostic":                (*Client).GetDiagnostic,
+	"setComputerIdleTimeout":       (*Computer).SetIdleTimeout,
 	"pauseComputer":                (*Computer).Pause,
 	"resumeComputer":               (*Computer).Resume,
 	"decidePasskeyCeremony":        (*Computer).ApprovePasskeyCeremony,

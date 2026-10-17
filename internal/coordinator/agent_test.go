@@ -3,206 +3,479 @@ package coordinator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
+
+	"go.pinesandbox.io/computer/internal/base/problem"
+	"go.pinesandbox.io/computer/internal/base/transport"
 )
 
-func TestAgentRun_BodyAndPath(t *testing.T) {
-	var body map[string]any
-	var path, auth string
-	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		path, auth = r.URL.Path, r.Header.Get("X-Pine-Auth")
-		_ = json.NewDecoder(r.Body).Decode(&body)
-		fmt.Fprint(w, `{"task_id":"t1","state":"running","session":"s","computer_id":"c"}`)
-	})
+const turnJSON = `{"turn_id":"turn_t_1","state":"running","started_at":"2026-01-02T03:04:05Z","first_event_id":1,"last_event_id":1}`
 
-	skills := []string{"book-flight"}
-	task, err := c.AgentRun(context.Background(), "ct_a", "s", "buy milk", AgentRunOptions{Skills: skills, Context: "extra"})
+func TestAgentRun_BodyPathAndKey(t *testing.T) {
+	var body map[string]any
+	var path, auth, key string
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		path, auth, key = r.URL.Path, r.Header.Get("X-Pine-Auth"), r.Header.Get("Idempotency-Key")
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		w.WriteHeader(http.StatusAccepted)
+		fmt.Fprint(w, turnJSON)
+	})
+	turn, err := c.AgentRun(context.Background(), "ct_a", "s", "buy milk", AgentRunOptions{
+		Skills: []string{"book-flight"}, Context: "extra", IdempotencyKey: "message-41",
+		Constraints: &AgentRunConstraints{MaxTokens: 1000, MaxWallMs: 60000},
+	})
 	if err != nil {
 		t.Fatalf("AgentRun: %v", err)
 	}
-	if path != "/v1/sessions/s/agent/run" {
-		t.Errorf("path = %q", path)
+	if path != "/v2/sessions/s/agent/run" || auth != "ct_a" || key != "message-41" {
+		t.Errorf("path=%q auth=%q key=%q", path, auth, key)
 	}
-	if auth != "ct_a" {
-		t.Errorf("auth = %q", auth)
-	}
-	if body["goal"] != "buy milk" || body["context"] != "extra" {
+	limits, _ := body["constraints"].(map[string]any)
+	if body["goal"] != "buy milk" || body["context"] != "extra" || len(limits) != 2 || limits["max_wall_ms"] != float64(60000) {
 		t.Errorf("body = %v", body)
-	}
-	if _, ok := body["constraints"]; ok {
-		t.Errorf("constraints should be omitted when nil: %v", body)
 	}
 	if s, _ := body["skills"].([]any); len(s) != 1 || s[0] != "book-flight" {
 		t.Errorf("skills = %v", body["skills"])
 	}
-	if task.TaskID != "t1" || task.State != "running" {
-		t.Errorf("parsed task = %+v, want task_id=t1 state=running", task)
-	}
-	if len(task.Raw) == 0 {
-		t.Error("task.Raw escape hatch should carry the full wire object")
+	if turn.TurnID != "turn_t_1" || turn.State != "running" || turn.StartedAt == nil || turn.FirstEventID != 1 || len(turn.Raw) == 0 {
+		t.Errorf("parsed turn = %+v", turn)
 	}
 }
 
-func TestAgentSteer_OptionalFields(t *testing.T) {
-	var body map[string]any
+// A run's lost response is resent with the same key, which names the same
+// turn. A run without a key is refused before anything is sent: its resend
+// could start a second turn.
+func TestAgentRun_ResendsUnderItsKey(t *testing.T) {
+	var calls atomic.Int32
+	var keys []string
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		if !strings.HasSuffix(r.URL.Path, "/agent/steer") {
-			t.Errorf("path = %s", r.URL.Path)
+		keys = append(keys, r.Header.Get("Idempotency-Key"))
+		_, _ = io.Copy(io.Discard, r.Body)
+		if calls.Add(1) == 1 {
+			conn, _, err := w.(http.Hijacker).Hijack()
+			if err == nil {
+				_ = conn.Close()
+			}
+			return
 		}
-		_ = json.NewDecoder(r.Body).Decode(&body)
-		fmt.Fprint(w, `{}`)
+		fmt.Fprint(w, turnJSON)
 	})
-	attempt := 2
-	if _, err := c.AgentSteer(context.Background(), "ct_", "s", "go left", AgentSteerOptions{ExpectedTurnID: "t1", TurnAttempt: &attempt}); err != nil {
-		t.Fatal(err)
+	turn, err := c.AgentRun(context.Background(), "ct_a", "s", "g", AgentRunOptions{IdempotencyKey: "message-41"})
+	if err != nil || turn.TurnID != "turn_t_1" || calls.Load() != 2 || !slices.Equal(keys, []string{"message-41", "message-41"}) {
+		t.Fatalf("keyed run: turn=%+v err=%v keys=%v", turn, err, keys)
 	}
-	if body["text"] != "go left" || body["expected_turn_id"] != "t1" || body["turn_attempt"].(float64) != 2 {
-		t.Errorf("body = %v", body)
+	if _, err := c.AgentRun(context.Background(), "ct_a", "s", "g", AgentRunOptions{}); err == nil || calls.Load() != 2 {
+		t.Fatalf("keyless run: err=%v calls=%d", err, calls.Load())
 	}
 }
 
-func TestAgentSteer_OmitsEmpty(t *testing.T) {
-	var body map[string]any
+func TestAgentAnswerSteerCancel_AddressTheirTurn(t *testing.T) {
+	bodies := map[string]map[string]any{}
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&body)
-		fmt.Fprint(w, `{}`)
-	})
-	if _, err := c.AgentSteer(context.Background(), "ct_", "s", "x", AgentSteerOptions{}); err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := body["expected_turn_id"]; ok {
-		t.Errorf("expected_turn_id should be omitted: %v", body)
-	}
-	if _, ok := body["turn_attempt"]; ok {
-		t.Errorf("turn_attempt should be omitted: %v", body)
-	}
-}
-
-func TestAgentAnswerWithOptions_SecretsAndTurnGuard(t *testing.T) {
-	var body map[string]any
-	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		if !strings.HasSuffix(r.URL.Path, "/agent/answer") {
-			t.Errorf("path = %s", r.URL.Path)
+		bodies[r.URL.Path] = body
+		if r.URL.RawQuery != "" {
+			t.Errorf("mutation carried a query: %s", r.URL)
 		}
-		_ = json.NewDecoder(r.Body).Decode(&body)
-		fmt.Fprint(w, `{}`)
+		fmt.Fprint(w, turnJSON)
 	})
-	opts := AgentAnswerOptions{
-		ExpectedTurnID: "turn_1",
-		Secrets:        map[string]string{"LOGIN_PASSWORD": "answer-secret-123"},
-	}
-	if _, err := c.AgentAnswerWithOptions(context.Background(), "ct_", "s", "req_1", "use $LOGIN_PASSWORD", opts); err != nil {
+	ctx := context.Background()
+	secrets := map[string]string{"LOGIN_PASSWORD": "answer-secret-123"}
+	if _, err := c.AgentAnswer(ctx, "ct_", "s", "turn_t_1", "use $LOGIN_PASSWORD", AgentAnswerOptions{Secrets: secrets}); err != nil {
 		t.Fatal(err)
 	}
-	if body["request_id"] != "req_1" || body["answer"] != "use $LOGIN_PASSWORD" || body["expected_turn_id"] != "turn_1" {
-		t.Errorf("body = %v", body)
+	if _, err := c.AgentSteer(ctx, "ct_", "s", "turn_t_8", "go left", AgentSteerOptions{}); err != nil {
+		t.Fatal(err)
 	}
-	secrets, ok := body["secrets"].(map[string]any)
-	if !ok || secrets["LOGIN_PASSWORD"] != "answer-secret-123" {
-		t.Errorf("secrets = %#v", body["secrets"])
+	if _, err := c.AgentCancel(ctx, "ct_", "s", "turn_t_8"); err != nil {
+		t.Fatal(err)
+	}
+	answer := bodies["/v2/sessions/s/agent/answer"]
+	if answer["turn_id"] != "turn_t_1" || answer["answer"] != "use $LOGIN_PASSWORD" || len(answer) != 3 {
+		t.Errorf("answer body = %v", answer)
+	}
+	if got, _ := answer["secrets"].(map[string]any); got["LOGIN_PASSWORD"] != "answer-secret-123" {
+		t.Errorf("answer secrets = %v", answer["secrets"])
+	}
+	if steer := bodies["/v2/sessions/s/agent/steer"]; steer["turn_id"] != "turn_t_8" || steer["text"] != "go left" || len(steer) != 2 {
+		t.Errorf("steer body = %v", steer)
+	}
+	if cancel := bodies["/v2/sessions/s/agent/cancel"]; cancel["turn_id"] != "turn_t_8" || len(cancel) != 1 {
+		t.Errorf("cancel body = %v", cancel)
 	}
 }
 
-func TestAgentCancelResetTaskResult(t *testing.T) {
+// Answer and cancel replays name the same turn, so a lost response is resent:
+// a dropped connection, or a gateway status that cannot say whether the
+// Computer acted. A steer is never resent, and neither is a definite refusal.
+func TestAgentMutationRetries(t *testing.T) {
+	ctx := context.Background()
+	calls := map[string]func(*Client) error{
+		"answer": func(c *Client) error {
+			_, err := c.AgentAnswer(ctx, "ct_", "s", "turn_t_1", "yes", AgentAnswerOptions{})
+			return err
+		},
+		"cancel": func(c *Client) error { _, err := c.AgentCancel(ctx, "ct_", "s", "turn_t_1"); return err },
+		"steer": func(c *Client) error {
+			_, err := c.AgentSteer(ctx, "ct_", "s", "turn_t_1", "go", AgentSteerOptions{})
+			return err
+		},
+	}
+	lost := map[string]func(http.ResponseWriter){
+		"dropped connection": func(w http.ResponseWriter) {
+			if conn, _, err := w.(http.Hijacker).Hijack(); err == nil {
+				_ = conn.Close()
+			}
+		},
+		"502": func(w http.ResponseWriter) { w.WriteHeader(http.StatusBadGateway) },
+		"503": func(w http.ResponseWriter) {
+			w.Header().Set("Content-Type", "application/problem+json")
+			w.Header().Set("Retry-After", "1")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			fmt.Fprint(w, `{"type":"/errors/sandbox-not-ready","status":503,"retryable":true}`)
+		},
+		"504": func(w http.ResponseWriter) { w.WriteHeader(http.StatusGatewayTimeout) },
+		"408": func(w http.ResponseWriter) { w.WriteHeader(http.StatusRequestTimeout) },
+		"409": func(w http.ResponseWriter) {
+			w.Header().Set("Content-Type", "application/problem+json")
+			w.WriteHeader(http.StatusConflict)
+			fmt.Fprint(w, `{"type":"/errors/stale-turn","status":409}`)
+		},
+	}
+	for name, call := range calls {
+		for fault, respond := range lost {
+			var sent atomic.Int32
+			c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.Copy(io.Discard, r.Body)
+				if sent.Add(1) == 1 {
+					respond(w)
+					return
+				}
+				fmt.Fprint(w, turnJSON)
+			})
+			err := call(c)
+			resent := name != "steer" && fault != "409"
+			if want := map[bool]int32{true: 2, false: 1}[resent]; sent.Load() != want || resent != (err == nil) {
+				t.Errorf("%s after %s: sent=%d err=%v", name, fault, sent.Load(), err)
+			}
+		}
+	}
+
+	// Resends wait longer each time, at least the gateway's Retry-After, for
+	// at most the resend budget; then the last lost response is returned.
+	for _, tc := range []struct {
+		retryAfter string
+		waits      []time.Duration
+	}{
+		{"", []time.Duration{time.Second, 2 * time.Second, 4 * time.Second, 5 * time.Second, 5 * time.Second, 5 * time.Second, 5 * time.Second}},
+		{"7", []time.Duration{7 * time.Second, 7 * time.Second, 7 * time.Second, 7 * time.Second}},
+	} {
+		var sent atomic.Int32
+		c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+			sent.Add(1)
+			if tc.retryAfter != "" {
+				w.Header().Set("Retry-After", tc.retryAfter)
+			}
+			w.WriteHeader(http.StatusServiceUnavailable)
+		})
+		var waits []time.Duration
+		c.sleep = func(_ context.Context, d time.Duration) error { waits = append(waits, d); return nil }
+		var apiErr *problem.APIError
+		if err := calls["answer"](c); !errors.As(err, &apiErr) || apiErr.Status != http.StatusServiceUnavailable ||
+			int(sent.Load()) != len(tc.waits)+1 || !slices.Equal(waits, tc.waits) {
+			t.Errorf("Retry-After %q: sent=%d waits=%v err=%v", tc.retryAfter, sent.Load(), waits, err)
+		}
+	}
+}
+
+// A run whose response never arrives may have started: the error names the
+// key to send it again with, and still unwraps to the gateway's error.
+func TestAgentRun_UnconfirmedRunNamesItsKey(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusBadGateway) })
+	_, err := c.AgentRun(context.Background(), "ct_a", "s", "g", AgentRunOptions{IdempotencyKey: "message-41"})
+	var unconfirmed *RunUnconfirmedError
+	var apiErr *problem.APIError
+	if !errors.As(err, &unconfirmed) || unconfirmed.IdempotencyKey != "message-41" || !errors.As(err, &apiErr) {
+		t.Fatalf("err = %v", err)
+	}
+	// A refusal is definite: the run did not start, so no key is offered.
+	c = newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusConflict)
+		fmt.Fprint(w, `{"type":"/errors/session-busy","status":409}`)
+	})
+	if _, err := c.AgentRun(context.Background(), "ct_a", "s", "g", AgentRunOptions{IdempotencyKey: "message-42"}); errors.As(err, &unconfirmed) {
+		t.Fatalf("refused run = %v", err)
+	}
+}
+
+// Canceling while waiting to resend ends the call with the context's error.
+func TestAgentResendStopsWithItsContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		cancel()
+		w.WriteHeader(http.StatusServiceUnavailable)
+	})
+	c.sleep = sleepCtx
+	if _, err := c.AgentCancel(ctx, "ct_", "s", "turn_t_1"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+// A run whose context ends before its response arrives may have started: the
+// error still names the key, keeps the lost response, and reports the
+// context's end.
+func TestAgentRun_ContextEndKeepsItsKey(t *testing.T) {
+	// The deadline passes while waiting to resend a lost response.
+	var sent atomic.Int32
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		sent.Add(1)
+		w.WriteHeader(http.StatusBadGateway)
+	})
+	c.sleep = sleepCtx
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	_, err := c.AgentRun(ctx, "ct_a", "s", "g", AgentRunOptions{IdempotencyKey: "message-41"})
+	var unconfirmed *RunUnconfirmedError
+	var apiErr *problem.APIError
+	if !errors.As(err, &unconfirmed) || unconfirmed.IdempotencyKey != "message-41" || !errors.Is(err, context.DeadlineExceeded) ||
+		!errors.As(err, &apiErr) || apiErr.Status != http.StatusBadGateway || sent.Load() != 1 {
+		t.Fatalf("deadline while resending: sent=%d err=%v", sent.Load(), err)
+	}
+
+	// The caller cancels while the request is in flight.
+	ctx, cancel = context.WithCancel(context.Background())
+	defer cancel()
+	c = newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		cancel()
+		<-r.Context().Done()
+	})
+	_, err = c.AgentRun(ctx, "ct_a", "s", "g", AgentRunOptions{IdempotencyKey: "message-42"})
+	if !errors.As(err, &unconfirmed) || unconfirmed.IdempotencyKey != "message-42" || !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled in flight: err=%v", err)
+	}
+}
+
+// Wait repeats the bounded server hold until the turn leaves running, never
+// following its successor; at the timeout it returns the turn as it is.
+func TestAgentWait(t *testing.T) {
+	var holds []string
+	reads := 0
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v2/sessions/s/agent/turns/turn_t_1" || r.Header.Get("X-Pine-Auth") != "ps_" {
+			t.Errorf("read %s auth=%q", r.URL.Path, r.Header.Get("X-Pine-Auth"))
+		}
+		holds = append(holds, r.URL.Query().Get("wait_seconds"))
+		reads++
+		switch reads {
+		case 1:
+			w.Header().Set("Content-Type", "application/problem+json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			fmt.Fprint(w, `{"type":"/errors/events-unavailable","status":503,"retryable":true}`)
+		case 2:
+			fmt.Fprint(w, turnJSON)
+		default:
+			fmt.Fprint(w, `{"turn_id":"turn_t_1","state":"answered","next_turn_id":"turn_t_8","result":{"terminal_reason":"needs_input","summary":"Which account?","artifacts":[],"usage":{}},"started_at":"2026-01-02T03:04:05Z","ended_at":"2026-01-02T03:04:09Z","first_event_id":1,"last_event_id":6}`)
+		}
+	})
+	var sleeps []time.Duration
+	c.sleep = func(_ context.Context, d time.Duration) error { sleeps = append(sleeps, d); return nil }
+	turn, err := c.AgentWait(context.Background(), "ps_", "s", "turn_t_1", time.Minute)
+	if err != nil || turn.State != "answered" || turn.NextTurnID != "turn_t_8" || turn.Question() != "Which account?" || turn.EndedAt == nil {
+		t.Fatalf("turn=%+v err=%v", turn, err)
+	}
+	if len(holds) != 3 || holds[0] != "25" || holds[2] != "25" {
+		t.Errorf("holds = %v, want the bounded server wait each time", holds)
+	}
+	if !slices.Equal(sleeps, []time.Duration{time.Second}) {
+		t.Errorf("sleeps = %v, want one retry delay", sleeps)
+	}
+
+	// A zero timeout reads once; an expired wait returns the running turn.
+	holds, reads = nil, 1
+	if turn, err := c.AgentWait(context.Background(), "ps_", "s", "turn_t_1", 0); err != nil || turn.State != "running" || len(holds) != 1 || holds[0] != "0" {
+		t.Fatalf("immediate read: turn=%+v err=%v holds=%v", turn, err, holds)
+	}
+}
+
+// The Computer holds whole seconds: a fractional timeout is waited out by the
+// SDK, never rounded up into a longer server hold or down into no wait. A turn
+// that has already ended returns at once.
+func TestAgentWait_SubsecondTimeout(t *testing.T) {
+	var holds []string
+	state := "running"
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		holds = append(holds, r.URL.Query().Get("wait_seconds"))
+		fmt.Fprint(w, strings.Replace(turnJSON, `"running"`, `"`+state+`"`, 1))
+	})
+	var sleeps []time.Duration
+	c.sleep = func(ctx context.Context, d time.Duration) error {
+		sleeps = append(sleeps, d)
+		return sleepCtx(ctx, d)
+	}
+	turn, err := c.AgentWait(context.Background(), "ps_", "s", "turn_t_1", 300*time.Millisecond)
+	if err != nil || turn.State != "running" {
+		t.Fatalf("turn=%+v err=%v", turn, err)
+	}
+	if !slices.Equal(holds, []string{"0", "0"}) {
+		t.Fatalf("holds = %v, want a read now and one at the deadline", holds)
+	}
+	if len(sleeps) != 1 || sleeps[0] <= 0 || sleeps[0] > 300*time.Millisecond {
+		t.Fatalf("sleeps = %v, want the remainder of the timeout", sleeps)
+	}
+
+	holds, sleeps, state = nil, nil, "completed"
+	if turn, err := c.AgentWait(context.Background(), "ps_", "s", "turn_t_1", 300*time.Millisecond); err != nil ||
+		turn.State != "completed" || len(holds) != 1 || len(sleeps) != 0 {
+		t.Fatalf("ended turn: %+v %v, holds %v, sleeps %v", turn, err, holds, sleeps)
+	}
+}
+
+// Wait reads again after a lost response or a problem marked retryable, and
+// returns any other error at once.
+func TestAgentWait_RetriesLostReads(t *testing.T) {
+	problemJSON := func(status int, extra string) func(http.ResponseWriter) {
+		return func(w http.ResponseWriter) {
+			w.Header().Set("Content-Type", "application/problem+json")
+			w.WriteHeader(status)
+			fmt.Fprintf(w, `{"type":"/errors/x","status":%d%s}`, status, extra)
+		}
+	}
+	for _, tc := range []struct {
+		name    string
+		respond func(http.ResponseWriter)
+		retried bool
+	}{
+		{"dropped connection", func(w http.ResponseWriter) {
+			if conn, _, err := w.(http.Hijacker).Hijack(); err == nil {
+				_ = conn.Close()
+			}
+		}, true},
+		{"408", func(w http.ResponseWriter) { w.WriteHeader(http.StatusRequestTimeout) }, true},
+		{"502", func(w http.ResponseWriter) { w.WriteHeader(http.StatusBadGateway) }, true},
+		{"503 marked final", problemJSON(503, `,"retryable":false`), true},
+		{"504", func(w http.ResponseWriter) { w.WriteHeader(http.StatusGatewayTimeout) }, true},
+		{"500 marked retryable", problemJSON(500, `,"retryable":true`), true},
+		{"500 marked final", problemJSON(500, `,"retryable":false`), false},
+		{"404", problemJSON(404, `,"retryable":false`), false},
+		{"410", problemJSON(410, `,"retryable":false`), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var reads atomic.Int32
+			// No transport retry: only Wait decides whether to read again.
+			c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				if reads.Add(1) == 1 {
+					tc.respond(w)
+					return
+				}
+				fmt.Fprint(w, strings.Replace(turnJSON, `"running"`, `"completed"`, 1))
+			}, transport.WithRetry(1, nil))
+			turn, err := c.AgentWait(context.Background(), "ps_", "s", "turn_t_1", time.Minute)
+			if tc.retried && (err != nil || turn.State != "completed" || reads.Load() != 2) {
+				t.Fatalf("not read again: turn=%+v err=%v reads=%d", turn, err, reads.Load())
+			}
+			if !tc.retried && (err == nil || reads.Load() != 1) {
+				t.Fatalf("read again: err=%v reads=%d", err, reads.Load())
+			}
+		})
+	}
+}
+
+func TestAgentWait_ExplicitErrors(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusGone)
+		fmt.Fprint(w, `{"type":"/errors/history-expired","status":410,"pruned_through":9}`)
+	})
+	_, err := c.AgentWait(context.Background(), "ps_", "s", "turn_t_1", time.Minute)
+	var apiErr *problem.APIError
+	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusGone {
+		t.Fatalf("err = %v", err)
+	}
+	if _, err := c.AgentWait(context.Background(), "ps_", "s", "", time.Minute); err == nil {
+		t.Fatal("empty turn ID accepted")
+	}
+}
+
+func TestAgentTaskTurnsAndReset(t *testing.T) {
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.URL.Path == "/v1/sessions/s/agent/cancel" && r.Method == "POST":
-			fmt.Fprint(w, `{"task_id":"t1","state":"idle"}`)
-		case r.URL.Path == "/v1/sessions/s/agent/reset" && r.Method == "POST":
-			fmt.Fprint(w, `{"task_id":"t1","state":"idle"}`)
-		case r.URL.Path == "/v1/sessions/s/agent" && r.Method == "GET":
-			fmt.Fprint(w, `{"task_id":"t1","state":"running","goal":"buy milk"}`)
-		case r.URL.Path == "/v1/sessions/s/agent/result" && r.Method == "GET":
-			fmt.Fprint(w, `{"status":"ok","terminal_reason":"completed","summary":"done","artifacts":[],"usage":{"llm":{"input_tokens":30,"output_tokens":12,"cache_read_tokens":0,"cache_write_tokens":0,"total_tokens":42},"duration":{"total_ms":10,"active_ms":10},"cost":{"currency":"USD","total":0,"llm":0,"compute":null}}}`)
+		case r.URL.Path == "/v2/sessions/s/agent/reset" && r.Method == "POST":
+			fmt.Fprint(w, `{"task_id":"t1","session":"s","computer_id":"c","created_at":"","updated_at":"2026/01/02 03:04"}`)
+		case r.URL.Path == "/v2/sessions/s/agent" && r.Method == "GET":
+			fmt.Fprintf(w, `{"task_id":"t1","session":"s","computer_id":"c","turn":%s,"created_at":"2026-01-02T03:04:05Z","updated_at":"2026-01-02T03:04:05Z"}`, turnJSON)
+		case r.URL.Path == "/v2/sessions/s/agent/turns" && r.Method == "GET":
+			fmt.Fprintf(w, `{"turns":[{"turn_id":"turn_t_1","state":"completed","result":{"terminal_reason":"completed","summary":"done","artifacts":[{"root":"workdir","relative_path":"a.txt","content_type":"text/plain","size":3,"sha256":"x","modified_at":""}],"usage":{"llm":{"input_tokens":30,"output_tokens":12,"cache_read_tokens":0,"cache_write_tokens":0,"total_tokens":42},"duration":{"total_ms":10},"cost":{"currency":"USD","total":0,"llm":0,"compute":null}}},"started_at":"","first_event_id":1,"last_event_id":4},%s]}`, turnJSON)
 		default:
 			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 		}
 	})
-	// mutations + status return the typed Task; result returns the typed AgentResult.
-	if task, err := c.AgentCancel(context.Background(), "ct_", "s"); err != nil || task.State != "idle" {
-		t.Errorf("AgentCancel: %+v, %v", task, err)
-	}
-	if task, err := c.AgentReset(context.Background(), "ct_", "s"); err != nil || task.State != "idle" {
+	ctx := context.Background()
+	// Bad or empty timestamps never fail a parse.
+	if task, err := c.AgentReset(ctx, "ct_", "s", AgentTaskOptions{ExpectedTaskID: "t1"}); err != nil || task.TaskID != "t1" || task.Turn != nil || task.CreatedAt != nil || task.UpdatedAt != nil {
 		t.Errorf("AgentReset: %+v, %v", task, err)
 	}
-	if task, err := c.AgentTask(context.Background(), "ps_", "s"); err != nil || task.State != "running" || task.Goal != "buy milk" {
+	if task, err := c.AgentTask(ctx, "ps_", "s", AgentTaskOptions{}); err != nil || task.Turn == nil || task.Turn.TurnID != "turn_t_1" || task.CreatedAt == nil {
 		t.Errorf("AgentTask: %+v, %v", task, err)
 	}
-	res, err := c.AgentResult(context.Background(), "ps_", "s")
-	if err != nil {
-		t.Fatalf("AgentResult: %v", err)
+	turns, err := c.AgentTurns(ctx, "ps_", "s", AgentTaskOptions{})
+	if err != nil || len(turns) != 2 {
+		t.Fatalf("AgentTurns: %+v, %v", turns, err)
 	}
-	if res.Status != "ok" || res.TerminalReason != "completed" || res.Usage.LLM.TotalTokens != 42 {
-		t.Errorf("AgentResult parsed = %+v, want status=ok terminal=completed total_tokens=42", res)
-	}
-}
-
-// TestAgentTask_TolerantTimestamps: an empty or non-RFC3339 timestamp must NOT fail the
-// parse — the SDK doesn't functionally need it, and a 200 never hard-failed under the old
-// raw return. Mirrors Session/parseTime tolerance (a bad timestamp → nil *time.Time).
-func TestAgentTask_TolerantTimestamps(t *testing.T) {
-	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		// created_at empty, updated_at non-RFC3339 — both must be tolerated.
-		fmt.Fprint(w, `{"task_id":"t1","state":"idle","created_at":"","updated_at":"2026/01/02 03:04"}`)
-	})
-	task, err := c.AgentTask(context.Background(), "ps_", "s")
-	if err != nil {
-		t.Fatalf("AgentTask must not hard-fail on a bad/empty timestamp: %v", err)
-	}
-	if task.CreatedAt != nil || task.UpdatedAt != nil {
-		t.Errorf("bad/empty timestamps should parse to nil, got created=%v updated=%v", task.CreatedAt, task.UpdatedAt)
-	}
-	if task.State != "idle" {
-		t.Errorf("state = %q, want idle", task.State)
+	done := turns[0]
+	if done.State != "completed" || done.Result == nil || done.Result.Summary != "done" || done.Result.Usage.LLM.TotalTokens != 42 || done.Question() != "" ||
+		len(done.Result.Artifacts) != 1 || done.Result.Artifacts[0].ModifiedAt != nil || done.StartedAt != nil {
+		t.Errorf("completed turn = %+v", done)
 	}
 }
 
-// TestAgentResult_TolerantArtifactTimestamp: a bad artifact modified_at must not drop the
-// whole terminal outcome (summary/usage) over one cosmetic field.
-func TestAgentResult_TolerantArtifactTimestamp(t *testing.T) {
-	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, `{"status":"ok","terminal_reason":"completed","summary":"done","usage":{"llm":{"input_tokens":1,"output_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"total_tokens":1},"duration":{"total_ms":0,"active_ms":0},"cost":{"currency":"USD","total":0,"llm":0,"compute":null}},"artifacts":[{"root":"workdir","relative_path":"a.txt","content_type":"text/plain","size":3,"sha256":"x","modified_at":""}]}`)
-	})
-	res, err := c.AgentResult(context.Background(), "ps_", "s")
-	if err != nil {
-		t.Fatalf("AgentResult must not hard-fail on a bad artifact timestamp: %v", err)
-	}
-	if res.Status != "ok" || len(res.Artifacts) != 1 || res.Artifacts[0].RelativePath != "a.txt" {
-		t.Errorf("result = %+v, want status=ok + 1 artifact a.txt", res)
-	}
-	if res.Artifacts[0].ModifiedAt != nil {
-		t.Errorf("empty artifact modified_at should parse to nil, got %v", res.Artifacts[0].ModifiedAt)
-	}
-}
-
-func TestAgentResult_AuthorPayloadAndLegacyDecodeCompatibility(t *testing.T) {
-	raw := []byte(`{"status":"ok","terminal_reason":"draft_registered","summary":"draft saved","artifacts":[],"author":{"draft":{"name":"book-x","version":2}},"usage":{}}`)
+func TestAgentResult_AuthorPayload(t *testing.T) {
+	raw := []byte(`{"terminal_reason":"draft_registered","summary":"draft saved","artifacts":[],"author":{"draft":{"name":"book-x","version":2}}}`)
 	res, err := parseAgentResult(raw)
 	if err != nil {
 		t.Fatalf("parse typed author result: %v", err)
 	}
-	if res.Author == nil || !strings.Contains(string(res.Author.Draft), `"name":"book-x"`) {
-		t.Fatalf("author payload = %+v, want draft metadata", res.Author)
+	if res.TerminalReason != "draft_registered" || res.Author == nil || !strings.Contains(string(res.Author.Draft), `"name":"book-x"`) {
+		t.Fatalf("author payload = %+v", res)
 	}
+}
 
-	// v0.3-era SDKs decoded TaskResult with encoding/json and a findings field.
-	// Missing findings and the additive author object must remain parseable.
-	var legacy struct {
-		Status         string            `json:"status"`
-		TerminalReason string            `json:"terminal_reason"`
-		Summary        string            `json:"summary"`
-		Findings       []json.RawMessage `json:"findings"`
+func TestAgentTaskGuardsReachReadsAndReset(t *testing.T) {
+	calls := 0
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.URL.Query().Get("expected_task_id") != "old task/&" {
+			t.Errorf("missing or corrupted task guard: %s", r.URL)
+		}
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusConflict)
+		fmt.Fprint(w, `{"type":"/errors/stale-task","status":409,"detail":"task replaced"}`)
+	})
+	ctx := context.Background()
+	opts := AgentTaskOptions{ExpectedTaskID: "old task/&"}
+	_, statusErr := c.AgentTask(ctx, "ps_", "s", opts)
+	_, turnsErr := c.AgentTurns(ctx, "ps_", "s", opts)
+	_, resetErr := c.AgentReset(ctx, "ct_", "s", opts)
+	for _, err := range []error{statusErr, turnsErr, resetErr} {
+		if err == nil || !strings.Contains(err.Error(), "task replaced") {
+			t.Fatalf("stale guard was swallowed: %v", err)
+		}
 	}
-	if err := json.Unmarshal(raw, &legacy); err != nil {
-		t.Fatalf("legacy SDK shape cannot decode the new result: %v", err)
+	if _, err := c.AgentReset(ctx, "ct_", "s", AgentTaskOptions{}); err == nil {
+		t.Fatal("unguarded reset accepted")
 	}
-	if legacy.Status != "ok" || legacy.TerminalReason != "draft_registered" || legacy.Findings != nil {
-		t.Fatalf("legacy decode drift: %+v", legacy)
+	if calls != 3 {
+		t.Fatalf("guards retried or unguarded reset sent: %d requests", calls)
 	}
 }
 
@@ -255,31 +528,3 @@ func TestDriveTrack(t *testing.T) {
 }
 
 // The typed agent/control event-iterator tests live in stream_test.go.
-
-// Acceptance can precede a lost response. Retrying this mutation could start
-// a second turn if the first completes before the retry reaches the server.
-func TestAgentRunDoesNotRetryLostResponse(t *testing.T) {
-	var calls atomic.Int32
-	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		calls.Add(1)
-		if r.Method != http.MethodPost || r.URL.Path != "/v1/sessions/s/agent/run" {
-			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
-		}
-		if r.Header.Get("Idempotency-Key") != "" {
-			t.Error("Run must not claim replay-safe admission")
-		}
-		_, _ = io.Copy(io.Discard, r.Body)
-		conn, _, err := w.(http.Hijacker).Hijack()
-		if err != nil {
-			t.Error(err)
-			return
-		}
-		_ = conn.Close()
-	})
-	if _, err := c.AgentRun(context.Background(), "ct_a", "s", "g", AgentRunOptions{}); err == nil {
-		t.Fatal("lost response must reach the caller")
-	}
-	if got := calls.Load(); got != 1 {
-		t.Fatalf("Run sent %d requests, want 1", got)
-	}
-}

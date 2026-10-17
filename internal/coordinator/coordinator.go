@@ -3,10 +3,13 @@ package coordinator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
+	"strings"
 	"time"
 
 	"go.pinesandbox.io/computer/internal/base/problem"
@@ -23,10 +26,21 @@ type Client struct {
 	// tests in this package override them so a reconnect doesn't actually sleep.
 	streamBackoff func(attempt int) time.Duration
 	streamBudget  int
+	// sleep is every agent wait between requests: before lost agent work is
+	// sent again (postAgentTurn) and between turn reads (AgentWait); tests
+	// record the waits instead of sleeping.
+	sleep func(ctx context.Context, d time.Duration) error
+	// discoveryToken reads the capability manifest that qualifies an untyped
+	// V2 404; a session token cannot read it (QualifyWith).
+	discoveryToken string
 }
 
+// QualifyWith names the Computer token that reads the capability manifest when
+// a request's own token cannot. Call it before the client is shared.
+func (c *Client) QualifyWith(computerToken string) { c.discoveryToken = computerToken }
+
 // NewClient builds a coordinator client over raw (pointed at the Computer's data host),
-// negotiating the given spec-version major.
+// sending the legacy gateway marker. Runtime support uses capability discovery.
 func NewClient(raw *transport.Client, specMajor int) *Client {
 	return &Client{
 		raw: raw,
@@ -37,6 +51,7 @@ func NewClient(raw *transport.Client, specMajor int) *Client {
 		},
 		streamBackoff: defaultStreamBackoff,
 		streamBudget:  defaultReconnectBudget,
+		sleep:         sleepCtx,
 	}
 }
 
@@ -223,7 +238,7 @@ func (c *Client) do(ctx context.Context, method, path, token string, body []byte
 
 // send is the single coordinator request-and-validate path: X-Pine-Auth bearer (omitted when
 // token==""), the spec-version header (+ caller extras), a caller-chosen Content-Type/Accept,
-// and — on every response — the spec-version Check + the non-2xx → typed-error mapping.
+// and the non-2xx → typed-error mapping. Gateway markers cannot qualify a runtime.
 func (c *Client) send(ctx context.Context, r coordReq) (*transport.Response, error) {
 	accept := r.accept
 	if accept == "" {
@@ -239,13 +254,37 @@ func (c *Client) send(ctx context.Context, r coordReq) (*transport.Response, err
 	if err != nil {
 		return nil, err
 	}
-	if err := c.spec.Check(resp.Headers.Get(c.spec.ResponseHeader)); err != nil {
-		return nil, err
-	}
 	if resp.Status < 200 || resp.Status >= 300 {
-		return nil, c.respError(resp.Status, resp.Body, resp.Headers.Get("X-Request-Id"), r.token, transport.Operation(r.method, r.path))
+		err := c.respError(resp.Status, resp.Body, resp.Headers.Get("X-Request-Id"), r.token, transport.Operation(r.method, r.path))
+		var apiErr *problem.APIError
+		if errors.As(err, &apiErr) {
+			if seconds, perr := strconv.Atoi(strings.TrimSpace(resp.Headers.Get("Retry-After"))); perr == nil && seconds > 0 {
+				apiErr.RetryAfter = time.Duration(seconds) * time.Second
+			}
+		}
+		return nil, c.agentProtocolError(ctx, r.path, r.token, err)
 	}
 	return resp, nil
+}
+
+// agentProtocolError qualifies only ambiguous V2 404s. A successful request
+// needs no discovery round trip, and the original operation is never retried.
+func (c *Client) agentProtocolError(ctx context.Context, path, token string, original error) error {
+	var gone *SandboxGoneError
+	var apiErr *problem.APIError
+	if !strings.HasPrefix(path, "/v2/") || errors.As(original, &gone) ||
+		!errors.As(original, &apiErr) || apiErr.Status != http.StatusNotFound || apiErr.ProblemType != "" {
+		return original
+	}
+	if c.discoveryToken != "" {
+		token = c.discoveryToken
+	}
+	var unsupported *AgentProtocolUnsupportedError
+	if err := c.RequirePublicAgent(ctx, token); errors.As(err, &unsupported) {
+		return err
+	}
+	// A supported runtime or failed discovery preserves the resource error.
+	return original
 }
 
 // baseHeaders returns the spec-version request header (the one header every coordinator
@@ -263,7 +302,7 @@ func (c *Client) baseHeaders(extra map[string]string) map[string]string {
 const streamErrorBodyCap = 64 << 10
 
 // openStream opens a streaming request with the caller's Accept, validates the
-// spec-version, and maps a non-2xx (a problem+json body, not a stream) to a typed
+// request headers, and maps a non-2xx (a problem+json body, not a stream) to a typed
 // error — the single open path for the SSE feeds and binary streams (artifact reads).
 // On success the caller owns the frame/byte loop and MUST Close the returned Body;
 // on every error path openStream closes it.
@@ -291,14 +330,10 @@ func (c *Client) openStream(ctx context.Context, method, path, token, accept str
 	if err != nil {
 		return nil, err
 	}
-	if err := c.spec.Check(sr.Headers.Get(c.spec.ResponseHeader)); err != nil {
-		sr.Body.Close()
-		return nil, err
-	}
 	if sr.Status < 200 || sr.Status >= 300 {
 		b, _ := io.ReadAll(io.LimitReader(sr.Body, streamErrorBodyCap))
 		sr.Body.Close()
-		return nil, c.respError(sr.Status, b, sr.Headers.Get("X-Request-Id"), token, transport.Operation(method, path))
+		return nil, c.agentProtocolError(ctx, path, token, c.respError(sr.Status, b, sr.Headers.Get("X-Request-Id"), token, transport.Operation(method, path)))
 	}
 	return sr, nil
 }

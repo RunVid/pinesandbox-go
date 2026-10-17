@@ -55,7 +55,7 @@ func TestStopUsesServerOwnershipFromAnySavedHandle(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				comp, err := client.AdoptExisting(context.Background(), creds.ID, creds.Key, "sb-1", "ct_saved", AdoptOptions{BindingRevision: 7})
+				comp, err := client.ReconnectComputer(context.Background(), creds, Binding{creds.ID, "sb-1", "ct_saved", 7})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -77,6 +77,50 @@ func TestStopUsesServerOwnershipFromAnySavedHandle(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestStopRetriesSaveFailureOnlyWithAnExplicitVerdict(t *testing.T) {
+	for _, verdict := range []string{"", `,"retryable":null`, `,"retryable":false`, `,"retryable":true`} {
+		t.Run(verdict, func(t *testing.T) {
+			var stops atomic.Int32
+			control := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/sandboxes/saved-runtime" && r.Method == "GET" {
+					if stops.Load() > 0 {
+						fmt.Fprint(w, `{"id":"saved-runtime","status":{"state":"Terminated","reason":"COMPUTE_RELEASED"}}`)
+					} else {
+						fmt.Fprintf(w, `{"id":"saved-runtime","status":{"state":"SaveFailed"%s}}`, verdict)
+					}
+				} else if r.URL.Path == "/sandboxes/saved-runtime/stop" && r.Method == "POST" {
+					stops.Add(1)
+					w.WriteHeader(202)
+				} else {
+					t.Errorf("unexpected lifecycle request: %s %s", r.Method, r.URL.Path)
+					w.WriteHeader(500)
+				}
+			}))
+			defer control.Close()
+			client := &Client{conn: buildTestConnection(t, control.URL, "http://unused")}
+			creds, err := GenerateCredentials()
+			if err != nil {
+				t.Fatal(err)
+			}
+			comp, err := client.ReconnectComputer(context.Background(), creds, Binding{creds.ID, "saved-runtime", "ct_saved", 7})
+			if err != nil {
+				t.Fatal(err)
+			}
+			released, err := comp.Stop(context.Background())
+			if verdict == `,"retryable":true` {
+				if !released || err != nil || stops.Load() != 1 {
+					t.Fatalf("authorized retry failed: %v %v", released, err)
+				}
+			} else {
+				var failed *StopSaveError
+				if released || !errors.As(err, &failed) || IsRetryable(err) || stops.Load() != 0 || comp.SandboxID() != "saved-runtime" {
+					t.Fatalf("missing or negative retry verdict changed Stop behavior: %v %v", released, err)
+				}
+			}
+		})
 	}
 }
 
@@ -222,12 +266,17 @@ func TestStartAndRecoveryDoNotReplaceHealthyMemory(t *testing.T) {
 	}))
 	defer server.Close()
 	client := &Client{conn: buildTestConnection(t, server.URL, "http://unused")}
+	_, startErr := client.StartComputer(context.Background(), creds, StartOptions{})
+	var retained *RuntimeRetainedError
+	if !errors.As(startErr, &retained) || retained.RuntimeID != "old" || retained.State != "paused" {
+		t.Fatalf("Start lost typed conflict: %v", startErr)
+	}
 	for _, operation := range []func(context.Context, Credentials, StartOptions) (*Computer, error){client.StartComputer, client.RecoverComputer} {
 		if computer, err := operation(context.Background(), creds, StartOptions{}); err == nil || computer != nil {
 			t.Fatal("healthy paused runtime replaced")
 		}
 	}
-	if references.Load() != 2 {
+	if references.Load() != 3 {
 		t.Fatal("binding revision was reread within an invocation")
 	}
 }

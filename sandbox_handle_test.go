@@ -3,6 +3,7 @@ package pinesandbox
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"testing"
 	"time"
@@ -18,6 +19,10 @@ type fakeCP struct {
 	destroys int
 	pause    func(context.Context, string) error
 	resume   func(context.Context, string) error
+}
+
+func (f *fakeCP) SetIdleTimeout(ctx context.Context, id string, seconds int, etag string) (*controlplane.SandboxInfo, error) {
+	return nil, fmt.Errorf("unexpected idle-timeout update")
 }
 
 func (f *fakeCP) Get(ctx context.Context, id string) (*controlplane.SandboxInfo, error) {

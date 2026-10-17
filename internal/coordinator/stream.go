@@ -32,32 +32,27 @@ const defaultReconnectBudget = 5
 // the reconnect budget.
 var ErrStreamLost = errors.New("pinesandbox: event stream lost (reconnect budget exhausted)")
 
-// AgentEvent is one agent TaskEvent (spec TaskEvent): the typed envelope + a per-type
-// Payload kept raw (the payload shapes are loose by design). Fields not modelled here
-// (usage_delta, redactions, trace_id) remain available via Raw.
+// AgentEvent is one public activity event. Payload follows the event type; Raw
+// preserves additional public fields for forward compatibility.
 type AgentEvent struct {
 	SchemaVersion int
 	// EventID is the per-task monotonic seq AND the SSE resume cursor: persist it across a
 	// restart and pass it back as AgentMode.Events' lastEventID (strconv.FormatInt) to
 	// resume the feed without gaps.
-	EventID     int64
-	TaskID      string
-	Session     string
-	ComputerID  string
-	ThreadID    string
-	TurnID      string
-	TurnAttempt int
-	Ts          *time.Time // event timestamp; nil if absent/unparseable (a bad ts never fails the event)
-	Type        string     // status|input|reasoning|command|step|needs_input|usage|screenshot|result|usage.finalized|controller_changed
-	Source      string     // agent|control|files|system
-	Visibility  string     // user|operator|debug
-	Controller  string     // agent|human|locked; empty on legacy/synthetic events
-	ModeEpoch   int64      // per-session controller ordering fence
-	Terminal    bool       // true iff this frame ends a TURN (not the persistent Task)
-	TaskState   string     // idle|running|paused — a non-terminal state transition (empty = none)
-	Reason      string     // accompanies TaskState, e.g. needs_input (the pause reason)
-	Payload     json.RawMessage
-	Raw         json.RawMessage // the full TaskEvent envelope (forward-compat escape hatch)
+	EventID    int64
+	TaskID     string
+	Session    string
+	ComputerID string
+	// TurnID is the turn this event belongs to — the same ID Run, Answer and Wait
+	// return. An answer's input opens the turn it belongs to. Empty on older records
+	// without a trustworthy turn; never infer one from event order.
+	TurnID     string
+	Ts         *time.Time // event timestamp; nil if absent/unparseable (a bad ts never fails the event)
+	Type       string     // status|input|progress|activity|frame|controller_changed|result
+	Controller string     // agent|human|locked; empty on legacy/synthetic events
+	ModeEpoch  int64      // per-session controller ordering fence
+	Payload    json.RawMessage
+	Raw        json.RawMessage // the full event envelope (forward-compat escape hatch)
 }
 
 // AgentControlChange is the typed view of a controller_changed TaskEvent. The
@@ -95,49 +90,224 @@ func (e *AgentEvent) ControlChange() (*AgentControlChange, bool) {
 	}, true
 }
 
-// AgentAsk is the typed payload of a needs_input event — the agent paused on
-// pine_ask and is waiting for an answer. It carries BOTH ids the answer needs
-// (RequestID + TurnID), so AgentMode.AnswerAsk(ctx, ask, text) needs no extra
-// plumbing. Question is the complete human-facing prompt. Context and Options
-// remain only for decoding needs_input events from older coordinators.
-type AgentAsk struct {
-	RequestID string // the pending-request id
-	TurnID    string // the turn this ask belongs to (expected_turn_id on answer)
-	Question  string // the complete question to surface to the human
-
-	// Deprecated: retained for events from older coordinators; new asks leave it empty.
-	Context string
-	// Deprecated: retained for events from older coordinators; new asks leave it empty.
-	Options []string
+// AgentProgress is the agent's caller-facing narration (a progress event).
+type AgentProgress struct {
+	Text string
 }
 
-// Ask returns the typed ask payload when this event is a needs_input pause
-// (Type == "needs_input"), else (nil, false) — so callers drive Answer without
-// hand-parsing Payload:
-//
-//	if ask, ok := ev.Ask(); ok {
-//		ag.AnswerAsk(ctx, ask, prompt(ask.Question))
-//	}
-func (e *AgentEvent) Ask() (*AgentAsk, bool) {
-	if e == nil || e.Type != "needs_input" {
+// Progress returns the narration when this event is a progress frame, else (nil, false).
+func (e *AgentEvent) Progress() (*AgentProgress, bool) {
+	if e == nil || e.Type != "progress" {
 		return nil, false
 	}
 	var wire struct {
-		RequestID string   `json:"request_id"`
-		Question  string   `json:"question"`
-		Context   string   `json:"context"`
-		Options   []string `json:"options"`
+		Text string `json:"text"`
 	}
+	if err := json.Unmarshal(e.Payload, &wire); err != nil || wire.Text == "" {
+		return nil, false
+	}
+	return &AgentProgress{Text: wire.Text}, true
+}
+
+// AgentInput is caller-authored input the coordinator accepted: the run goal,
+// an answer to a question, or steering. Run and answer input open the event's turn.
+type AgentInput struct {
+	Kind    string // run | answer | steer
+	Text    string
+	Context string // run only
+}
+
+// Input returns the accepted input when this event is an input frame, else (nil, false).
+func (e *AgentEvent) Input() (*AgentInput, bool) {
+	if e == nil || e.Type != "input" {
+		return nil, false
+	}
+	var wire struct {
+		Kind    string `json:"kind"`
+		Text    string `json:"text"`
+		Context string `json:"context"`
+	}
+	if err := json.Unmarshal(e.Payload, &wire); err != nil || wire.Kind == "" {
+		return nil, false
+	}
+	return &AgentInput{Kind: wire.Kind, Text: wire.Text, Context: wire.Context}, true
+}
+
+// AgentActivity is one step of the agent's work (an activity event). Upsert by
+// ID: every step ends with exactly one outcome (completed, failed, declined, or
+// interrupted when its turn stopped first), after running when the step takes
+// time, and parallel steps interleave. A reader resuming mid-stream may see an
+// outcome without its start. Completed means the step finished, not that the
+// goal succeeded.
+//
+// Kind says what the step was for a person (browser, command, file, skill,
+// tool); the set grows, so treat a kind you don't know as a generic step.
+// Title is the Computer's own description of the step, in the imperative
+// ("Open Home Page – E-Label", "Click “Log in”", "Edit notes.md", "Use skill
+// book-flight"); State says how it went. Every outcome has one. Display it as
+// is; do not parse it. Facts are what the step acted on, each member optional;
+// nil when there are none.
+type AgentActivity struct {
+	ID    string
+	State string // running | completed | failed | declined | interrupted
+	Kind  string
+	Title string
+	Facts *ActivityFacts
+}
+
+// ActivityFacts are what a step acted on, from the Computer's own record of
+// the work: never a command line, tool argument or anything typed into a page.
+type ActivityFacts struct {
+	Page   *ActivityPage   `json:"page,omitempty"`   // the page a browser step opened
+	Target *ActivityTarget `json:"target,omitempty"` // the element a browser step acted on
+	Files  []ActivityFile  `json:"files,omitempty"`  // work-directory files the step touched
+	Skill  *ActivitySkill  `json:"skill,omitempty"`  // one of your learned skills the step used
+	// Steps lists the actions a browser step ran, in order; a failed action is
+	// the last one.
+	Steps []string `json:"steps,omitempty"`
+}
+
+// ActivityPage is a page by its title and address (scheme, host and path).
+type ActivityPage struct {
+	Title string `json:"title,omitempty"`
+	URL   string `json:"url,omitempty"`
+}
+
+// ActivityTarget is an element by its accessibility role and visible name.
+type ActivityTarget struct {
+	Role string `json:"role,omitempty"`
+	Name string `json:"name,omitempty"`
+}
+
+// ActivityFile is a work-directory file and how the step touched it
+// (ActivityFileCreated, …).
+type ActivityFile struct {
+	Path   string `json:"path"`
+	Change string `json:"change"`
+}
+
+// ActivitySkill is one of your learned skills, by name.
+type ActivitySkill struct {
+	Name string `json:"name"`
+}
+
+// Activity returns the step when this event is an activity frame, else
+// (nil, false).
+func (e *AgentEvent) Activity() (*AgentActivity, bool) {
+	if e == nil || e.Type != "activity" {
+		return nil, false
+	}
+	return parseActivity(e.Payload)
+}
+
+// parseActivity decodes an activity payload. A malformed optional field or
+// fact member is dropped on its own, never fatal.
+func parseActivity(payload json.RawMessage) (*AgentActivity, bool) {
+	var wire struct {
+		ActivityID string          `json:"activity_id"`
+		State      string          `json:"state"`
+		Kind       json.RawMessage `json:"kind"`
+		Title      json.RawMessage `json:"title"`
+		Facts      json.RawMessage `json:"facts"`
+	}
+	if json.Unmarshal(payload, &wire) != nil || wire.ActivityID == "" || wire.State == "" {
+		return nil, false
+	}
+	a := &AgentActivity{ID: wire.ActivityID, State: wire.State}
+	_ = json.Unmarshal(wire.Kind, &a.Kind)
+	_ = json.Unmarshal(wire.Title, &a.Title)
+	var facts map[string]json.RawMessage
+	if json.Unmarshal(wire.Facts, &facts) == nil {
+		a.Facts = decodeActivityFacts(facts)
+	}
+	return a, true
+}
+
+// decodeActivityFacts reads each fact member on its own, so one malformed or
+// future member costs only itself.
+func decodeActivityFacts(members map[string]json.RawMessage) *ActivityFacts {
+	var f ActivityFacts
+	if json.Unmarshal(members["page"], &f.Page) != nil {
+		f.Page = nil
+	}
+	if json.Unmarshal(members["target"], &f.Target) != nil {
+		f.Target = nil
+	}
+	if json.Unmarshal(members["skill"], &f.Skill) != nil {
+		f.Skill = nil
+	}
+	var files []json.RawMessage
+	if json.Unmarshal(members["files"], &files) == nil {
+		for _, raw := range files {
+			var file ActivityFile
+			if json.Unmarshal(raw, &file) == nil && file.Path != "" {
+				f.Files = append(f.Files, file)
+			}
+		}
+	}
+	var steps []json.RawMessage
+	if json.Unmarshal(members["steps"], &steps) == nil {
+		for _, raw := range steps {
+			var step string
+			if json.Unmarshal(raw, &step) == nil && step != "" {
+				f.Steps = append(f.Steps, step)
+			}
+		}
+	}
+	if f.Page == nil && f.Target == nil && f.Files == nil && f.Skill == nil && f.Steps == nil {
+		return nil
+	}
+	return &f
+}
+
+// AgentFrame is a picture of the Computer's screen, taken after a step that
+// may have changed it.
+type AgentFrame struct {
+	MediaType  string // image/webp today; skip a type you can't show
+	Width      int
+	Height     int
+	Data       []byte         // the decoded image
+	ObservedAt *time.Time     // capture time, nil on older records
+	Activity   *AgentActivity // matching step snapshot, nil for independent observations
+}
+
+// Frame returns the picture when this event is a frame event, else
+// (nil, false).
+func (e *AgentEvent) Frame() (*AgentFrame, bool) {
+	if e == nil || e.Type != "frame" {
+		return nil, false
+	}
+	var wire struct {
+		MediaType  string          `json:"media_type"`
+		Width      int             `json:"width"`
+		Height     int             `json:"height"`
+		Data       []byte          `json:"data"` // base64 on the wire
+		ObservedAt json.RawMessage `json:"observed_at"`
+		Activity   json.RawMessage `json:"activity"`
+	}
+	if err := json.Unmarshal(e.Payload, &wire); err != nil || wire.MediaType == "" || len(wire.Data) == 0 {
+		return nil, false
+	}
+	var observedAt string
+	_ = json.Unmarshal(wire.ObservedAt, &observedAt)
+	activity, _ := parseActivity(wire.Activity)
+	return &AgentFrame{MediaType: wire.MediaType, Width: wire.Width, Height: wire.Height, Data: wire.Data,
+		ObservedAt: parseTime(observedAt), Activity: activity}, true
+}
+
+// Result returns how the work ended when this event is a result event, else
+// (nil, false) — the same shape as AgentTurn.Result.
+func (e *AgentEvent) Result() (*AgentResult, bool) {
+	if e == nil || e.Type != "result" {
+		return nil, false
+	}
+	var wire agentResultWire
 	if err := json.Unmarshal(e.Payload, &wire); err != nil {
 		return nil, false
 	}
-	return &AgentAsk{
-		RequestID: wire.RequestID,
-		TurnID:    e.TurnID,
-		Question:  wire.Question,
-		Context:   wire.Context,
-		Options:   wire.Options,
-	}, true
+	r := wire.toAgentResult()
+	r.Raw = e.Payload
+	return r, true
 }
 
 // ControlEvent is one control-plane SSE event (spec ControlEventV1), discriminated by the
@@ -149,9 +319,26 @@ type ControlEvent struct {
 	Data json.RawMessage
 }
 
-// AgentEvents streams the session's agent TaskEvent feed as a typed, resuming iterator.
-func (c *Client) AgentEvents(ctx context.Context, token, name, lastEventID string) iter.Seq2[AgentEvent, error] {
-	return streamTyped(ctx, c, c.agentPath(name, "/events"), token, lastEventID, decodeAgentEvent)
+// AgentEventsOptions binds resumed cursors to their task and controls images.
+type AgentEventsOptions struct {
+	SkipFrames     bool
+	ExpectedTaskID string
+}
+
+// AgentEvents streams the session's typed feed with guarded cursor resumption.
+func (c *Client) AgentEvents(ctx context.Context, token, name, lastEventID string, opts AgentEventsOptions) iter.Seq2[AgentEvent, error] {
+	path := c.agentPath(name, "/events")
+	q := url.Values{}
+	if opts.SkipFrames {
+		q.Set("frames", "none")
+	}
+	if opts.ExpectedTaskID != "" {
+		q.Set("expected_task_id", opts.ExpectedTaskID)
+	}
+	if len(q) != 0 {
+		path += "?" + q.Encode()
+	}
+	return streamTyped(ctx, c, path, token, lastEventID, decodeAgentEvent)
 }
 
 // ControlEvents streams the session's control-plane event feed as a typed, resuming iterator.
@@ -168,18 +355,11 @@ func decodeAgentEvent(f sse.Frame) (AgentEvent, bool) {
 		TaskID        string          `json:"task_id"`
 		Session       string          `json:"session"`
 		ComputerID    string          `json:"computer_id"`
-		ThreadID      string          `json:"thread_id"`
 		TurnID        string          `json:"turn_id"`
-		TurnAttempt   int             `json:"turn_attempt"`
 		Ts            string          `json:"ts"`
 		Type          string          `json:"type"`
-		Source        string          `json:"source"`
-		Visibility    string          `json:"visibility"`
 		Controller    string          `json:"controller"`
 		ModeEpoch     int64           `json:"mode_epoch"`
-		Terminal      bool            `json:"terminal"`
-		TaskState     string          `json:"task_state"`
-		Reason        string          `json:"reason"`
 		Payload       json.RawMessage `json:"payload"`
 	}
 	if json.Unmarshal([]byte(f.Data), &w) != nil {
@@ -187,11 +367,8 @@ func decodeAgentEvent(f sse.Frame) (AgentEvent, bool) {
 	}
 	return AgentEvent{
 		SchemaVersion: w.SchemaVersion, EventID: w.EventID, TaskID: w.TaskID,
-		Session: w.Session, ComputerID: w.ComputerID, ThreadID: w.ThreadID,
-		TurnID: w.TurnID, TurnAttempt: w.TurnAttempt, Ts: parseTime(w.Ts),
-		Type: w.Type, Source: w.Source, Visibility: w.Visibility,
-		Controller: w.Controller, ModeEpoch: w.ModeEpoch,
-		Terminal: w.Terminal, TaskState: w.TaskState, Reason: w.Reason,
+		Session: w.Session, ComputerID: w.ComputerID, TurnID: w.TurnID, Ts: parseTime(w.Ts),
+		Type: w.Type, Controller: w.Controller, ModeEpoch: w.ModeEpoch,
 		Payload: w.Payload, Raw: json.RawMessage(f.Data),
 	}, true
 }

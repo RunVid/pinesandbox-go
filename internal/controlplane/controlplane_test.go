@@ -320,6 +320,234 @@ func TestCreateComputer_CapacityExceeded(t *testing.T) {
 	}
 }
 
+// TestCreateComputer_CreateRateLimited: a 429 COMPUTER_CREATE_RATE_LIMITED is its own typed
+// refusal — the two 429 sentinels never match each other's code — that keeps the server's
+// message and Retry-After and is sent exactly once, even on a create_id create.
+func TestCreateComputer_CreateRateLimited(t *testing.T) {
+	for _, tc := range []struct {
+		code                string
+		rateLimit, capacity bool
+	}{
+		{"COMPUTER_CREATE_RATE_LIMITED", true, false},
+		{"COMPUTER_CAPACITY_EXCEEDED", false, true},
+		{"RATE_LIMITED", false, false},
+	} {
+		t.Run(tc.code, func(t *testing.T) {
+			calls := 0
+			c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				w.Header().Set("Retry-After", "17")
+				w.WriteHeader(429)
+				fmt.Fprintf(w, `{"code":%q,"message":"This project has started 5 new Computers in the last minute. Nothing was created; try again in 17 seconds."}`, tc.code)
+			}, &fakeSource{initial: "jws1"})
+			slept := recordSleeps(c)
+			_, err := c.CreateComputer(context.Background(), map[string]any{"timeout": 300, "create_id": "0190aaaa-bbbb-7ccc-8ddd-eeeeffff0000"})
+			if got := errors.Is(err, ErrCreateRateLimited); got != tc.rateLimit {
+				t.Fatalf("errors.Is(ErrCreateRateLimited) = %v for %T (%v)", got, err, err)
+			}
+			if got := errors.Is(err, ErrCapacityExceeded); got != tc.capacity {
+				t.Fatalf("errors.Is(ErrCapacityExceeded) = %v for %T (%v)", got, err, err)
+			}
+			if tc.rateLimit {
+				var rl *CreateRateLimitedError
+				if !errors.As(err, &rl) || rl.Status != 429 || rl.Code != tc.code || rl.RetryAfter != 17*time.Second {
+					t.Fatalf("err = %#v, want *CreateRateLimitedError{429, %s, RetryAfter 17s}", err, tc.code)
+				}
+				if !strings.Contains(err.Error(), "try again in 17 seconds") {
+					t.Errorf("message = %q, want the server's message", err.Error())
+				}
+			}
+			if calls != 1 || len(*slept) != 0 {
+				t.Errorf("create sent %d times after waits %v, want once with no wait", calls, *slept)
+			}
+		})
+	}
+}
+
+// TestStatusError_RetryAfter: the integer seconds of Retry-After ride every control-plane error
+// (the 503 capacity wait too); an absent or malformed value is zero rather than a guess.
+func TestStatusError_RetryAfter(t *testing.T) {
+	for _, tc := range []struct {
+		name, header string
+		status       int
+		want         time.Duration
+	}{
+		{"seconds", "17", 429, 17 * time.Second},
+		{"capacity unavailable", "30", 503, 30 * time.Second},
+		{"absent", "", 429, 0},
+		{"http date", "Fri, 16 Oct 2026 07:28:00 GMT", 429, 0},
+		{"fractional", "1.5", 429, 0},
+		{"negative", "-5", 429, 0},
+		{"zero", "0", 429, 0},
+		{"overflowing", "9223372036854775807", 429, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				if tc.header != "" {
+					w.Header().Set("Retry-After", tc.header)
+				}
+				code := "COMPUTER_CREATE_RATE_LIMITED"
+				if tc.status == 503 {
+					code = "COMPUTER_CAPACITY_UNAVAILABLE"
+				}
+				w.WriteHeader(tc.status)
+				fmt.Fprintf(w, `{"code":%q,"message":"try again later"}`, code)
+			}, &fakeSource{initial: "jws1"})
+			_, err := c.CreateComputer(context.Background(), map[string]any{"timeout": 300})
+			var got time.Duration
+			var rl *CreateRateLimitedError
+			var se *ServerError
+			switch {
+			case errors.As(err, &rl):
+				got = rl.RetryAfter
+			case errors.As(err, &se):
+				got = se.RetryAfter
+			default:
+				t.Fatalf("err = %T (%v), want a typed control-plane error", err, err)
+			}
+			if got != tc.want {
+				t.Errorf("RetryAfter = %v for Retry-After %q, want %v", got, tc.header, tc.want)
+			}
+		})
+	}
+}
+
+const testCreateID = "0190aaaa-bbbb-7ccc-8ddd-eeeeffff0000"
+
+// busyServer answers the first `busy` creates 503 COMPUTER_CREATE_BUSY with retryAfter (no
+// header when ""), then 202, counting the creates and checking each repeats the same body.
+func busyServer(t *testing.T, busy int, retryAfter string) (http.HandlerFunc, *int) {
+	t.Helper()
+	calls := 0
+	var first string
+	return func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if calls++; calls == 1 {
+			first = string(body)
+		} else if string(body) != first {
+			t.Errorf("repeat %d body = %s, want the first create's %s", calls, body, first)
+		}
+		if calls > busy {
+			w.WriteHeader(202)
+			fmt.Fprint(w, sandboxJSON)
+			return
+		}
+		if retryAfter != "" {
+			w.Header().Set("Retry-After", retryAfter)
+		}
+		w.WriteHeader(503)
+		fmt.Fprint(w, `{"code":"COMPUTER_CREATE_BUSY","message":"Nothing was created; retry after the Retry-After delay."}`)
+	}, &calls
+}
+
+// recordSleeps replaces the busy-create wait with one that records each wait and returns.
+func recordSleeps(c *Client) *[]time.Duration {
+	var slept []time.Duration
+	c.sleeper = func(_ context.Context, d time.Duration) error {
+		slept = append(slept, d)
+		return nil
+	}
+	return &slept
+}
+
+func wantBusyError(t *testing.T, err error) {
+	t.Helper()
+	var se *ServerError
+	if !errors.As(err, &se) || se.Status != 503 || se.Code != "COMPUTER_CREATE_BUSY" {
+		t.Fatalf("err = %#v, want the busy *ServerError", err)
+	}
+}
+
+// TestCreateComputer_BusyKeyedCreateRepeats: a keyed create the server answered busy waits its
+// Retry-After (a second when there is none usable) and repeats the same request once.
+func TestCreateComputer_BusyKeyedCreateRepeats(t *testing.T) {
+	for _, tc := range []struct {
+		retryAfter string
+		want       time.Duration
+	}{{"3", 3 * time.Second}, {"", time.Second}, {"soon", time.Second}} {
+		t.Run(fmt.Sprintf("Retry-After %q", tc.retryAfter), func(t *testing.T) {
+			handler, calls := busyServer(t, 1, tc.retryAfter)
+			c := newTestClient(t, handler, &fakeSource{initial: "jws1"})
+			slept := recordSleeps(c)
+			info, err := c.CreateComputer(context.Background(), map[string]any{"timeout": 300, "create_id": testCreateID})
+			if err != nil || info.ID != "pine-abc" {
+				t.Fatalf("info=%+v err=%v, want the repeat's runtime", info, err)
+			}
+			if *calls != 2 || len(*slept) != 1 || (*slept)[0] != tc.want {
+				t.Fatalf("creates=%d waits=%v, want 2 creates after one %v wait", *calls, *slept, tc.want)
+			}
+		})
+	}
+}
+
+// TestCreateComputer_BusyNotRepeated: an unkeyed create may have no safe repeat, and no other
+// refusal is busy — each returns its error after the one create, with no wait.
+func TestCreateComputer_BusyNotRepeated(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		code   string
+		keyed  bool
+	}{
+		{"unkeyed busy", 503, "COMPUTER_CREATE_BUSY", false},
+		{"capacity unavailable", 503, "COMPUTER_CAPACITY_UNAVAILABLE", true},
+		{"create rate limited", 429, "COMPUTER_CREATE_RATE_LIMITED", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				w.Header().Set("Retry-After", "1")
+				w.WriteHeader(tc.status)
+				fmt.Fprintf(w, `{"code":%q,"message":"not now"}`, tc.code)
+			}, &fakeSource{initial: "jws1"})
+			slept := recordSleeps(c)
+			body := map[string]any{"timeout": 300}
+			if tc.keyed {
+				body["create_id"] = testCreateID
+			}
+			_, err := c.CreateComputer(context.Background(), body)
+			if err == nil || !strings.Contains(err.Error(), "not now") {
+				t.Fatalf("err = %v, want the server's refusal", err)
+			}
+			if calls != 1 || len(*slept) != 0 {
+				t.Fatalf("creates=%d waits=%v, want one create and no wait", calls, *slept)
+			}
+		})
+	}
+}
+
+// TestCreateComputer_BusyRepeatsAreBounded: a create the server keeps answering busy repeats
+// ten times, then returns the busy error as a *ServerError.
+func TestCreateComputer_BusyRepeatsAreBounded(t *testing.T) {
+	handler, calls := busyServer(t, 1000, "1")
+	c := newTestClient(t, handler, &fakeSource{initial: "jws1"})
+	slept := recordSleeps(c)
+	_, err := c.CreateComputer(context.Background(), map[string]any{"timeout": 300, "create_id": testCreateID})
+	wantBusyError(t, err)
+	if *calls != 11 || len(*slept) != 10 {
+		t.Fatalf("creates=%d waits=%d, want 11 creates after 10 waits", *calls, len(*slept))
+	}
+}
+
+// TestCreateComputer_BusyWaitPastDeadlineReturns: when the busy wait would not fit before the
+// caller's deadline, the create returns the busy error at once instead of waiting.
+func TestCreateComputer_BusyWaitPastDeadlineReturns(t *testing.T) {
+	handler, calls := busyServer(t, 1000, "2")
+	c := newTestClient(t, handler, &fakeSource{initial: "jws1"})
+	c.sleeper = func(context.Context, time.Duration) error {
+		t.Error("waited although the wait would outlast the deadline")
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_, err := c.CreateComputer(ctx, map[string]any{"timeout": 300, "create_id": testCreateID})
+	wantBusyError(t, err)
+	if ctx.Err() != nil || *calls != 1 {
+		t.Fatalf("ctx.Err()=%v creates=%d, want one create returned before the deadline", ctx.Err(), *calls)
+	}
+}
+
 // TestErrorCarriesResourceContext: a control-plane failure is self-describing — the error
 // string names WHICH host, WHICH operation (`GET /sandboxes/<id>`), and the request id.
 func TestErrorCarriesResourceContext(t *testing.T) {

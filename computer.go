@@ -498,6 +498,7 @@ func (c *Computer) Attach(ctx context.Context, conn *Connection, opts AttachOpti
 	}
 
 	c.mu.Lock()
+	coord.QualifyWith(res.ComputerToken)
 	c.conn, c.sandbox, c.coord, c.computerToken = conn, sandbox, coord, res.ComputerToken
 	c.ephemeral = opts.Ephemeral
 	c.persistenceMode = res.PersistenceMode
@@ -535,6 +536,7 @@ func (c *Computer) adopt(conn *Connection, sandboxID, computerToken, status stri
 	if err != nil {
 		return err
 	}
+	coord.QualifyWith(computerToken)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.conn = conn

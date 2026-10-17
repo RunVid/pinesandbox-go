@@ -11,6 +11,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
+	"strconv"
+	"strings"
+	"time"
 
 	"go.pinesandbox.io/computer/internal/base/problem"
 	"go.pinesandbox.io/computer/internal/base/transport"
@@ -21,14 +25,15 @@ import (
 // rides the path, e.g. `GET /sandboxes/<id>` — and the gateway's X-Request-Id); they render
 // once via the shared ContextSuffix, matching the coordinator/token error shape.
 type cpBase struct {
-	Status    int
-	Code      string // the body's machine `code`, when present
-	Msg       string
-	Body      string // the raw response body, for support/debugging
-	Host      string
-	Op        string // "<METHOD> <path>" (query-stripped)
-	RequestID string
-	Cause     error
+	Status     int
+	Code       string // the body's machine `code`, when present
+	Msg        string
+	Body       string // the raw response body, for support/debugging
+	Host       string
+	Op         string // "<METHOD> <path>" (query-stripped)
+	RequestID  string
+	RetryAfter time.Duration // the Retry-After header's integer seconds; 0 when absent or malformed
+	Cause      error
 }
 
 func (b cpBase) Unwrap() error { return b.Cause }
@@ -93,19 +98,35 @@ func (e *CapacityExceededError) Error() string { return cpErr(e.cpBase) }
 
 func (e *CapacityExceededError) Is(target error) bool { return target == ErrCapacityExceeded }
 
+// ErrCreateRateLimited is the errors.Is target for a create refused because the project has
+// started as many new Computers in the last minute as it may (429 COMPUTER_CREATE_RATE_LIMITED).
+// Nothing was provisioned; the SDK does not retry — the caller decides, after RetryAfter.
+var ErrCreateRateLimited = errors.New("pinesandbox: project is at its per-minute Computer create limit")
+
+// createRateLimitedCode is the lifecycle server's machine code for ErrCreateRateLimited.
+const createRateLimitedCode = "COMPUTER_CREATE_RATE_LIMITED"
+
+// CreateRateLimitedError: 429 COMPUTER_CREATE_RATE_LIMITED — errors.Is(err, ErrCreateRateLimited).
+type CreateRateLimitedError struct{ cpBase }
+
+func (e *CreateRateLimitedError) Error() string { return cpErr(e.cpBase) }
+
+func (e *CreateRateLimitedError) Is(target error) bool { return target == ErrCreateRateLimited }
+
 // statusError maps a non-OK control-plane response to a typed error, mirroring the Ruby
 // raise_for_status!. method/path/host/the X-Request-Id header stamp the resource spine (WHICH
 // operation on WHICH host, plus the precision handle) so a create/get/destroy/pause/resume
 // failure is self-describing in a generic handler.
 func statusError(method, path, host string, resp *transport.Response) error {
 	b := cpBase{
-		Status:    resp.Status,
-		Code:      statusCode(resp.Body),
-		Msg:       statusMessage(resp.Status, resp.Body),
-		Body:      string(resp.Body),
-		Host:      host,
-		Op:        transport.Operation(method, path),
-		RequestID: resp.Headers.Get("X-Request-Id"),
+		Status:     resp.Status,
+		Code:       statusCode(resp.Body),
+		Msg:        statusMessage(resp.Status, resp.Body),
+		Body:       string(resp.Body),
+		Host:       host,
+		Op:         transport.Operation(method, path),
+		RequestID:  resp.Headers.Get("X-Request-Id"),
+		RetryAfter: retryAfter(resp.Headers.Get("Retry-After")),
 	}
 	status := resp.Status
 	switch {
@@ -123,11 +144,23 @@ func statusError(method, path, host string, resp *transport.Response) error {
 		return &UnprocessableEntityError{b}
 	case status == 429 && b.Code == capacityExceededCode:
 		return &CapacityExceededError{b}
+	case status == 429 && b.Code == createRateLimitedCode:
+		return &CreateRateLimitedError{b}
 	case status >= 500 && status <= 599:
 		return &ServerError{b}
 	default:
 		return &ControlPlaneError{b}
 	}
+}
+
+// retryAfter parses the integer-seconds Retry-After the lifecycle server sends. An absent,
+// non-positive, overflowing or otherwise malformed value (including the HTTP-date form) is 0.
+func retryAfter(v string) time.Duration {
+	n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+	if err != nil || n <= 0 || n > math.MaxInt64/int64(time.Second) {
+		return 0
+	}
+	return time.Duration(n) * time.Second
 }
 
 // statusCode returns the {code,message} body's machine code, or "" when absent.

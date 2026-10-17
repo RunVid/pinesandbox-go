@@ -11,19 +11,21 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"go.pinesandbox.io/computer/internal/base/problem"
-	"go.pinesandbox.io/computer/internal/base/spec"
 	"go.pinesandbox.io/computer/internal/base/transport"
 	"go.pinesandbox.io/computer/internal/bind"
 )
 
-func newTestClient(t *testing.T, handler http.HandlerFunc) *Client {
+func newTestClient(t *testing.T, handler http.HandlerFunc, opts ...transport.Option) *Client {
 	t.Helper()
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
-	raw := transport.New("http", strings.TrimPrefix(srv.URL, "http://"))
-	return NewClient(raw, 1)
+	raw := transport.New("http", strings.TrimPrefix(srv.URL, "http://"), opts...)
+	c := NewClient(raw, 1)
+	c.sleep = func(context.Context, time.Duration) error { return nil }
+	return c
 }
 
 func TestBindPubkey(t *testing.T) {
@@ -443,13 +445,12 @@ func TestMalformedTypedResponses(t *testing.T) {
 	}
 }
 
-func TestSpecVersionMismatch(t *testing.T) {
+func TestGatewayMarkerDoesNotOverrideRuntimeContract(t *testing.T) {
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Computer-Spec-Version", "2")
 		fmt.Fprint(w, `{"sessions":[]}`)
 	})
-	var me *spec.MismatchError
-	if _, err := c.ListSessions(context.Background(), "ct_"); !errors.As(err, &me) {
-		t.Fatalf("err = %T (%v), want *spec.MismatchError", err, err)
+	if _, err := c.ListSessions(context.Background(), "ct_"); err != nil {
+		t.Fatalf("gateway marker rejected a runtime response: %v", err)
 	}
 }

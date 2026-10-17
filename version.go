@@ -13,7 +13,7 @@ package pinesandbox
 
 // Version is this SDK's release version. SDK patches ship independently within
 // the shared compatibility minor.
-const Version = "0.3.16"
+const Version = "0.3.17"
 
 // specs/check-version-identity.py reads this constant (SpecVersion = <n>) and
 // checks it against the API spec and the other SDKs.

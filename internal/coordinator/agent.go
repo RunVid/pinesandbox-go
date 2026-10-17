@@ -5,32 +5,55 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
+	"strconv"
+	"time"
 
+	"go.pinesandbox.io/computer/internal/base/problem"
 	"go.pinesandbox.io/computer/internal/base/sse"
+	"go.pinesandbox.io/computer/internal/base/transport"
 )
 
-// ---- agent track (/v1/sessions/{name}/agent[/*]) ----
-// Mutations (run/steer/answer/cancel/reset) are ct_-only; reads (task/result/events)
-// accept ct_ OR the session-matching ps_. The caller passes the right token.
+// ---- agent track (/v2/sessions/{name}/agent[/*]) ----
+// Work is addressed by turn: run and answer return the turn to save, wait reads it,
+// and answer/steer/cancel take its ID. Mutations (run/steer/answer/cancel/reset) are
+// ct_-only; reads (task/turns/events) accept ct_ OR the session-matching ps_. The
+// caller passes the right token.
 
-// AgentRunOptions are the optional run knobs. Context/Constraints are arbitrary JSON
-// (object or string); Skills is a name list. A nil field is omitted from the body.
-// Env is caller-supplied credentials/configuration delivered to the session env
-// file ($SESSION_SECRETS), never model-visible text — see the spec's SessionSecrets schema
-// for naming rules and lifecycle (ephemeral; re-send after re-attach).
-type AgentRunOptions struct {
-	Context     any
-	Skills      []string
-	Constraints any
-	Secrets     map[string]string
+// AgentRunConstraints bounds a run's token usage and elapsed time. Zero leaves
+// the corresponding limit at the Computer's default.
+type AgentRunConstraints struct {
+	MaxTokens int   `json:"max_tokens,omitempty"`
+	MaxWallMs int64 `json:"max_wall_ms,omitempty"`
 }
 
-// AgentRun starts a turn (delegate mode — one persistent Task per session). Returns the
-// session's Task, `running` for the duration of this turn.
-func (c *Client) AgentRun(ctx context.Context, token, name, goal string, opts AgentRunOptions) (*AgentTask, error) {
+// AgentRunOptions carries caller context, selected skills and supported budgets.
+// Secrets is caller-supplied credentials/configuration delivered to the session env
+// file ($SESSION_SECRETS), never model-visible text — see the spec's SessionSecrets schema
+// for naming rules and lifecycle (ephemeral; re-send after re-attach).
+//
+// IdempotencyKey names the submission, for example your saved message ID: a run
+// repeated with the same key returns the turn the key admitted instead of starting
+// another. The coordinator does not compare the request body.
+type AgentRunOptions struct {
+	Context        string
+	Skills         []string
+	Constraints    *AgentRunConstraints
+	Secrets        map[string]string
+	IdempotencyKey string
+}
+
+// AgentRun starts a turn and returns it. opts.IdempotencyKey is required: a lost
+// response is resent under it, and the resend names the same turn. When no
+// response arrives within the resend budget, or ctx ends first, the error is a
+// RunUnconfirmedError naming the key to send again.
+func (c *Client) AgentRun(ctx context.Context, token, name, goal string, opts AgentRunOptions) (*AgentTurn, error) {
+	if opts.IdempotencyKey == "" {
+		return nil, fmt.Errorf("pinesandbox: idempotency key is required")
+	}
 	body := map[string]any{"goal": goal}
-	if opts.Context != nil {
+	if opts.Context != "" {
 		body["context"] = opts.Context
 	}
 	if opts.Skills != nil {
@@ -42,96 +65,237 @@ func (c *Client) AgentRun(ctx context.Context, token, name, goal string, opts Ag
 	if len(opts.Secrets) > 0 {
 		body["secrets"] = opts.Secrets
 	}
-	return c.postAgentTask(ctx, c.agentPath(name, "/run"), token, body)
+	headers := map[string]string{"Idempotency-Key": opts.IdempotencyKey}
+	turn, err := c.postAgentTurn(ctx, c.agentPath(name, "/run"), token, body, headers, true)
+	// A lost response, or ctx ending before one arrived, leaves the run unconfirmed.
+	ctxEnded := errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+	if err != nil && (lostResponse(err) || ctxEnded) {
+		return nil, &RunUnconfirmedError{IdempotencyKey: opts.IdempotencyKey, Err: err}
+	}
+	return turn, err
 }
 
-// AgentSteerOptions optionally pin the steer to a turn (concurrency guard)
-// and/or deliver secrets (same SessionSecrets contract as AgentRunOptions.Secrets —
-// merged into the session secrets file before the steer is delivered).
+// maxTurnHold bounds one server-side wait. It stays below the transport's 30s
+// fallback deadline so a hold never times out a caller without a context deadline.
+const maxTurnHold = 25 * time.Second
+
+// AgentWait reads a turn, holding while it is running or canceling. It repeats the
+// bounded server wait until the turn leaves those states or timeout elapses, then
+// returns the turn as it is; a zero timeout reads once. A read whose response was
+// lost, or whose problem is marked retryable, is read again within the timeout
+// after retryDelay; any other error is returned. It never cancels the turn or
+// follows NextTurnID. ctx bounds the whole call.
+func (c *Client) AgentWait(ctx context.Context, token, name, turnID string, timeout time.Duration) (*AgentTurn, error) {
+	if turnID == "" {
+		return nil, fmt.Errorf("pinesandbox: turn ID is required")
+	}
+	path := c.agentPath(name, "/turns/"+url.PathEscape(turnID))
+	deadline := time.Now().Add(timeout)
+	failures := 0
+	for {
+		hold := min(time.Until(deadline)/time.Second, maxTurnHold/time.Second)
+		raw, err := c.getJSON(ctx, path+"?wait_seconds="+strconv.Itoa(max(int(hold), 0)), token)
+		if err != nil {
+			var apiErr *problem.APIError
+			retryable := lostResponse(err) || (errors.As(err, &apiErr) && apiErr.Retryable)
+			if !retryable || !time.Now().Before(deadline) {
+				return nil, err
+			}
+			failures++
+			if serr := c.sleep(ctx, min(retryDelay(failures, err), time.Until(deadline))); serr != nil {
+				return nil, errors.Join(err, serr)
+			}
+			continue
+		}
+		failures = 0
+		turn, err := parseAgentTurn(raw)
+		if err != nil {
+			return nil, err
+		}
+		if (turn.State != "running" && turn.State != "canceling") || !time.Now().Before(deadline) {
+			return turn, nil
+		}
+		if hold <= 0 {
+			// The Computer holds whole seconds: wait out a remainder under a
+			// second here, then read the turn once more as it is.
+			if err := c.sleep(ctx, time.Until(deadline)); err != nil {
+				return nil, err
+			}
+		}
+	}
+}
+
+// AgentSteerOptions deliver secrets with the steer (same SessionSecrets contract as
+// AgentRunOptions.Secrets), only once the steer passes every check.
 type AgentSteerOptions struct {
-	ExpectedTurnID string // omitted when empty
-	TurnAttempt    *int   // omitted when nil
-	Secrets        map[string]string
+	Secrets map[string]string
 }
 
-// AgentSteer injects guidance into the running turn. Returns the updated Task.
-func (c *Client) AgentSteer(ctx context.Context, token, name, text string, opts AgentSteerOptions) (*AgentTask, error) {
-	body := map[string]any{"text": text}
-	if opts.ExpectedTurnID != "" {
-		body["expected_turn_id"] = opts.ExpectedTurnID
-	}
-	if opts.TurnAttempt != nil {
-		body["turn_attempt"] = *opts.TurnAttempt
-	}
+// AgentSteer adds guidance to a running turn and returns it. It is never retried:
+// a conflict at a completion boundary does not prove the text was not delivered.
+func (c *Client) AgentSteer(ctx context.Context, token, name, turnID, text string, opts AgentSteerOptions) (*AgentTurn, error) {
+	body := map[string]any{"turn_id": turnID, "text": text}
 	if len(opts.Secrets) > 0 {
 		body["secrets"] = opts.Secrets
 	}
-	return c.postAgentTask(ctx, c.agentPath(name, "/steer"), token, body)
+	return c.postAgentTurn(ctx, c.agentPath(name, "/steer"), token, body, nil, false)
 }
 
-// AgentAnswerOptions optionally guards against answering a stale turn and/or
-// delivers secrets through the protected session file before resolving the ask.
+// AgentAnswerOptions deliver secrets with the answer through the protected session
+// file, once, before the answer's turn is admitted: a failed delivery leaves the
+// question open.
 type AgentAnswerOptions struct {
-	ExpectedTurnID string // omitted when empty
-	Secrets        map[string]string
+	Secrets map[string]string
 }
 
-// AgentAnswer preserves the original convenience signature. Use
-// AgentAnswerWithOptions when the answer needs protected secret delivery.
-func (c *Client) AgentAnswer(ctx context.Context, token, name, requestID, answer, expectedTurnID string) (*AgentTask, error) {
-	return c.AgentAnswerWithOptions(ctx, token, name, requestID, answer, AgentAnswerOptions{
-		ExpectedTurnID: expectedTurnID,
-	})
-}
-
-// AgentAnswerWithOptions responds to an agent's clarifying question and
-// returns the updated Task.
-func (c *Client) AgentAnswerWithOptions(ctx context.Context, token, name, requestID, answer string, opts AgentAnswerOptions) (*AgentTask, error) {
-	body := map[string]any{"request_id": requestID, "answer": answer}
-	if opts.ExpectedTurnID != "" {
-		body["expected_turn_id"] = opts.ExpectedTurnID
-	}
+// AgentAnswer answers the question turnID asked and returns the turn the answer
+// opened. Repeating the same answer returns that same turn, so a lost response is
+// resent; a different answer to an answered turn is a conflict.
+func (c *Client) AgentAnswer(ctx context.Context, token, name, turnID, answer string, opts AgentAnswerOptions) (*AgentTurn, error) {
+	body := map[string]any{"turn_id": turnID, "answer": answer}
 	if len(opts.Secrets) > 0 {
 		body["secrets"] = opts.Secrets
 	}
-	return c.postAgentTask(ctx, c.agentPath(name, "/answer"), token, body)
+	return c.postAgentTurn(ctx, c.agentPath(name, "/answer"), token, body, nil, true)
 }
 
-// AgentCancel cancels the running turn. Returns the updated Task.
-func (c *Client) AgentCancel(ctx context.Context, token, name string) (*AgentTask, error) {
-	return c.postAgentTask(ctx, c.agentPath(name, "/cancel"), token, map[string]any{})
+// AgentCancel cancels turnID while it runs and returns the turn. A waiting
+// question is closed: its turn ends canceled and can no longer be answered. An
+// answered turn is a 409 /errors/stale-turn: cancel the turn its answer opened.
+// Any other ended turn is returned unchanged, so a lost response is resent.
+func (c *Client) AgentCancel(ctx context.Context, token, name, turnID string) (*AgentTurn, error) {
+	return c.postAgentTurn(ctx, c.agentPath(name, "/cancel"), token, map[string]any{"turn_id": turnID}, nil, true)
 }
 
-// AgentReset clears the session's persistent agent thread (memory). Returns the updated Task.
-func (c *Client) AgentReset(ctx context.Context, token, name string) (*AgentTask, error) {
-	return c.postAgentTask(ctx, c.agentPath(name, "/reset"), token, map[string]any{})
-}
-
-// AgentTask returns the session's current Task (state/goal/usage/turn ids).
-func (c *Client) AgentTask(ctx context.Context, token, name string) (*AgentTask, error) {
-	raw, err := c.getJSON(ctx, c.agentPath(name, ""), token)
+// AgentReset clears the session's persistent agent thread (memory). Returns the Task.
+func (c *Client) AgentReset(ctx context.Context, token, name string, opts AgentTaskOptions) (*AgentTask, error) {
+	if opts.ExpectedTaskID == "" {
+		return nil, fmt.Errorf("pinesandbox: expected task ID is required to reset memory")
+	}
+	raw, err := c.postJSON(ctx, c.guardedAgentPath(name, "/reset", opts.ExpectedTaskID), token, map[string]any{})
 	if err != nil {
 		return nil, err
 	}
 	return parseAgentTask(raw)
 }
 
-// AgentResult returns the latest finished turn's result.
-func (c *Client) AgentResult(ctx context.Context, token, name string) (*AgentResult, error) {
-	raw, err := c.getJSON(ctx, c.agentPath(name, "/result"), token)
-	if err != nil {
-		return nil, err
-	}
-	return parseAgentResult(raw)
+// AgentTaskOptions binds a read or memory reset to the Task the caller observed.
+type AgentTaskOptions struct {
+	ExpectedTaskID string
 }
 
-// postAgentTask POSTs body and decodes the Task response shared by all agent mutations.
-func (c *Client) postAgentTask(ctx context.Context, path, token string, body any) (*AgentTask, error) {
-	raw, err := c.postJSON(ctx, path, token, body)
+// AgentTask returns the session's Task and its latest turn.
+func (c *Client) AgentTask(ctx context.Context, token, name string, opts AgentTaskOptions) (*AgentTask, error) {
+	raw, err := c.getJSON(ctx, c.guardedAgentPath(name, "", opts.ExpectedTaskID), token)
 	if err != nil {
 		return nil, err
 	}
 	return parseAgentTask(raw)
+}
+
+// AgentTurns lists the retained turns, oldest first.
+func (c *Client) AgentTurns(ctx context.Context, token, name string, opts AgentTaskOptions) ([]AgentTurn, error) {
+	raw, err := c.getJSON(ctx, c.guardedAgentPath(name, "/turns", opts.ExpectedTaskID), token)
+	if err != nil {
+		return nil, err
+	}
+	var w struct {
+		Turns []json.RawMessage `json:"turns"`
+	}
+	if err := json.Unmarshal(raw, &w); err != nil {
+		return nil, fmt.Errorf("pinesandbox: decode agent turns: %w", err)
+	}
+	turns := make([]AgentTurn, 0, len(w.Turns))
+	for _, item := range w.Turns {
+		turn, err := parseAgentTurn(item)
+		if err != nil {
+			return nil, err
+		}
+		turns = append(turns, *turn)
+	}
+	return turns, nil
+}
+
+func (c *Client) guardedAgentPath(name, suffix, taskID string) string {
+	path := c.agentPath(name, suffix)
+	if taskID != "" {
+		path += "?" + url.Values{"expected_task_id": {taskID}}.Encode()
+	}
+	return path
+}
+
+// resendBudget bounds the waits before agent work whose response was lost is
+// sent again: long enough to outlast a coordinator restart. ctx can end it
+// sooner.
+const resendBudget = 30 * time.Second
+
+// retryDelay is the wait before retry attempt after err: growing from a second
+// to at most five, and never shorter than the response's Retry-After.
+func retryDelay(attempt int, err error) time.Duration {
+	var retryAfter time.Duration
+	if apiErr := (*problem.APIError)(nil); errors.As(err, &apiErr) {
+		retryAfter = apiErr.RetryAfter
+	}
+	return max(min(time.Second<<min(attempt-1, 3), 5*time.Second), retryAfter)
+}
+
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+// postAgentTurn POSTs body and decodes the turn every agent work mutation returns.
+// Set resend only when sending the request again names the same turn: a run with
+// its key, an answer, a cancel. A lost response is then sent again.
+func (c *Client) postAgentTurn(ctx context.Context, path, token string, body any, headers map[string]string, resend bool) (*AgentTurn, error) {
+	b, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("pinesandbox: marshal request body: %w", err)
+	}
+	var waited time.Duration
+	for attempt := 1; ; attempt++ {
+		resp, err := c.send(ctx, coordReq{method: "POST", path: path, token: token, body: b,
+			contentType: "application/json", headers: headers})
+		if err == nil {
+			return parseAgentTurn(resp.Body)
+		}
+		if !resend || !lostResponse(err) {
+			return nil, err
+		}
+		wait := retryDelay(attempt, err)
+		if waited+wait > resendBudget {
+			return nil, err
+		}
+		waited += wait
+		if serr := c.sleep(ctx, wait); serr != nil {
+			// The response is still lost; keep it beside ctx's error.
+			return nil, errors.Join(err, serr)
+		}
+	}
+}
+
+// lostResponse reports whether a request may have reached the Computer without
+// its response reaching the caller: a network fault, a request timeout, or a
+// gateway 502, 503 or 504, which cannot say whether the Computer acted.
+func lostResponse(err error) bool {
+	var conn *transport.ConnectionError
+	var timeout *transport.TimeoutError
+	var apiErr *problem.APIError
+	switch {
+	case errors.As(err, &conn), errors.As(err, &timeout):
+		return true
+	case errors.As(err, &apiErr):
+		return apiErr.Status == http.StatusRequestTimeout || apiErr.Status == http.StatusBadGateway ||
+			apiErr.Status == http.StatusServiceUnavailable || apiErr.Status == http.StatusGatewayTimeout
+	default:
+		return false
+	}
 }
 
 // AgentEvents is a typed, resuming iterator — see stream.go.
@@ -186,7 +350,7 @@ func (c *Client) UploadFile(ctx context.Context, token, name, selector, file str
 // ---- helpers ----
 
 func (c *Client) agentPath(name, suffix string) string {
-	return "/v1/sessions/" + url.PathEscape(name) + "/agent" + suffix
+	return "/v2/sessions/" + url.PathEscape(name) + "/agent" + suffix
 }
 
 func (c *Client) postJSON(ctx context.Context, path, token string, body any) (json.RawMessage, error) {

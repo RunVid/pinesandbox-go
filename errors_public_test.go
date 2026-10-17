@@ -3,6 +3,7 @@ package pinesandbox_test
 import (
 	"errors"
 	"testing"
+	"time"
 
 	pinesandbox "go.pinesandbox.io/computer"
 )
@@ -29,5 +30,15 @@ func TestDataPlaneErrorSemanticsArePublic(_ *testing.T) {
 			errors.Is(err, pinesandbox.ErrSessionNotFound) ||
 			errors.Is(err, pinesandbox.ErrControlNotHeld) ||
 			pinesandbox.IsRetryable(err)
+	}
+}
+
+func TestCreateRateLimitIsPublic(_ *testing.T) {
+	_ = func(err error) time.Duration {
+		var limited *pinesandbox.CreateRateLimitedError
+		if errors.Is(err, pinesandbox.ErrCreateRateLimited) && errors.As(err, &limited) {
+			return limited.RetryAfter
+		}
+		return 0
 	}
 }

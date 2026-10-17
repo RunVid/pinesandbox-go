@@ -73,6 +73,9 @@ func TestSchemaConformance(t *testing.T) {
 		schema string
 	}{
 		{sessionWire{}, "Session"},
+		{agentTaskWire{}, "PublicTask"},
+		{agentTurnWire{}, "PublicTurn"},
+		{agentResultWire{}, "PublicResult"},
 		{bindPubkeyWire{}, "BindPubkey"},
 		{fileEntryWire{}, "FileEntry"},
 		{artifactWire{}, "Artifact"},

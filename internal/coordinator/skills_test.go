@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"testing"
+
+	"go.pinesandbox.io/computer/internal/base/problem"
 )
 
 func TestSkills_ServedAndVersions(t *testing.T) {
@@ -94,18 +96,20 @@ func TestSkills_Authoring(t *testing.T) {
 	var teachBody, refineBody, authorBody map[string]any
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/v1/sessions/s/learn":
+		case "/v1/capabilities":
+			_, _ = io.WriteString(w, `{"protocols":{"agent":[2]}}`)
+		case "/v2/sessions/s/learn":
 			_, _ = io.WriteString(w, `{"author_id":"au1"}`)
-		case "/v1/sessions/s/teach":
+		case "/v2/sessions/s/teach":
 			_ = json.NewDecoder(r.Body).Decode(&teachBody)
 			_, _ = io.WriteString(w, `{"author_id":"au2"}`)
-		case "/v1/sessions/s/refine":
+		case "/v2/sessions/s/refine":
 			_ = json.NewDecoder(r.Body).Decode(&refineBody)
 			_, _ = io.WriteString(w, `{"author_id":"au3"}`)
 		case "/v1/sessions/s/skills":
 			_ = json.NewDecoder(r.Body).Decode(&authorBody)
 			_, _ = io.WriteString(w, `{"draft":"d1"}`)
-		case "/v1/sessions/s/skills/author/au1/cancel":
+		case "/v2/sessions/s/skills/author/au1/cancel":
 			_, _ = io.WriteString(w, `{"cancelled":true}`)
 		default:
 			t.Errorf("unexpected %s", r.URL.Path)
@@ -142,7 +146,7 @@ func TestSkills_Authoring(t *testing.T) {
 
 func TestSkills_AuthorEvents(t *testing.T) {
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/sessions/s/skills/author/au1/events" {
+		if r.URL.Path != "/v2/sessions/s/skills/author/au1/events" {
 			t.Errorf("path = %s", r.URL.Path)
 		}
 		_, _ = io.WriteString(w, "id: 1\ndata: {\"type\":\"progress\"}\n\n")
@@ -181,5 +185,134 @@ func TestSkills_AuthorEvents_ErrStop(t *testing.T) {
 	}
 	if last != "1" {
 		t.Errorf("cursor = %q, want 1", last)
+	}
+}
+
+func TestExplicitAgentProtocolQualification(t *testing.T) {
+	for _, manifest := range []string{`{}`, `null`, `{"protocols":null}`, `{"protocols":{"agent":[1]}}`, `{"protocols":{"agent":[2,2]}}`, `{"protocols":{"agent":[2,0]}}`, `{"protocols":{"agent":["2"]}}`, `{"protocols":{"agent":2}}`} {
+		t.Run(manifest, func(t *testing.T) {
+			c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.WriteString(w, manifest)
+			})
+			err := c.RequirePublicAgent(context.Background(), "ct_")
+			var apiErr *problem.APIError
+			var unsupported *AgentProtocolUnsupportedError
+			if !errors.As(err, &unsupported) || errors.As(err, &apiErr) {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+	for _, status := range []int{401, 403, 404, 503} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(status)
+				_, _ = io.WriteString(w, `{}`)
+			})
+			err := c.RequirePublicAgent(context.Background(), "ct_")
+			if status == 404 {
+				var unsupported *AgentProtocolUnsupportedError
+				if !errors.As(err, &unsupported) {
+					t.Fatalf("got %v; want protocol refusal", err)
+				}
+				return
+			}
+			var apiErr *problem.APIError
+			if !errors.As(err, &apiErr) || apiErr.Status != status {
+				t.Fatalf("got %v; want status %d", err, status)
+			}
+		})
+	}
+}
+
+// A routed gateway 404 is a gone Computer, not missing protocol discovery.
+func TestAuthorQualificationPreservesGoneComputer(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, `{"type":"/errors/sandbox-not-found","status":404,"detail":"runtime gone"}`)
+	})
+	err := c.RequirePublicAgent(context.Background(), "ct_")
+	var gone *SandboxGoneError
+	if !errors.As(err, &gone) {
+		t.Fatalf("got %T (%v), want SandboxGoneError", err, err)
+	}
+}
+
+func TestV2RequestsQualifyOnlyAmbiguousNotFound(t *testing.T) {
+	for _, tc := range []struct {
+		name, body, manifest string
+		status, discoveries  int
+		unsupported, gone    bool
+	}{
+		{"success", `{}`, `{}`, 202, 0, false, false},
+		{"old runtime", "404 page not found\n", `{}`, 404, 1, true, false},
+		{"supported runtime", "404 page not found\n", `{"protocols":{"agent":[2]}}`, 404, 1, false, false},
+		{"missing resource", `{"type":"/errors/session-not-found","status":404}`, `{"protocols":{"agent":[2]}}`, 404, 0, false, false},
+		{"gone computer", `{"type":"/errors/sandbox-not-found","status":404}`, `{}`, 404, 0, false, true},
+		{"forbidden", `{"type":"/errors/feature-disabled","status":403}`, `{}`, 403, 0, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls, discovery := 0, 0
+			c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/v1/capabilities" {
+					discovery++
+					_, _ = io.WriteString(w, tc.manifest)
+					return
+				}
+				calls++
+				w.WriteHeader(tc.status)
+				_, _ = io.WriteString(w, tc.body)
+			})
+			ctx := context.Background()
+			_, learn := c.LearnSkill(ctx, "ct_", "s", "")
+			_, teach := c.TeachSkill(ctx, "ct_", "s", "g", TeachOptions{})
+			_, refine := c.RefineSkill(ctx, "ct_", "s", "sk", 1, "g")
+			_, cancel := c.CancelAuthor(ctx, "ct_", "s", "author")
+			_, run := c.AgentRun(ctx, "ct_", "s", "g", AgentRunOptions{IdempotencyKey: "message-41"})
+			for _, err := range []error{learn, teach, refine, cancel, run} {
+				var unsupported *AgentProtocolUnsupportedError
+				var gone *SandboxGoneError
+				if errors.As(err, &unsupported) != tc.unsupported || errors.As(err, &gone) != tc.gone {
+					t.Fatalf("unexpected error %T: %v", err, err)
+				}
+				if tc.status == 202 && err != nil {
+					t.Fatal(err)
+				}
+				if tc.status != 202 && !tc.unsupported {
+					var apiErr *problem.APIError
+					if !errors.As(err, &apiErr) || apiErr.Status != tc.status {
+						t.Fatalf("lost original error: %v", err)
+					}
+				}
+			}
+			if calls != 5 || discovery != 5*tc.discoveries {
+				t.Fatalf("calls=%d discovery=%d", calls, discovery)
+			}
+		})
+	}
+}
+
+// A session-token read cannot read the capability manifest: an old runtime's
+// unrouted V2 read is qualified with the Computer token instead.
+func TestAgentReadQualifiesWithTheComputerToken(t *testing.T) {
+	var discoveredWith []string
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/capabilities" {
+			discoveredWith = append(discoveredWith, r.Header.Get("X-Pine-Auth"))
+			if r.Header.Get("X-Pine-Auth") != "ct_" {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			_, _ = io.WriteString(w, `{}`)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, "404 page not found\n")
+	})
+	c.QualifyWith("ct_")
+	_, err := c.AgentTask(context.Background(), "ps_", "s", AgentTaskOptions{})
+	var unsupported *AgentProtocolUnsupportedError
+	if !errors.As(err, &unsupported) || len(discoveredWith) != 1 || discoveredWith[0] != "ct_" {
+		t.Fatalf("err=%v discovered with %v", err, discoveredWith)
 	}
 }

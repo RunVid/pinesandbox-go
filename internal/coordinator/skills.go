@@ -3,7 +3,10 @@ package coordinator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/url"
+
+	"go.pinesandbox.io/computer/internal/base/problem"
 )
 
 // ---- served skills (Computer-level) ----
@@ -67,6 +70,37 @@ func (c *Client) Capabilities(ctx context.Context, token string) (json.RawMessag
 	return c.getJSON(ctx, "/v1/capabilities", token)
 }
 
+// RequirePublicAgent explicitly qualifies a binding for UI feature discovery.
+// No cache, fallback or mutation retry.
+func (c *Client) RequirePublicAgent(ctx context.Context, token string) error {
+	raw, err := c.Capabilities(ctx, token)
+	var apiErr *problem.APIError
+	var gone *SandboxGoneError
+	if errors.As(err, &gone) {
+		return err
+	}
+	if err != nil && !(errors.As(err, &apiErr) && apiErr.Status == 404) {
+		return err
+	}
+	var manifest struct {
+		Protocols struct {
+			Agent []int `json:"agent"`
+		} `json:"protocols"`
+	}
+	valid := err == nil && json.Unmarshal(raw, &manifest) == nil
+	seen := map[int]bool{}
+	for _, version := range manifest.Protocols.Agent {
+		if version <= 0 || seen[version] {
+			valid = false
+		}
+		seen[version] = true
+	}
+	if valid && seen[2] {
+		return nil
+	}
+	return &AgentProtocolUnsupportedError{}
+}
+
 // DeleteSkillVersion hides a version and un-serves it if active (raw).
 func (c *Client) DeleteSkillVersion(ctx context.Context, token, name, version string) (json.RawMessage, error) {
 	resp, err := c.do(ctx, "DELETE", "/v1/skills/"+url.PathEscape(name)+"/versions/"+url.PathEscape(version), token, nil)
@@ -85,7 +119,7 @@ func (c *Client) LearnSkill(ctx context.Context, token, name, scaffold string) (
 	if scaffold != "" {
 		body["scaffold"] = scaffold
 	}
-	return c.postJSON(ctx, "/v1/sessions/"+url.PathEscape(name)+"/learn", token, body)
+	return c.postJSON(ctx, "/v2/sessions/"+url.PathEscape(name)+"/learn", token, body)
 }
 
 // TeachOptions are the optional fields for TeachSkill.
@@ -107,14 +141,14 @@ func (c *Client) TeachSkill(ctx context.Context, token, name, goal string, opts 
 	if opts.Scaffold != "" {
 		body["scaffold"] = opts.Scaffold
 	}
-	return c.postJSON(ctx, "/v1/sessions/"+url.PathEscape(name)+"/teach", token, body)
+	return c.postJSON(ctx, "/v2/sessions/"+url.PathEscape(name)+"/teach", token, body)
 }
 
 // RefineSkill revises an existing immutable skill version with operator guidance
 // (raw 202 body; progress and the terminal outcome arrive through AuthorEvents).
 func (c *Client) RefineSkill(ctx context.Context, token, name, skill string, version int, guidance string) (json.RawMessage, error) {
 	body := map[string]any{"name": skill, "version": version, "guidance": guidance}
-	return c.postJSON(ctx, "/v1/sessions/"+url.PathEscape(name)+"/refine", token, body)
+	return c.postJSON(ctx, "/v2/sessions/"+url.PathEscape(name)+"/refine", token, body)
 }
 
 // AuthorSkillOptions are the optional fields for AuthorSkillDraft.
@@ -136,12 +170,12 @@ func (c *Client) AuthorSkillDraft(ctx context.Context, token, name, skillName, s
 	return c.postJSON(ctx, "/v1/sessions/"+url.PathEscape(name)+"/skills", token, body)
 }
 
-// AuthorEvents streams an in-flight author-codex run (same SSE wire as agent events).
+// AuthorEvents streams public activity from an in-flight skill author run.
 func (c *Client) AuthorEvents(ctx context.Context, token, name, authorID, lastEventID string, fn func(data []byte) error) (string, error) {
-	return c.streamJSONEvents(ctx, "/v1/sessions/"+url.PathEscape(name)+"/skills/author/"+url.PathEscape(authorID)+"/events", token, lastEventID, fn)
+	return c.streamJSONEvents(ctx, "/v2/sessions/"+url.PathEscape(name)+"/skills/author/"+url.PathEscape(authorID)+"/events", token, lastEventID, fn)
 }
 
 // CancelAuthor cancels a running author-codex task (raw 202 body).
 func (c *Client) CancelAuthor(ctx context.Context, token, name, authorID string) (json.RawMessage, error) {
-	return c.postJSON(ctx, "/v1/sessions/"+url.PathEscape(name)+"/skills/author/"+url.PathEscape(authorID)+"/cancel", token, map[string]any{})
+	return c.postJSON(ctx, "/v2/sessions/"+url.PathEscape(name)+"/skills/author/"+url.PathEscape(authorID)+"/cancel", token, map[string]any{})
 }

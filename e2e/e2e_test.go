@@ -156,6 +156,32 @@ func TestE2E_J2_Persistence(t *testing.T) {
 	defer teardown(comp)
 
 	driveALittle(t, ctx1, comp, "persist")
+	binding, err := comp.Binding()
+	if err != nil {
+		t.Fatal(err)
+	}
+	savedBinding, err := json.Marshal(binding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var loadedBinding pine.Binding
+	if err := json.Unmarshal(savedBinding, &loadedBinding); err != nil {
+		t.Fatal(err)
+	}
+	secondBackend := newClient(t)
+	comp, err = secondBackend.ReconnectComputer(ctx1, credentials, loadedBinding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	details, err := comp.RuntimeDetails(ctx1)
+	if err != nil || details.ID != binding.RuntimeID || details.State != "running" {
+		t.Fatalf("reconnected runtime: %+v %v", details, err)
+	}
+	_, err = secondBackend.StartComputer(ctx1, credentials, pine.StartOptions{})
+	var retained *pine.RuntimeRetainedError
+	if !errors.As(err, &retained) || retained.RuntimeID != binding.RuntimeID {
+		t.Fatalf("Start should retain live runtime: %v", err)
+	}
 	if _, err := comp.Capture(ctx1); err != nil {
 		teardown(comp)
 		t.Fatalf("Capture: %v", err)
@@ -177,7 +203,7 @@ func TestE2E_J2_Persistence(t *testing.T) {
 	if _, leaked := snap["ciphertext"]; leaked {
 		t.Error("GET /state leaked the ciphertext — the encrypted payload must never leave coord")
 	}
-	if _, err := comp.Stop(ctx1); err != nil {
+	if released, err := comp.Stop(ctx1); err != nil || !released {
 		teardown(comp)
 		t.Fatalf("Stop: %v", err)
 	}
@@ -202,11 +228,24 @@ func TestE2E_J2_Persistence(t *testing.T) {
 	if err := json.Unmarshal(saved, &loaded); err != nil {
 		t.Fatal(err)
 	}
-	re, err := c.StartComputer(ctx2, loaded, pine.StartOptions{})
+	re, err := secondBackend.StartComputer(ctx2, loaded, pine.StartOptions{})
 	if err != nil {
 		t.Fatalf("re-attach (restore) failed: %v", err)
 	}
 	defer teardown(re)
+	if re.SandboxID() == binding.RuntimeID {
+		t.Fatal("Start reused the old generation")
+	}
+	stale, err := c.ReconnectComputer(ctx2, loaded, loadedBinding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if released, err := stale.Stop(ctx2); err != nil || !released {
+		t.Fatalf("stale Stop: %v %v", released, err)
+	}
+	if details, err := re.RuntimeDetails(ctx2); err != nil || details.State != "running" {
+		t.Fatalf("stale worker affected successor: %+v %v", details, err)
+	}
 	if !strings.HasPrefix(re.ComputerToken(), "ct_") {
 		t.Errorf("re-attach token = %q, want a ct_", re.ComputerToken())
 	}
@@ -214,7 +253,7 @@ func TestE2E_J2_Persistence(t *testing.T) {
 	if latest["computer_id"] != credentials.ID {
 		t.Errorf("post-restore snapshot computer_id = %v, want %s", latest["computer_id"], credentials.ID)
 	}
-	if _, err := re.Stop(ctx2); err != nil {
+	if released, err := re.Stop(ctx2); err != nil || !released {
 		t.Fatalf("Stop (re-attached): %v", err)
 	}
 }
@@ -323,7 +362,7 @@ func TestE2E_J4_Agent(t *testing.T) {
 		" in your working directory with the exact bytes \"" + artifactBody +
 		"\" and no trailing newline (use printf, not echo), then complete the task with " +
 		artifactName + " as an output artifact."
-	_, err = sess.Agent().Run(ctx, goal, pine.RunOptions{})
+	turn, err := sess.Agent().Run(ctx, goal, pine.RunOptions{})
 	if err != nil {
 		var ae *pine.APIError
 		if errors.As(err, &ae) && (ae.Status == 501 || ae.Status == 404) {
@@ -331,53 +370,26 @@ func TestE2E_J4_Agent(t *testing.T) {
 		}
 		t.Fatalf("agent.Run: %v", err)
 	}
-	// The Task is persistent (delegate mode); its `state` cycles idle→running→idle per turn.
-	// The turn's OUTCOME is in /agent/result (TaskResult.terminal_reason). Poll the result
-	// until this turn produces a terminal_reason — the outcome assertion (not the wire shape).
+	// Wait for this turn — never the session's latest — until it leaves running.
 	deadline := time.Now().Add(5 * time.Minute)
-	var result *pine.AgentResult
-	for {
-		res, err := sess.Agent().Result(ctx)
-		if err != nil {
-			// While a turn is in flight the result isn't materialized — poll again. Uses the
-			// typed sentinel (dogfoods errors.Is against the live coord problem-type).
-			if errors.Is(err, pine.ErrTaskNotReady) {
-				if time.Now().After(deadline) {
-					t.Fatal("agent turn still in flight past the window")
-				}
-				time.Sleep(5 * time.Second)
-				continue
-			}
-			t.Fatalf("agent.Result: %v", err)
-		}
-		// Typed AgentResult — assert the parse held against the LIVE wire (the typed
-		// spine + Raw escape hatch both populated).
-		if len(res.Raw) == 0 {
-			t.Fatal("agent.Result: typed result has an empty Raw escape hatch")
-		}
-		if res.TerminalReason != "" {
-			if res.Status == "" {
-				t.Errorf("terminal result %q has empty status", res.TerminalReason)
-			}
-			result = res
-			break
-		}
-		// Cross-check the Task state stays a valid enum (idle/running/paused).
-		if st, serr := sess.Agent().Status(ctx); serr == nil {
-			if s := st.State; s != "" && s != "idle" && s != "running" && s != "paused" {
-				t.Fatalf("unexpected Task.state %q (want idle/running/paused)", s)
-			}
-		}
+	for turn.State == pine.TurnRunning || turn.State == pine.TurnCanceling {
 		if time.Now().After(deadline) {
-			t.Fatalf("agent turn produced no terminal_reason within the window")
+			t.Fatal("agent turn still running past the window")
 		}
-		time.Sleep(5 * time.Second)
+		if turn, err = sess.Agent().Wait(ctx, turn.TurnID, 30*time.Second); err != nil {
+			t.Fatalf("agent.Wait: %v", err)
+		}
+		// Typed AgentTurn — assert the parse held against the LIVE wire.
+		if len(turn.Raw) == 0 || turn.TurnID == "" {
+			t.Fatalf("agent.Wait: typed turn lost its identity or Raw: %+v", turn)
+		}
 	}
+	if turn.State != pine.TurnCompleted || turn.Result == nil {
+		t.Fatalf("agent turn state=%q, want %q; turn=%+v", turn.State, pine.TurnCompleted, turn)
+	}
+	result := turn.Result
 	if result.TerminalReason != pine.TerminalCompleted {
 		t.Fatalf("agent turn terminal_reason=%q, want %q; summary=%q", result.TerminalReason, pine.TerminalCompleted, result.Summary)
-	}
-	if result.Status != "ok" {
-		t.Fatalf("agent turn status=%q, want ok; summary=%q", result.Status, result.Summary)
 	}
 	var resultFile *pine.FileRef
 	for i := range result.Artifacts {
@@ -414,8 +426,8 @@ func TestE2E_J4_Agent(t *testing.T) {
 	if durable == nil {
 		t.Fatalf("agent did not register artifact %s; artifacts=%+v", artifactName, artifacts)
 	}
-	if durable.TurnID == "" || durable.SHA256 != resultFile.SHA256 {
-		t.Fatalf("durable artifact metadata = %+v, want nonempty turn_id and sha256=%s", durable, resultFile.SHA256)
+	if durable.TurnID != turn.TurnID || durable.SHA256 != resultFile.SHA256 {
+		t.Fatalf("durable artifact metadata = %+v, want turn_id=%s and sha256=%s", durable, turn.TurnID, resultFile.SHA256)
 	}
 	turnArtifacts, err := sess.ListArtifacts(ctx, durable.TurnID)
 	if err != nil {
@@ -459,7 +471,8 @@ func TestE2E_J5_AgentEventStream(t *testing.T) {
 	defer teardown(comp)
 	sess := driveALittle(t, ctx, comp, "agent-stream")
 
-	if _, err := sess.Agent().Run(ctx, "Confirm the page title contains \"Example\".", pine.RunOptions{}); err != nil {
+	turn, err := sess.Agent().Run(ctx, "Confirm the page title contains \"Example\".", pine.RunOptions{})
+	if err != nil {
 		var ae *pine.APIError
 		if errors.As(err, &ae) && (ae.Status == 501 || ae.Status == 404) {
 			t.Skipf("resident agent not configured here (run → %d); J5 needs PINE_MODEL_* in the environment", ae.Status)
@@ -467,26 +480,30 @@ func TestE2E_J5_AgentEventStream(t *testing.T) {
 		t.Fatalf("agent.Run: %v", err)
 	}
 
-	// Bounded stop: cancel the stream once this turn's result is terminal. The feed is
-	// continuous (it does not EOF when a turn ends), so without this the iterator would
-	// resume forever — the cancel is the deterministic terminator, not a feed EOF.
+	// Bounded stop: cancel the stream once this turn has ended. The feed is continuous
+	// (it does not EOF when a turn ends), so without this the iterator would resume
+	// forever — the cancel is the deterministic terminator, not a feed EOF.
 	streamCtx, stopStream := context.WithCancel(ctx)
 	defer stopStream()
 	go func() {
 		for streamCtx.Err() == nil {
-			if res, rerr := sess.Agent().Result(streamCtx); rerr == nil && res.TerminalReason != "" {
-				time.Sleep(3 * time.Second) // let the turn's terminal event flush to the feed
+			current, werr := sess.Agent().Wait(streamCtx, turn.TurnID, 30*time.Second)
+			if werr != nil {
+				time.Sleep(5 * time.Second)
+				continue
+			}
+			if current.State != pine.TurnRunning && current.State != pine.TurnCanceling {
+				time.Sleep(3 * time.Second) // let the turn's last events flush to the feed
 				stopStream()
 				return
 			}
-			time.Sleep(5 * time.Second)
 		}
 	}()
 
 	var n int
 	var lastID int64
 	sawTerminal := false
-	for ev, serr := range sess.Agent().Events(streamCtx, "") {
+	for ev, serr := range sess.Agent().Events(streamCtx, "", pine.EventsOptions{}) {
 		if serr != nil {
 			// The watchdog's cancel is the expected stop, not a failure.
 			if errors.Is(serr, context.Canceled) || streamCtx.Err() != nil {
@@ -511,7 +528,7 @@ func TestE2E_J5_AgentEventStream(t *testing.T) {
 			}
 			lastID = ev.EventID
 		}
-		if ev.Terminal {
+		if ev.Type == pine.EventResult {
 			sawTerminal = true
 			break
 		}

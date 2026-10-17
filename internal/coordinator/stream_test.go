@@ -2,6 +2,7 @@ package coordinator
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -50,7 +51,7 @@ func TestAgentEvents_StreamDecode(t *testing.T) {
 	var types []string
 	var ids []int64
 	rawOK := true
-	for ev, err := range c.AgentEvents(context.Background(), "ps_", "s", "0") {
+	for ev, err := range c.AgentEvents(context.Background(), "ps_", "s", "0", AgentEventsOptions{}) {
 		if err != nil {
 			t.Fatalf("unexpected stream error: %v", err)
 		}
@@ -119,7 +120,7 @@ func TestAgentEvents_MidStreamDropResumes(t *testing.T) {
 	})
 
 	var types []string
-	for ev, err := range c.AgentEvents(context.Background(), "ps_", "s", "0") {
+	for ev, err := range c.AgentEvents(context.Background(), "ps_", "s", "0", AgentEventsOptions{}) {
 		if err != nil {
 			t.Fatalf("unexpected stream error: %v", err)
 		}
@@ -154,7 +155,7 @@ func TestAgentEvents_ConsumerBreak(t *testing.T) {
 		fmt.Fprint(w, "id: 2\ndata: {\"type\":\"b\"}\n\n")
 	})
 	n := 0
-	for _, err := range c.AgentEvents(context.Background(), "ps_", "s", "") {
+	for _, err := range c.AgentEvents(context.Background(), "ps_", "s", "", AgentEventsOptions{}) {
 		if err != nil {
 			t.Fatalf("unexpected err: %v", err)
 		}
@@ -186,7 +187,7 @@ func TestAgentEvents_Non2xxIsError(t *testing.T) {
 	})
 	var got error
 	n := 0
-	for _, err := range c.AgentEvents(context.Background(), "ps_", "s", "") {
+	for _, err := range c.AgentEvents(context.Background(), "ps_", "s", "", AgentEventsOptions{}) {
 		if err != nil {
 			got = err
 			break
@@ -222,7 +223,7 @@ func TestAgentEvents_OpenFaultBudget(t *testing.T) {
 	c.streamBudget = 2
 
 	var got error
-	for _, err := range c.AgentEvents(context.Background(), "ps_", "s", "") {
+	for _, err := range c.AgentEvents(context.Background(), "ps_", "s", "", AgentEventsOptions{}) {
 		if err != nil {
 			got = err
 			break
@@ -251,7 +252,7 @@ func TestStreamLost_NoDoubleHost(t *testing.T) {
 	c.streamBudget = 2
 
 	var got error
-	for _, err := range c.AgentEvents(context.Background(), "ps_", "s", "") {
+	for _, err := range c.AgentEvents(context.Background(), "ps_", "s", "", AgentEventsOptions{}) {
 		if err != nil {
 			got = err
 			break
@@ -260,7 +261,7 @@ func TestStreamLost_NoDoubleHost(t *testing.T) {
 	if n := strings.Count(got.Error(), "host="); n != 1 {
 		t.Errorf("ErrStreamLost message = %q has %d host= occurrences, want exactly 1", got.Error(), n)
 	}
-	if !strings.Contains(got.Error(), "op=GET /v1/sessions/s/agent/events") {
+	if !strings.Contains(got.Error(), "op=GET /v2/sessions/s/agent/events") {
 		t.Errorf("ErrStreamLost message = %q, want op= from the wrapped ConnectionError", got.Error())
 	}
 }
@@ -279,7 +280,7 @@ func TestAgentEvents_EmptyFeedBudget(t *testing.T) {
 		w.WriteHeader(200) // empty body → clean EOF on return
 	})
 	var got error
-	for _, err := range c.AgentEvents(context.Background(), "ps_", "s", "") {
+	for _, err := range c.AgentEvents(context.Background(), "ps_", "s", "", AgentEventsOptions{}) {
 		if err != nil {
 			got = err
 			break
@@ -307,7 +308,7 @@ func TestAgentEvents_StreamLostCarriesRequestID(t *testing.T) {
 		w.WriteHeader(200) // opens, then empty body → clean EOF, no progress
 	})
 	var got error
-	for _, err := range c.AgentEvents(context.Background(), "ps_", "s", "") {
+	for _, err := range c.AgentEvents(context.Background(), "ps_", "s", "", AgentEventsOptions{}) {
 		if err != nil {
 			got = err
 			break
@@ -319,8 +320,8 @@ func TestAgentEvents_StreamLostCarriesRequestID(t *testing.T) {
 	}
 	// Resource-first: the drop names WHICH feed (op) on WHICH Computer (host) — the primary
 	// spine — plus the request_id precision handle off the last established stream.
-	if !strings.Contains(got.Error(), "op=GET /v1/sessions/s/agent/events") {
-		t.Errorf("ErrStreamLost message = %q, want it to carry op=GET /v1/sessions/s/agent/events", got.Error())
+	if !strings.Contains(got.Error(), "op=GET /v2/sessions/s/agent/events") {
+		t.Errorf("ErrStreamLost message = %q, want it to carry op=GET /v2/sessions/s/agent/events", got.Error())
 	}
 	if !strings.Contains(got.Error(), "host=") {
 		t.Errorf("ErrStreamLost message = %q, want it to carry the host", got.Error())
@@ -330,19 +331,18 @@ func TestAgentEvents_StreamLostCarriesRequestID(t *testing.T) {
 	}
 }
 
-// TestAgentEvents_TypedEnvelopeFields: the spec TaskEvent envelope parses into typed fields
-// (ts, task_state/reason pause semantics, source/visibility/turn_attempt), and a bad ts is
-// tolerated (nil, not a dropped event) — a 200 must never hard-fail on one malformed field.
+// TestAgentEvents_TypedEnvelopeFields: the public event envelope parses into typed fields
+// (ts, turn, control snapshot), and a bad ts is tolerated (nil, not a dropped event) — a
+// 200 must never hard-fail on one malformed field.
 func TestAgentEvents_TypedEnvelopeFields(t *testing.T) {
 	c := streamTestClient(t, 5, func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, "id: 9\ndata: {\"event_id\":9,\"type\":\"needs_input\",\"ts\":\"2026-06-12T10:00:00Z\","+
-			"\"source\":\"agent\",\"visibility\":\"user\",\"controller\":\"human\",\"mode_epoch\":7,"+
-			"\"task_state\":\"paused\",\"reason\":\"needs_input\","+
-			"\"turn_attempt\":2,\"payload\":{\"prompt\":\"which seat?\"}}\n\n")
-		fmt.Fprint(w, "id: 10\ndata: {\"event_id\":10,\"type\":\"result\",\"ts\":\"garbage\",\"terminal\":true}\n\n")
+		fmt.Fprint(w, "id: 9\ndata: {\"event_id\":9,\"type\":\"progress\",\"ts\":\"2026-06-12T10:00:00Z\","+
+			"\"turn_id\":\"turn_t_1\",\"controller\":\"human\",\"mode_epoch\":7,"+
+			"\"payload\":{\"text\":\"Checking seats.\"}}\n\n")
+		fmt.Fprint(w, "id: 10\ndata: {\"event_id\":10,\"type\":\"result\",\"ts\":\"garbage\",\"turn_id\":\"turn_t_1\"}\n\n")
 	})
 	var got []AgentEvent
-	for ev, err := range c.AgentEvents(context.Background(), "ps_", "s", "") {
+	for ev, err := range c.AgentEvents(context.Background(), "ps_", "s", "", AgentEventsOptions{}) {
 		if err != nil {
 			t.Fatalf("err: %v", err)
 		}
@@ -355,14 +355,11 @@ func TestAgentEvents_TypedEnvelopeFields(t *testing.T) {
 		t.Fatalf("got %d events, want 2", len(got))
 	}
 	a := got[0]
-	if a.EventID != 9 || a.Type != "needs_input" {
+	if a.EventID != 9 || a.Type != "progress" {
 		t.Fatalf("event 0 = %+v", a)
 	}
-	if a.TaskState != "paused" || a.Reason != "needs_input" {
-		t.Errorf("pause fields = %q/%q, want paused/needs_input", a.TaskState, a.Reason)
-	}
-	if a.Source != "agent" || a.Visibility != "user" || a.TurnAttempt != 2 {
-		t.Errorf("envelope = source=%q visibility=%q turn_attempt=%d", a.Source, a.Visibility, a.TurnAttempt)
+	if a.TurnID != "turn_t_1" {
+		t.Errorf("turn = %q", a.TurnID)
 	}
 	if a.Controller != "human" || a.ModeEpoch != 7 {
 		t.Errorf("control snapshot = (%q,%d), want (human,7)", a.Controller, a.ModeEpoch)
@@ -375,8 +372,8 @@ func TestAgentEvents_TypedEnvelopeFields(t *testing.T) {
 	}
 	if b := got[1]; b.Ts != nil {
 		t.Errorf("a bad ts should parse to nil, got %v (the event must still decode)", b.Ts)
-	} else if !b.Terminal {
-		t.Error("event 1 should still decode (terminal=true) despite the bad ts")
+	} else if b.Type != "result" || b.TurnID != "turn_t_1" {
+		t.Errorf("event 1 should still decode despite the bad ts: %+v", b)
 	}
 }
 
@@ -402,7 +399,7 @@ func TestAgentEvents_CursorAdvancesOnSkippedFrame(t *testing.T) {
 		fmt.Fprint(w, "id: 6\ndata: {\"type\":\"after\"}\n\n")
 	})
 	var types []string
-	for ev, err := range c.AgentEvents(context.Background(), "ps_", "s", "0") {
+	for ev, err := range c.AgentEvents(context.Background(), "ps_", "s", "0", AgentEventsOptions{}) {
 		if err != nil {
 			t.Fatalf("err: %v", err)
 		}
@@ -429,7 +426,7 @@ func TestAgentEvents_CtxCancelCleanExit(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancelled before the first open
 	n, errs := 0, 0
-	for _, err := range c.AgentEvents(ctx, "ps_", "s", "") {
+	for _, err := range c.AgentEvents(ctx, "ps_", "s", "", AgentEventsOptions{}) {
 		if err != nil {
 			errs++
 			break
@@ -474,5 +471,45 @@ func TestControlEvents_TypedDecode(t *testing.T) {
 	}
 	if len(got[0].Data) == 0 {
 		t.Error("ControlEvent.Data should carry the raw payload")
+	}
+}
+
+func TestAgentEventsPreservesOptionalActivityHint(t *testing.T) {
+	for _, action := range []string{"browser.read", "future.action"} {
+		c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprintf(w, "data: {\"schema_version\":2,\"event_id\":1,\"type\":\"activity\",\"payload\":{\"activity_id\":\"act_1\",\"kind\":\"command\",\"state\":\"completed\",\"action\":%q}}\n\n", action)
+		})
+		var received bool
+		for event, err := range c.AgentEvents(context.Background(), "ps_", "s", "", AgentEventsOptions{}) {
+			if err != nil {
+				t.Fatal(err)
+			}
+			var payload map[string]string
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				t.Fatal(err)
+			}
+			if payload["action"] != action {
+				t.Fatalf("lost hint: %s", event.Payload)
+			}
+			received = true
+			break
+		}
+		if !received {
+			t.Fatal("activity was dropped")
+		}
+	}
+}
+
+func TestAgentFrameKeepsItsStepForPartialHistory(t *testing.T) {
+	event := AgentEvent{Type: "frame", Payload: json.RawMessage(`{"media_type":"image/webp","width":10,"height":10,"data":"UklGRg==","observed_at":"2026-01-01T02:03:04Z","activity":{"activity_id":"act_1","state":"failed","title":"Click Save"}}`)}
+	f, ok := event.Frame()
+	if !ok || string(f.Data) != "RIFF" || f.Activity == nil || f.Activity.ID != "act_1" || f.Activity.State != "failed" || f.ObservedAt == nil {
+		t.Fatalf("frame context = %+v", f)
+	}
+	event.Payload = json.RawMessage(`{"media_type":"image/webp","width":10,"height":10,"data":"UklGRg==","observed_at":42,"activity":"bad"}`)
+	f, ok = event.Frame()
+	if !ok || f.Activity != nil || f.ObservedAt != nil {
+		t.Fatalf("optional metadata lost frame: %+v", f)
 	}
 }

@@ -113,9 +113,9 @@ func TestError_IncludesRequestID(t *testing.T) {
 func TestError_ResourceFirstContext(t *testing.T) {
 	full := (&APIError{
 		Status: 409, ProblemType: "/errors/session-busy", Detail: "busy",
-		Host: "abc123.computer.test.example", Op: "POST /v1/sessions/main/agent/run", RequestID: "req-xyz",
+		Host: "abc123.computer.test.example", Op: "POST /v2/sessions/main/agent/run", RequestID: "req-xyz",
 	}).Error()
-	want := "pinesandbox: 409 /errors/session-busy: busy (host=abc123.computer.test.example, op=POST /v1/sessions/main/agent/run, request_id=req-xyz)"
+	want := "pinesandbox: 409 /errors/session-busy: busy (host=abc123.computer.test.example, op=POST /v2/sessions/main/agent/run, request_id=req-xyz)"
 	if full != want {
 		t.Errorf("Error() = %q, want %q", full, want)
 	}

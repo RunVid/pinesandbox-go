@@ -13,6 +13,7 @@ import (
 
 // sandboxControl is the control-plane subset a SandboxHandle needs (faked in tests).
 type sandboxControl interface {
+	SetIdleTimeout(context.Context, string, int, string) (*controlplane.SandboxInfo, error)
 	Get(ctx context.Context, sandboxID string) (*controlplane.SandboxInfo, error)
 	WaitForChange(ctx context.Context, sandboxID string, previous *controlplane.SandboxInfo) (*controlplane.SandboxInfo, error)
 	Destroy(ctx context.Context, sandboxID string) error
@@ -143,7 +144,7 @@ func (h *SandboxHandle) Stop(ctx context.Context) (bool, error) {
 	if computeReleased(info) {
 		return true, nil
 	}
-	if info.Status == "save_failed" && !info.Retryable {
+	if info.Status == "save_failed" && (info.Retryable == nil || !*info.Retryable) {
 		return false, stopSaveError(info)
 	}
 	if info.Status != "saving" && info.Status != "stopping" {
@@ -207,7 +208,7 @@ func (h *SandboxHandle) Stop(ctx context.Context) (bool, error) {
 }
 
 func stopSaveError(info *controlplane.SandboxInfo) error {
-	return &StopSaveError{Err: fmt.Errorf("runtime %s: %s", info.ID, info.Message), Retryable: info.Retryable}
+	return &StopSaveError{Err: fmt.Errorf("runtime %s: %s", info.ID, info.Message), Retryable: info.Retryable != nil && *info.Retryable}
 }
 
 func computeReleased(info *controlplane.SandboxInfo) bool {

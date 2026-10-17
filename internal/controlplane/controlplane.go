@@ -9,6 +9,7 @@ import (
 
 	"go.pinesandbox.io/computer/internal/base/spec"
 	"go.pinesandbox.io/computer/internal/base/transport"
+	"go.pinesandbox.io/computer/internal/base/wait"
 )
 
 // TokenSource yields the project JWS for the Authorization bearer. forceRefresh re-mints
@@ -20,9 +21,10 @@ type TokenSource interface {
 
 // Client is the control-plane client. Construct it with NewClient.
 type Client struct {
-	raw  *transport.Client
-	src  TokenSource
-	spec spec.Negotiator
+	raw     *transport.Client
+	src     TokenSource
+	spec    spec.Negotiator
+	sleeper func(context.Context, time.Duration) error // the busy-create wait; tests capture it
 }
 
 // NewClient builds a control-plane client over raw (pointed at the control host),
@@ -36,8 +38,19 @@ func NewClient(raw *transport.Client, src TokenSource, specMajor int) *Client {
 			ResponseHeader: "X-Computer-Spec-Version",
 			SupportedMajor: specMajor,
 		},
+		sleeper: wait.Sleep,
 	}
 }
+
+const (
+	// createBusyCode is the lifecycle server's 503 for a create it would not queue during a
+	// burst of the project's creates: busy, not a refusal; nothing was created.
+	createBusyCode = "COMPUTER_CREATE_BUSY"
+	// maxCreateBusyRepeats bounds the repeats of a keyed create the server answered busy.
+	maxCreateBusyRepeats = 10
+	// defaultCreateBusyWait is the wait when a busy answer has no usable Retry-After.
+	defaultCreateBusyWait = time.Second
+)
 
 // CreateComputer provisions a Computer sandbox. The body intentionally contains
 // only caller-owned settings; the lifecycle server expands the project's signed
@@ -50,14 +63,47 @@ func (c *Client) CreateComputer(ctx context.Context, body map[string]any) (*Sand
 	const path = "/computer-sandboxes"
 	// A create ID permits identical retries without extending runtime expiry.
 	createID, _ := body["create_id"].(string)
-	resp, err := c.do(ctx, "POST", path, b, nil, createID != "")
-	if err != nil {
-		return nil, err
+	keyed := createID != ""
+	for repeats := 0; ; repeats++ {
+		resp, err := c.do(ctx, "POST", path, b, nil, keyed)
+		if err != nil {
+			return nil, err
+		}
+		if okStatus(resp.Status, 200, 201, 202) {
+			return ParseSandboxInfo(resp.Body)
+		}
+		statusErr := statusError("POST", path, c.raw.Host(), resp)
+		// The server queues a burst of a project's creates only so far and asks the rest to
+		// come back. A keyed create repeats safely, so it waits and repeats while its deadline
+		// allows; an unkeyed one, any other refusal and the last repeat return the error.
+		delay, busy := createBusyWait(statusErr)
+		if !keyed || !busy || repeats >= maxCreateBusyRepeats || !fitsDeadline(ctx, delay) {
+			return nil, statusErr
+		}
+		if err := c.sleeper(ctx, delay); err != nil {
+			return nil, err
+		}
 	}
-	if !okStatus(resp.Status, 200, 201, 202) {
-		return nil, statusError("POST", path, c.raw.Host(), resp)
+}
+
+// createBusyWait reports whether err is the server's busy answer to a create (503
+// COMPUTER_CREATE_BUSY) and how long to wait before repeating it: its Retry-After, or
+// defaultCreateBusyWait when it sent none.
+func createBusyWait(err error) (time.Duration, bool) {
+	busy, ok := err.(*ServerError)
+	if !ok || busy.Status != 503 || busy.Code != createBusyCode {
+		return 0, false
 	}
-	return ParseSandboxInfo(resp.Body)
+	if busy.RetryAfter > 0 {
+		return busy.RetryAfter, true
+	}
+	return defaultCreateBusyWait, true
+}
+
+// fitsDeadline reports whether waiting d still leaves time before ctx's deadline.
+func fitsDeadline(ctx context.Context, d time.Duration) bool {
+	deadline, ok := ctx.Deadline()
+	return !ok || d < time.Until(deadline)
 }
 
 // Stop admits a durable save-before-release operation. Acceptance is not completion.
@@ -75,6 +121,27 @@ func (c *Client) Stop(ctx context.Context, sandboxID, operationID string) error 
 		return statusError("POST", path, c.raw.Host(), resp)
 	}
 	return nil
+}
+
+// SetIdleTimeout updates the observed runtime once. A lost response or stale
+// observation is returned to the caller; never replay an older policy edit.
+func (c *Client) SetIdleTimeout(ctx context.Context, sandboxID string, seconds int, etag string) (*SandboxInfo, error) {
+	if etag == "" {
+		return nil, fmt.Errorf("pinesandbox: server did not provide a conditional lifecycle observation")
+	}
+	path := "/sandboxes/" + url.PathEscape(sandboxID) + "/idle-timeout"
+	body, err := json.Marshal(map[string]int{"seconds": seconds})
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.do(ctx, "PUT", path, body, map[string]string{"If-Match": etag}, false)
+	if err != nil {
+		return nil, err
+	}
+	if resp.Status != 200 {
+		return nil, statusError("PUT", path, c.raw.Host(), resp)
+	}
+	return ParseSandboxInfo(resp.Body)
 }
 
 // Get fetches a sandbox by id.

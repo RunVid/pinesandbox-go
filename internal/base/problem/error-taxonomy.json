@@ -393,6 +393,16 @@
       "type": "/errors/stop-failed",
       "status": 503,
       "retryable": false
+    },
+    {
+      "type": "/errors/history-expired",
+      "status": 410,
+      "retryable": false
+    },
+    {
+      "type": "/errors/storage-exhausted",
+      "status": 507,
+      "retryable": false
     }
   ]
 }

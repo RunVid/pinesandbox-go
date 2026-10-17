@@ -32,9 +32,6 @@ func TestMultiFieldResponses_ConsciouslyHandled(t *testing.T) {
 		"listHandoffs":     "modeled: HandoffList{Handoffs, NextBefore}",
 		"mintDesktopToken": "modeled: DesktopToken{Token, ExpiresAt}",
 		"observeSession":   "modeled: Observation (typed observe result)",
-		"getAgent":         "modeled: AgentTask (typed envelope + .Raw)",
-		"resetAgentThread": "modeled: AgentTask",
-		"getAgentResult":   "modeled: AgentResult (typed + .Raw)",
 
 		// raw — the method returns the FULL response body as json.RawMessage
 		"getSkill":            "raw: skill body json.RawMessage (full body)",
@@ -49,11 +46,10 @@ func TestMultiFieldResponses_ConsciouslyHandled(t *testing.T) {
 		"sessionEpoch":        "raw: Epoch json.RawMessage (full body)",
 		"claimDownloadOrphan": "raw: ClaimOrphanDownload json.RawMessage (full body)",
 
-		// not exposed — the endpoint is deliberately absent from this SDK
-		"getAgentEventsPage": "not exposed yet (deliberate): the paged task-history read " +
-			"(task-history contract) — first consumer is the portal transcript. " +
-			"When a Go integrator needs history paging, model {events, latest_event_id} as a " +
-			"typed page DTO; do NOT flatten (latest_event_id is the catch-up cursor).",
+		"getAgentV2":           "modeled: AgentTask (public envelope + latest AgentTurn + .Raw)",
+		"getAgentTurnV2":       "modeled: AgentTurn (public envelope + .Raw)",
+		"resetAgentThreadV2":   "modeled: AgentTask",
+		"getAgentEventsPageV2": "not exposed yet: paged history is currently used by Portal",
 
 		// flattened — a subset is returned on purpose (low-value metadata dropped)
 		"listSkills": "flattened: returns the skills array; generated_at is manifest " +

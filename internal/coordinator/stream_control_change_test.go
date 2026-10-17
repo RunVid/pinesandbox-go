@@ -8,7 +8,6 @@ import (
 func TestAgentEventControlChange(t *testing.T) {
 	event := &AgentEvent{
 		Type:       "controller_changed",
-		Source:     "control",
 		Controller: "human",
 		ModeEpoch:  7,
 		Payload: json.RawMessage(`{

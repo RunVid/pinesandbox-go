@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 )
 
 //go:embed error-taxonomy.json
@@ -65,6 +66,8 @@ type APIError struct {
 	Op        string // "<METHOD> <path>" — WHICH operation (empty for the sentinels)
 	RequestID string // body `request_id`, else the X-Request-Id header (0C)
 	Retryable bool   // wire `retryable` (0C) when present, else the taxonomy fallback
+	// RetryAfter is the response's Retry-After in seconds, when it set one.
+	RetryAfter time.Duration
 	// Attach authorization conflict extensions. They identify the winning
 	// integrator-side binding to reload/adopt; Portal never returns a ct_.
 	CurrentBindingRevision *int64

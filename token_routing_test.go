@@ -38,6 +38,10 @@ func TestFacade_TokenRouting_Comprehensive(t *testing.T) {
 	}
 	coordSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		record(r)
+		if r.URL.Path == "/v1/capabilities" {
+			fmt.Fprint(w, `{"protocols":{"agent":[2]}}`)
+			return
+		}
 		if r.URL.Path == "/sessions" && r.Method == "POST" {
 			fmt.Fprintf(w, `{"session":{"name":"s1","token":%q}}`, ps) // give the Session its ps_
 			return
@@ -99,9 +103,10 @@ func TestFacade_TokenRouting_Comprehensive(t *testing.T) {
 	_, _ = sess.AuthorSkill(ctx, "sk", "md", "why", AuthorSkillOptions{})
 	_, _ = sess.AuthorEvents(ctx, "au1", "", noBytes)
 	_, _ = sess.CancelAuthor(ctx, "au1")
-	_, _ = sess.Agent().Status(ctx)
-	_, _ = sess.Agent().Result(ctx)
-	for _, err := range sess.Agent().Events(ctx, "") {
+	_, _ = sess.Agent().Status(ctx, TaskOptions{})
+	_, _ = sess.Agent().Turns(ctx, TaskOptions{})
+	_, _ = sess.Agent().Wait(ctx, "turn_t_1", 0)
+	for _, err := range sess.Agent().Events(ctx, "", EventsOptions{}) {
 		_ = err
 		break
 	}
@@ -110,10 +115,10 @@ func TestFacade_TokenRouting_Comprehensive(t *testing.T) {
 	_, _ = sess.Drive().UploadFile(ctx, "#f", "p")
 	// agent mutations + desktop-token → ct_
 	_, _ = sess.Agent().Run(ctx, "g", RunOptions{})
-	_, _ = sess.Agent().Steer(ctx, "s", SteerOptions{})
-	_, _ = sess.Agent().Answer(ctx, "rq", "ans", "")
-	_, _ = sess.Agent().Cancel(ctx)
-	_, _ = sess.Agent().Reset(ctx)
+	_, _ = sess.Agent().Steer(ctx, "turn_t_1", "s", SteerOptions{})
+	_, _ = sess.Agent().Answer(ctx, "turn_t_1", "ans", AnswerOptions{})
+	_, _ = sess.Agent().Cancel(ctx, "turn_t_1")
+	_, _ = sess.Agent().Reset(ctx, TaskOptions{ExpectedTaskID: "t1"})
 	_, _ = sess.DesktopToken(ctx)
 	// Computer-level → ct_
 	_, _ = comp.Session(ctx, "s1")
@@ -164,24 +169,25 @@ func TestFacade_TokenRouting_Comprehensive(t *testing.T) {
 		"GET /sessions/s1/epoch":                        ps,
 		"POST /sessions/s1/focus":                       ps,
 		"POST /sessions/s1/terminal/recreate":           ps,
-		"POST /v1/sessions/s1/learn":                    ct,
-		"POST /v1/sessions/s1/teach":                    ct,
-		"POST /v1/sessions/s1/refine":                   ct,
+		"POST /v2/sessions/s1/learn":                    ct,
+		"POST /v2/sessions/s1/teach":                    ct,
+		"POST /v2/sessions/s1/refine":                   ct,
 		"POST /v1/sessions/s1/skills":                   ct,
-		"GET /v1/sessions/s1/skills/author/au1/events":  ct,
-		"POST /v1/sessions/s1/skills/author/au1/cancel": ct,
-		"GET /v1/sessions/s1/agent":                     ps,
-		"GET /v1/sessions/s1/agent/result":              ps,
-		"GET /v1/sessions/s1/agent/events":              ps,
+		"GET /v2/sessions/s1/skills/author/au1/events":  ct,
+		"POST /v2/sessions/s1/skills/author/au1/cancel": ct,
+		"GET /v2/sessions/s1/agent":                     ps,
+		"GET /v2/sessions/s1/agent/turns":               ps,
+		"GET /v2/sessions/s1/agent/turns/turn_t_1":      ps,
+		"GET /v2/sessions/s1/agent/events":              ps,
 		"POST /v1/sessions/s1/observe":                  ps,
 		"POST /v1/sessions/s1/computer-use":             ps,
 		"POST /v1/sessions/s1/upload_file":              ps,
 		// ct_ (agent mutations + desktop-token)
-		"POST /v1/sessions/s1/agent/run":     ct,
-		"POST /v1/sessions/s1/agent/steer":   ct,
-		"POST /v1/sessions/s1/agent/answer":  ct,
-		"POST /v1/sessions/s1/agent/cancel":  ct,
-		"POST /v1/sessions/s1/agent/reset":   ct,
+		"POST /v2/sessions/s1/agent/run":     ct,
+		"POST /v2/sessions/s1/agent/steer":   ct,
+		"POST /v2/sessions/s1/agent/answer":  ct,
+		"POST /v2/sessions/s1/agent/cancel":  ct,
+		"POST /v2/sessions/s1/agent/reset":   ct,
 		"POST /v1/sessions/s1/desktop-token": ct,
 		// ct_ (Computer-level)
 		"POST /sessions":                        ct,

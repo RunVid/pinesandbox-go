@@ -1,11 +1,17 @@
 package pinesandbox
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // TestControlSentinels_ErrorsIsBySlug: the agent-lane sentinels match the live wire error by
@@ -148,5 +154,37 @@ func TestErrCapacityExceeded_PublicSurface(t *testing.T) {
 	}
 	if errors.Is(&ControlPlaneError{}, ErrCapacityExceeded) {
 		t.Error("a generic ControlPlaneError must NOT match ErrCapacityExceeded")
+	}
+}
+
+// TestCreateComputer_CreateRateLimitedReachesCaller: a create refused for the project's
+// per-minute rate reaches the caller as ErrCreateRateLimited with the server's Retry-After.
+// The SDK sends the create once and nothing after it: no retry, no readiness wait, no cleanup
+// of a runtime that was never allocated.
+func TestCreateComputer_CreateRateLimitedReachesCaller(t *testing.T) {
+	var requests atomic.Int32
+	control := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		if r.Method != http.MethodPost || r.URL.Path != "/computer-sandboxes" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Retry-After", "42")
+		w.WriteHeader(http.StatusTooManyRequests)
+		fmt.Fprint(w, `{"code":"COMPUTER_CREATE_RATE_LIMITED","message":"Nothing was created; try again in 42 seconds."}`)
+	}))
+	defer control.Close()
+	client := &Client{conn: buildTestConnection(t, control.URL, control.URL)}
+
+	_, err := client.CreateComputer(context.Background(), AttachOptions{})
+
+	if !errors.Is(err, ErrCreateRateLimited) || errors.Is(err, ErrCapacityExceeded) {
+		t.Fatalf("err = %T (%v), want ErrCreateRateLimited only", err, err)
+	}
+	var rl *CreateRateLimitedError
+	if !errors.As(err, &rl) || rl.RetryAfter != 42*time.Second {
+		t.Fatalf("err = %#v, want *CreateRateLimitedError with RetryAfter 42s", err)
+	}
+	if got := requests.Load(); got != 1 {
+		t.Errorf("control plane saw %d requests, want the single create", got)
 	}
 }

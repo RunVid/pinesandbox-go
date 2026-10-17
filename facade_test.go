@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -85,7 +86,7 @@ func TestAttachEndToEnd(t *testing.T) {
 	var attachGeneration int
 	var attachCountry string
 	var bindKeyAssertion string
-	var agentAuth, observeAuth, createAuth string
+	var agentAuth, agentKey, observeAuth, createAuth string
 
 	controlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -131,6 +132,8 @@ func TestAttachEndToEnd(t *testing.T) {
 
 	coordSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.URL.Path == "/v1/capabilities":
+			fmt.Fprint(w, `{"protocols":{"agent":[2]}}`)
 		case r.URL.Path == "/v1/coord/bind-pubkey":
 			fmt.Fprintf(w, `{"pod_uid":"pod-1","coord_boot_id":"boot-1","ephem_pub_x25519":%q}`,
 				base64.RawURLEncoding.EncodeToString(kp.PublicKeyRaw()))
@@ -163,9 +166,9 @@ func TestAttachEndToEnd(t *testing.T) {
 		case r.URL.Path == "/sessions" && r.Method == "POST":
 			createAuth = r.Header.Get("X-Pine-Auth")
 			fmt.Fprintf(w, `{"session":{"name":"s1","token":%q}}`, ps)
-		case r.URL.Path == "/v1/sessions/s1/agent/run":
-			agentAuth = r.Header.Get("X-Pine-Auth")
-			fmt.Fprint(w, `{"task_id":"t1","session":"s1","state":"running","goal":"do it","created_at":"2026-01-02T03:04:05Z"}`)
+		case r.URL.Path == "/v2/sessions/s1/agent/run":
+			agentAuth, agentKey = r.Header.Get("X-Pine-Auth"), r.Header.Get("Idempotency-Key")
+			fmt.Fprint(w, `{"turn_id":"turn_t1_1","state":"running","started_at":"2026-01-02T03:04:05Z","first_event_id":1,"last_event_id":1}`)
 		case r.URL.Path == "/v1/sessions/s1/observe":
 			observeAuth = r.Header.Get("X-Pine-Auth")
 			fmt.Fprint(w, `{"tree":"..."}`)
@@ -217,21 +220,25 @@ func TestAttachEndToEnd(t *testing.T) {
 	if sess.Token() != ps {
 		t.Errorf("session token = %q, want %q", sess.Token(), ps)
 	}
-	task, err := sess.Agent().Run(ctx, "do it", RunOptions{})
+	turn, err := sess.Agent().Run(ctx, "do it", RunOptions{})
 	if err != nil {
 		t.Fatalf("agent.Run: %v", err)
 	}
 	// Assert the facade→coordinator typed parse end-to-end (not just err==nil): the
-	// run returns the typed Task, parsed from the wire, with the Raw escape hatch + a
+	// run returns the typed turn, parsed from the wire, with the Raw escape hatch + a
 	// tolerantly-parsed timestamp.
-	if task.TaskID != "t1" || task.State != "running" || task.Goal != "do it" {
-		t.Errorf("agent.Run typed task = %+v, want task_id=t1 state=running goal=\"do it\"", task)
+	if turn.TurnID != "turn_t1_1" || turn.State != TurnRunning {
+		t.Errorf("agent.Run typed turn = %+v, want turn_t1_1 running", turn)
 	}
-	if task.CreatedAt == nil || task.CreatedAt.Year() != 2026 {
-		t.Errorf("agent.Run task.CreatedAt = %v, want parsed 2026 timestamp", task.CreatedAt)
+	if turn.StartedAt == nil || turn.StartedAt.Year() != 2026 {
+		t.Errorf("agent.Run turn.StartedAt = %v, want parsed 2026 timestamp", turn.StartedAt)
 	}
-	if len(task.Raw) == 0 {
-		t.Error("agent.Run task.Raw escape hatch is empty")
+	if len(turn.Raw) == 0 {
+		t.Error("agent.Run turn.Raw escape hatch is empty")
+	}
+	// Without a caller key, Run supplies one so its own retry names the same turn.
+	if !regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`).MatchString(agentKey) {
+		t.Errorf("agent.Run Idempotency-Key = %q, want a generated UUIDv7", agentKey)
 	}
 	if _, err := sess.Drive().Observe(ctx); err != nil {
 		t.Fatalf("drive.Observe: %v", err)
@@ -603,14 +610,14 @@ func TestSession_TokenRouting(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	_, _ = sess.Agent().Steer(ctx, "go", SteerOptions{})
-	_, _ = sess.Agent().Cancel(ctx)
-	_, _ = sess.Agent().Status(ctx)
+	_, _ = sess.Agent().Steer(ctx, "turn_t1_1", "go", SteerOptions{})
+	_, _ = sess.Agent().Cancel(ctx, "turn_t1_1")
+	_, _ = sess.Agent().Status(ctx, TaskOptions{})
 	_, _ = sess.Drive().Observe(ctx)
 	_, _ = sess.DesktopToken(ctx)
 
-	wantCt := []string{"POST /sessions", "POST /v1/sessions/s1/agent/steer", "POST /v1/sessions/s1/agent/cancel", "POST /v1/sessions/s1/desktop-token"}
-	wantPs := []string{"GET /v1/sessions/s1/agent", "POST /v1/sessions/s1/observe"}
+	wantCt := []string{"POST /sessions", "POST /v2/sessions/s1/agent/steer", "POST /v2/sessions/s1/agent/cancel", "POST /v1/sessions/s1/desktop-token"}
+	wantPs := []string{"GET /v2/sessions/s1/agent", "POST /v1/sessions/s1/observe"}
 	for _, k := range wantCt {
 		if auth[k] != ct {
 			t.Errorf("%s used %q, want ct_ (%q)", k, auth[k], ct)

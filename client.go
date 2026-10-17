@@ -220,7 +220,7 @@ func (c *Client) startComputer(ctx context.Context, id string, key []byte, opts 
 		}
 		if err == nil && !computeReleased(info) {
 			if !recoverRuntime && info.Status != "stopping" {
-				return nil, fmt.Errorf("pinesandbox: Computer still has a runtime; Stop it or Resume retained memory before Start")
+				return nil, &RuntimeRetainedError{RuntimeID: reference.SandboxID, State: info.Status}
 			}
 			handle := newSandboxHandle(c.conn.controlPlane, reference.SandboxID, info.Status)
 			released, err := handle.releaseFailedRuntime(ctx, info)

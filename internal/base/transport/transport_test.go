@@ -19,6 +19,18 @@ func clientFor(t *testing.T, srv *httptest.Server) *Client {
 	return New("http", u)
 }
 
+// Keep the port reserved for the whole request/retry sequence. Closing a
+// listener first lets a concurrent test reuse its port and return a valid HTTP
+// response, turning an intended transport fault into an intermittent success.
+func disconnectingServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		panic(http.ErrAbortHandler)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
 // TestDo_AuthHeaderAndBody: the bearer rides X-Pine-Auth (never the URL); 2xx body returns.
 func TestDo_AuthHeaderAndBody(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -66,7 +78,7 @@ func TestDo_Non2xxToTypedAPIError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := clientFor(t, srv).Do(context.Background(), "POST", "/v1/sessions/x/agent/run", Request{Token: "ct_x"})
+	_, err := clientFor(t, srv).Do(context.Background(), "POST", "/v2/sessions/x/agent/run", Request{Token: "ct_x"})
 	var ae *problem.APIError
 	if !errors.As(err, &ae) {
 		t.Fatalf("want *problem.APIError, got %T: %v", err, err)
@@ -100,10 +112,8 @@ func TestDoRaw_ReturnsNon2xxAsResponse(t *testing.T) {
 
 // TestDoRaw_TransportFaultStillErrors: a real transport fault is still a typed error.
 func TestDoRaw_TransportFaultStillErrors(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
-	u := strings.TrimPrefix(srv.URL, "http://")
-	srv.Close() // nothing is listening now
-	_, err := New("http", u).DoRaw(context.Background(), "GET", "/x", Request{})
+	srv := disconnectingServer(t)
+	_, err := clientFor(t, srv).DoRaw(context.Background(), "GET", "/x", Request{})
 	var ce *ConnectionError
 	if !errors.As(err, &ce) {
 		t.Fatalf("want *ConnectionError, got %T: %v", err, err)
@@ -123,7 +133,7 @@ func TestStream_LiveBodyAndHeaders(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	sr, err := clientFor(t, srv).Stream(context.Background(), "GET", "/v1/sessions/s/agent/events",
+	sr, err := clientFor(t, srv).Stream(context.Background(), "GET", "/v2/sessions/s/agent/events",
 		Request{Token: "ps_x", Accept: "text/event-stream", Headers: map[string]string{"Last-Event-ID": "7"}})
 	if err != nil {
 		t.Fatalf("Stream: %v", err)
@@ -141,12 +151,10 @@ func TestStream_LiveBodyAndHeaders(t *testing.T) {
 	}
 }
 
-// TestStream_TransportFault: a dead server is a typed ConnectionError, not a raw net error.
+// TestStream_TransportFault: a dropped connection is a typed ConnectionError.
 func TestStream_TransportFault(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
-	u := strings.TrimPrefix(srv.URL, "http://")
-	srv.Close()
-	_, err := New("http", u).Stream(context.Background(), "GET", "/x", Request{})
+	srv := disconnectingServer(t)
+	_, err := clientFor(t, srv).Stream(context.Background(), "GET", "/x", Request{})
 	var ce *ConnectionError
 	if !errors.As(err, &ce) {
 		t.Fatalf("want *ConnectionError, got %T: %v", err, err)
@@ -184,11 +192,10 @@ func TestDo_RequestIDFromHeader(t *testing.T) {
 	}
 }
 
-// TestDo_ConnectionFault: an unreachable backend → *ConnectionError, not a raw net error.
+// TestDo_ConnectionFault: a dropped connection → *ConnectionError, not a raw net error.
 func TestDo_ConnectionFault(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	srv := disconnectingServer(t)
 	c := clientFor(t, srv)
-	srv.Close() // now nothing listens → dial fails
 	_, err := c.Do(context.Background(), "GET", "/x", Request{})
 	var ce *ConnectionError
 	if !errors.As(err, &ce) {

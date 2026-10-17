@@ -13,199 +13,203 @@ compatibility line.
 The vanity module and its backing mirror are public. No `GOPRIVATE` setting,
 GitHub account, or package token is required.
 
-## Lifecycle operations
+## Create a Computer
 
-Start restores supported saved state into a fresh runtime and binding. Stop
-saves supported state and releases that runtime. Live sessions and their tokens
-end at Stop. Pause/Resume is a distinct lifecycle: Resume continues the
-retained binding and sessions and never falls back to Start after snapshot loss.
+A **Computer** is the identity and saved browser state you keep. A **runtime** is
+one running allocation of it. A **session** is work inside that runtime.
 
-`StartComputer` is the saved-state operation; `AttachComputer` remains its
-compatible alias. `Computer.Pause(ctx)` and `Computer.Resume(ctx)` wait for
-observed completion, bounded by six minutes or an earlier caller deadline. A
-failed operation retains the existing binding for inspection or retry. Stop
-resumes a paused runtime before saving.
-
-Pause requires a project opt-in and a snapshot-capable runtime. It is off by
-default and enabled per project. Refresh the project token after it is enabled. Removing the grant blocks new pauses while
-preserving Resume and Stop of retained memory. Ordinary Stop/Start is unaffected.
-
-Do not turn a Resume error into an automatic `StartComputer` call. A timeout
-does not cancel the operation, and unavailability does not establish memory
-loss. Retry Resume against the retained handle; use Start as an explicit
-saved-state recovery choice with new sessions and possible loss of unsaved
-work. The [Computer API](../../../specs/computer-api.yaml) defines the observed
-states and recovery choices.
-
-## Quickstart
+Import `go.pinesandbox.io/computer` as `pine`. In these examples, `store` is your
+application's encrypted database, not an SDK object. Its save methods serialize
+with `json.Marshal` and return an error if storage fails. These are steps inside
+your handler or worker, using its `ctx`:
 
 ```go
-package main
+client, err := pine.NewClient(pine.ClientOptions{
+    Endpoint: os.Getenv("PINE_SANDBOX_ENDPOINT"),
+    APIKey: os.Getenv("PINE_SANDBOX_API_KEY"),
+})
+if err != nil { return err }
 
-import (
-	"bufio"
-	"context"
-	"fmt"
-	"log"
-	"os"
+creds, err := pine.GenerateCredentials()
+if err != nil { return err }
+if err := store.SaveCredentials(creds.ID, creds); err != nil { return err }
 
-	pine "go.pinesandbox.io/computer"
-)
+comp, err := client.CreateComputer(ctx, pine.AttachOptions{Credentials: creds})
+if err != nil { return err }
+binding, err := comp.Binding()
+if err != nil { return err }
+if err := store.SaveBinding(creds.ID, binding); err != nil { return err }
 
-func main() {
-	if err := run(); err != nil {
-		log.Fatal(err)
-	}
-}
+sess, err := comp.CreateSession(ctx, pine.CreateSessionOptions{Browser: true})
+if err != nil { return err }
+fmt.Println(sess.Name())
+// Use sess to drive the browser or run Pine's agent; examples below.
+```
 
-func run() error {
-	ctx := context.Background()
+| Save | When | Used for |
+|---|---|---|
+| `Credentials` | Before Create; again if you change keys | Starting this Computer again and decrypting saved state |
+| `Binding` | After each successful Create or Start | Reconnecting to that exact runtime from any backend |
 
-	client, err := pine.NewClient(pine.ClientOptions{
-		Endpoint: "https://pinesandbox.io",
-		APIKey:   "pk_…",                            // your project client key
-	})
-	if err != nil {
-		return err
-	}
+Both JSON records contain secrets. Keep them encrypted on your backend, never in
+a browser. Your project API key also stays backend-only.
 
-	// Generate + PERSIST every caller-owned secret before provisioning.
-	creds, err := pine.GenerateCredentials()
-	if err != nil {
-		return err
-	}
-	// json.Marshal(creds) produces one value to save in your encrypted storage.
-	// Save it before provisioning; Start uses the same value later.
-	// Provision + bind a fresh persistent Computer. AttachComputer later uses
-	// the same current keypair plus any retained prior generations.
-	comp, err := client.CreateComputer(ctx, pine.AttachOptions{
-		Credentials:    creds,
-		// Optional on first attach. Country is canonical ISO 3166-1 alpha-2;
-		// omit Location to use Portal's server-owned default.
-		Location: &pine.ComputerLocation{Country: "US"},
-	})
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if stopped, err := comp.Stop(ctx); err != nil {
-			log.Print(err)
-		} else if !stopped {
-			log.Print("Stop is unconfirmed; retry using the persisted binding")
-		}
-	}()
+## Reuse it from another backend
 
-	sess, err := comp.CreateSession(ctx, pine.CreateSessionOptions{Browser: true})
-	if err != nil {
-		return err
-	}
+```go
+var creds pine.Credentials
+var binding pine.Binding
+if err := json.Unmarshal(savedCredentials, &creds); err != nil { return err }
+if err := json.Unmarshal(savedBinding, &binding); err != nil { return err }
+comp, err := client.ReconnectComputer(ctx, creds, binding)
+if err != nil { return err }
+state, err := comp.Status(ctx) // e.g. "running", "paused", "resuming"
+if err != nil { return err }
+fmt.Println(state)
+```
 
-	// Delegate mode: one persistent agent task per session; each Run is a turn.
-	cursor := "" // fresh session; load the persisted cursor before Run when reusing one
-	if _, err := sess.Agent().Run(ctx, "Find the cheapest flight SFO→JFK next Friday", pine.RunOptions{}); err != nil {
-		return err
-	}
+Reconnect reconstructs a handle locally. It makes no request, creates nothing,
+and does not replay work. Its next call targets the saved runtime, even if another
+backend has replaced it. Store the binding revision alongside its JSON in your
+existing Computer record. Save a replacement only if its revision is newer (or it
+is the identical binding). After confirmed Stop, clear it only if the stored
+revision and runtime still match the handle stopped. Keep that revision and the
+durable credentials, so delayed replies cannot revive a stale binding. Session
+records belong to a binding revision and cannot be reused after Start.
 
-	// Events is a typed, resuming iterator (Go 1.23 range-over-func). The feed is
-	// continuous across turns; a dropped connection auto-resumes from the last event id.
-	input := bufio.NewScanner(os.Stdin)
-	completed := false
-	for ev, err := range sess.Agent().Events(ctx, cursor) {
-		if err != nil {
-			return err // terminal: auth, or the reconnect budget was exhausted
-		}
-		log.Printf("agent event: type=%s", ev.Type)
-		if ask, ok := ev.Ask(); ok {
-			fmt.Printf("%s\n> ", ask.Question)
-			if !input.Scan() {
-				return fmt.Errorf("input closed while the agent was waiting: %v", input.Err())
-			}
-			if _, err := sess.Agent().AnswerAsk(ctx, ask, input.Text()); err != nil {
-				return err
-			}
-		}
-		if ev.Terminal {
-			completed = true
-			break
-		}
-	}
-	if !completed && ctx.Err() == nil {
-		return fmt.Errorf("agent event stream ended before completion")
-	}
-	return ctx.Err()
+Also save each session's name and token when it is created. Reconstruct it with
+`comp.AdoptSession(savedName, savedToken)`; session lookup redacts that token.
+Save agent turn IDs and event cursors with the session. See
+[Continuing session work](#continuing-session-work) to wait on an existing turn.
+
+## Stop, Start, Pause or Resume
+
+| Intent | Call | Result |
+|---|---|---|
+| Finish using compute | `comp.Stop(ctx)` | Attempts a final save, releases the runtime and ends its sessions |
+| Start a stopped Computer | `client.StartComputer(ctx, creds, opts)` | Restores saved state into a new runtime; create new sessions |
+| Keep live memory for later | `comp.Pause(ctx)` | Retains the runtime and sessions; requires project opt-in |
+| Continue paused work | `comp.Resume(ctx)` | Restores the retained runtime and sessions |
+| Observe after a connection failure | `comp.Status(ctx)` | Reads state without changing or renewing it |
+
+```go
+stopped, err := comp.Stop(ctx)
+if err != nil { return err }
+if !stopped { return fmt.Errorf("Stop is unconfirmed") }
+
+// Later, at a safe boundary chosen by your application:
+comp, err = client.StartComputer(ctx, creds, pine.StartOptions{})
+if err != nil { return err }
+binding, err = comp.Binding()
+if err != nil { return err }
+if err := store.SaveBinding(creds.ID, binding); err != nil { return err }
+```
+
+Stop waits up to 390 seconds, or the caller's earlier deadline. Cancellation ends
+the wait, not accepted work. Keep the binding until release is confirmed. A true
+result proves release or authoritative absence, not a successful final save.
+Saving is best effort: a failed or unconfirmed save still releases the runtime,
+and the next Start restores the last saved state. Only older servers retain the
+runtime and return `StopSaveError` when the final save fails or is unconfirmed.
+
+Stop/Start is also how an application replaces an old runtime. An SDK upgrade or
+Pine image rollout does not replace a running Computer. Start can receive a
+compatible older warm revision during rollout; it does not guarantee a build.
+`AttachComputer` remains the field-based Start API. Use Reconnect to reuse a runtime.
+
+Pause requires project opt-in and a snapshot-capable runtime. Pause/Resume wait up
+to six minutes or the caller's earlier deadline. A timeout does not cancel work;
+inspect or retry the same operation. A failed Resume never silently Starts a
+replacement. Stop can restore a paused runtime before saving it.
+
+Stop/Start restores supported saved browser state, not live tabs, page memory or
+session files. Export files first. `Kill` releases compute without an acknowledged
+save. `Delete` permanently retires the Computer ID and purges its saved state
+after 24 hours; there is no undelete. Stop and Kill retain the identity and saved state.
+
+## Idle timeout and maximum age
+
+`AttachOptions.Timeout` is the inactivity window (default five minutes), not an
+HTTP request timeout. Work renews it; observation does not. It starts at allocation,
+so a one-minute window can expire during slow setup.
+
+Projects can opt into a lifetime policy. The standard allowance is one minute to
+24 hours of idle time and seven days of maximum runtime age; approved project
+limits can be higher. Existing allocations retain their admitted terms.
+Enrollment applies to new allocations from Ruby 0.3.13 / Go 0.3.15 and later,
+including integrations that do not use the new policy methods. A requested
+timeout above the allowance, including the SDK default, is rejected. Before
+enrolling a project, check its integrations' requested timeouts and handling of
+maximum age. Deployment alone does not enroll projects or alter existing runtimes.
+
+```go
+details, err := comp.RuntimeDetails(ctx)
+if err != nil { return err }
+if details.Lifecycle != nil {
+    updated, err := comp.SetIdleTimeout(ctx, time.Hour)
+    if err != nil { return err }
+    fmt.Println(updated.Lifecycle.IdleTimeoutSeconds, updated.ExpiresAt)
 }
 ```
 
-`Stop` admits graceful Stop to the runtime controller and waits up to 390s for
-compute release. Caller cancellation does not cancel accepted work. Reconstruct a
-saved handle on another backend to observe or join it; no SDK-local save receipt
-is needed. `*pine.StopSaveError` retains the binding and reports whether retrying
-can help. A restart of the Computer's services may leave the final save unconfirmed.
+For an enrolled runtime, changing idle timeout takes effect now while running,
+or on the next Resume while paused. It cannot extend maximum age or snapshot
+retention. Legacy runtimes keep their previous expiry clock while paused; enrolled
+runtimes use snapshot retention and maximum age. An identical value does nothing.
+After a conflict or lost response,
+read RuntimeDetails before deciding whether to edit again.
 
-Check both results: `false, nil` means release is unconfirmed; cancellation remains
-an error. Keep the saved binding until Stop returns true. Success proves compute
-release or authoritative absence, not that a runtime lost to expiry saved its last
-changes. Snapshot storage cleanup can remain after compute release. Ephemeral
-bindings skip saving based on the runtime's binding record.
+Maximum age includes paused time. Graceful Stop begins twelve minutes before the
+hard deadline; expiry is not proof of a final save. Plan Stop/Start at a safe
+point before that deadline when you need uninterrupted work.
 
-If a Start response was lost before saving the runtime token, call
-`client.StopComputer(ctx, id)` with project authorization alone, then Start
-separately. It resolves one binding and never follows a concurrent newer binding.
-Start still requires the private keys; the ID cannot recover those keys.
+`RuntimeDetails` describes this allocation, including optional `Lifecycle` terms
+and its opaque `RuntimeRevision`. Nil lifecycle means no admitted project lifetime
+policy. `client.ProjectPolicy(ctx)` optionally reads allowances for future
+allocations; ordinary operations do not require that call. Neither read renews the
+runtime. `Retryable` is a pointer: nil means no verdict, not permission to retry.
 
-Save `json.Marshal(creds)` before Create. Load it into `pine.Credentials` with
-`json.Unmarshal`, then call `client.StartComputer(ctx, creds, pine.StartOptions{})`
-or `client.RecoverComputer(ctx, creds, pine.StartOptions{})`. Only runtime options
-belong in that options value. The released `AttachComputer(ctx, id, key, opts)`
-form remains available.
+## Handle failures without replacing live work
 
-`comp.Credentials()` returns an independent copy, including retained keys needed
-for older saved state. Save again only after changing keys, not after every
-Start. Ruby reads and writes the same JSON format. It contains secret material;
-Base64 encoding is not encryption. Complete persistent records from the released
-Go format remain readable. Upgrade every reader before writing the shared format:
-old Go readers silently omit its capture keypair. Legacy records without a
-capture keypair must be completed with the original keys or explicitly marked
-ephemeral before using the new format; the SDK cannot infer which was intended.
-JSON encoding and decoding now validate credentials, so incomplete values that
-previously serialized successfully return an error. Live runtime/session tokens
-stay separate.
+- A connection error or `Alive` returning false does not prove the runtime is
+  gone. Read `Status`; its `NotFoundError` confirms runtime-record absence.
+  A data-plane `SandboxGoneError` alone does not: paused/restoring Computers can
+  temporarily have no route.
+- `RuntimeRetainedError` names the existing `RuntimeID` and `State` when Start
+  cannot replace it. Match the ID to your saved binding, or reload the latest
+  binding from your database. Reconnect, Resume or finish Stop as appropriate;
+  an ID alone cannot reconstruct a missing token.
+- A Stop timeout is unconfirmed, not canceled. Keep the binding and observe or
+  retry Stop. Older servers return `StopSaveError` and retain the source after a
+  failed save; current servers still release the runtime.
+- Serialize Create/Start per Computer. On a binding-revision conflict, reload the
+  winner's saved binding instead of retrying with a higher revision.
+- If a registered Computer's Start reply is lost before saving its binding,
+  serialize recovery, call `client.StopComputer(ctx, id)`, then Start separately
+  with saved credentials. This releases the runtime whose token was lost.
+- An interrupted first Create can fail before registering the Computer. Stop-by-ID
+  then returns success, but Start raises `UnknownComputerError`. For that initial
+  creation, retry Create with your saved credentials after confirming the project
+  and ID are correct and the identity was not deleted. Do not treat every unknown
+  ID as permission to create. An allocation abandoned before registration may
+  remain until expiry; Stop-by-ID cannot discover it.
+- On `AttachAuthorizationCommittedError`, registration has succeeded. Retain its
+  credentials when provided and reconcile the registered Computer before Start.
+  Private keys cannot be recovered from an ID.
 
-The expanded `Credentials` struct also requires keyed literals, such as
-`Credentials{ID: id, Key: key, CaptureKeypair: pair}`. Existing positional
-three-field literals no longer compile.
-An adopted handle lacks capture keys; retain its original saved credentials.
+`RecoverComputer(ctx, creds, opts)` is an explicit choice for a recorded failed
+runtime: it releases that observed runtime, then Starts from saved state. It
+accepts possible unsaved-state loss and refuses healthy running/paused runtimes.
+A release timeout allocates no replacement. It never follows a concurrent newer binding.
 
-`StartComputer` resolves the current binding revision once and refuses an existing
-runtime until it is absent or released, waiting for an already accepted deletion
-if needed. A conflict does not refresh that revision.
-`RecoverComputer` is the explicit saved-state recovery choice for a recorded
-failure: conditionally release the observed runtime, wait up to 90s for compute
-release, then independently Start. It accepts possible unsaved-state loss and
-refuses healthy running/paused runtimes and unresolved capture timeouts. A failed
-or timed-out release allocates nothing. `Kill` remains unconditional destruction.
-Start restores cookies, learned skills, compatible localStorage and already-durable
-passkeys; replace stored session handles after it succeeds. Tabs, page memory,
-session files and IndexedDB are outside this contract.
-
-This SDK's retryable allocation and server-owned Stop require the updated backend
-and a compatible Computer runtime; neither requires Pause opt-in. Existing
-Computer create, capture/Finish and delete calls remain supported for applications
-keeping their prior SDK. Complete the backend rollout before upgrading, including
-the conditional-release support used by recovery. A pool image update does not
-upgrade an already-running Computer: stop old-image bindings with the prior SDK
-before upgrading their caller. Integrations using the removed generic
-public sandbox operations must migrate to the Computer contract.
-
-`Stop` and `Kill` keep the Computer's identity and saved state. `Computer.Delete`
-(or `Client.DeleteComputer(ctx, id)`) ends both permanently: a live sandbox is
-killed first, the id is refused for every later attach, saved state is purged
-after 24 hours, and the id is never reusable. Deleting an unknown, already-deleted,
-or other project's id also succeeds. There is no undelete.
+Allocation retries within one call reuse its create ID. A fresh call is a new
+attempt. Failed attach attempts clean up known allocations best-effort; process
+crashes rely on expiry. Longer requested timeouts can leave abandoned compute
+running longer.
 
 ## Timeouts
 
-`AttachOptions.Timeout` sets the runtime lifetime. `ReadyTimeout` separately
+`AttachOptions.Timeout` sets the inactivity window. `ReadyTimeout` separately
 bounds allocation and runtime readiness; `BindReadyTimeout` bounds the following
 attach. Runtime expiry starts at allocation, independently of those wait budgets.
 The caller's context can shorten either wait. Defaults and cleanup
@@ -218,115 +222,71 @@ Failed attach cleanup uses its own 30s context so cancellation does not prevent
 deleting a known allocation. This cleanup may extend the time until attach
 returns; it is best-effort and does not recover allocations after a process crash.
 
-## Stateless reuse (multi-instance / restarted backends)
+## Continuing session work
 
-The handle isn't the source of truth — your **persisted credentials** are. A
-stateless backend rebuilds the handles per request, with no allocation and no
-request to the Computer for the session:
+Save the session name/token with its runtime binding. Any backend can load the two
+Computer records, call `ReconnectComputer`, then `AdoptSession`. A handle is not
+a source of truth; the records in your database let another process continue.
 
-- **Computer** — persist `comp.ID()`, `comp.Key()`, the current and retained
-  capture keypairs, `comp.SandboxID()`, and
-  `comp.ComputerToken()` (the `ct_`). Portal is an authorization ledger, not
-  the source of truth for this integrator-owned record.
-- **Session** — persist `sess.Name()` and `sess.Token()` (the `ps_`). The `ps_` is
-  minted once at `CreateSession` and the Computer redacts it on read, so a
-  session re-fetched with `comp.Session(name)` has **no** `ps_` (its drive ops
-  `401`); keep the create-time value and rebuild with `AdoptSession`.
-
-```go
-// Per request:
-comp, err := client.AdoptExisting(ctx, id, key, sandboxID, ct,
-    pine.AdoptOptions{BindingRevision: savedRevision}) // rebuild the Computer
-if err != nil { /* … */ }
-sess, err := comp.AdoptSession(name, ps)                        // rebuild the session
-if err != nil { /* … */ }
-
-task, err := sess.Agent().Status(ctx) // observe existing work; do not resubmit its goal
-if err != nil { /* … */ }
-_ = task
-```
-
-On a dropped stream, reconnect with the last successfully processed event ID;
-persist it per feed and binding/session with your application's effects, or
-deduplicate replays. A fresh backend needs the saved records, not the old SDK
-objects. Do not replay exec or agent mutations solely because a response was
-lost. Issue a fresh desktop delegation when reconnecting a viewer.
-
-`comp.Status(ctx)` reads lifecycle state for the saved runtime without resuming
-or replacing it. It returns a lower-case state such as `running`, `paused` or
-`resuming`; lookup errors remain errors. A `*pine.NotFoundError` from this read
-confirms runtime-record absence. Transport/authentication errors and `Alive`
-returning false do not. Observe pending operations within the caller's context;
-Resume and Start require the application's lifecycle intent. The
-[integration guide](https://pinesandbox.io/docs/integration#reuse-a-running-computer-or-restore-a-stopped-one)
-describes recovery decisions. Retried allocation requests reuse one create ID
-without extending expiry. Failed attaches attempt cleanup; a process crash leaves
-ordinary runtime expiry as the backstop. Long requested lifetimes permit
-longer-lived abandoned allocations. Save returned credentials in your application
-database; private keys cannot be recovered from an ID. Allocation does not
-acknowledge that database write.
-
-Persist the binding's ephemeral setting too. For an ephemeral Computer, pass
-`pine.AdoptOptions{Ephemeral: true}` as the last `AdoptExisting` argument so
-`Stop` continues to skip persistence. Omission means persistent.
-
-Agent commands and event consumption are separate lifecycles. `Run`, `Steer`,
-`Answer`, and `Cancel` submit input and return the current Task snapshot.
-`Events` is the independently resumable, cumulative Task journal; persist its
-event cursor wherever your application already stores session progress.
+Agent work is addressed by turn. A turn starts when a run or an answer is
+accepted and ends when the agent finishes, fails, is canceled or asks a
+question. Every ending is the turn's `Result`, with its usage; a question is
+the result's summary (`turn.Question()`), and the answer starts the next turn,
+which continues the same goal. Save the turn ID `Run` and `Answer` return in
+the record you already keep for the request and wait for that turn. The SDK
+does not require the submitting process to stay alive. Any process with the saved
+session and turn ID can continue:
 
 ```go
-// Before a new Run on a reused session, load its latest completed-turn cursor.
-cursor := store.LoadSessionEventCursor(sessionID)
-if _, err := sess.Agent().Run(ctx, goal, pine.RunOptions{}); err != nil {
+// Submit: your saved message ID makes a crashed submitter's retry return the same turn.
+turn, err := sess.Agent().Run(ctx, goal, pine.RunOptions{IdempotencyKey: msg.ID})
+if err != nil {
 	return err
 }
+store.SaveTurn(msg.ID, turn.TurnID)
 
-var needsInput, completed bool
-for event, err := range sess.Agent().Events(ctx, cursor) {
-	if err != nil {
-		return err
-	}
-	if err := store.ApplyAgentEventAndCursor(sessionID, event); err != nil {
-		return err
-	}
-	needsInput, completed = event.Type == pine.EventNeedsInput, event.Terminal
-	if needsInput || completed {
-		break
-	}
+// Any worker, any process: wait for the saved turn.
+turn, err = sess.Agent().Wait(ctx, msg.TurnID, 30*time.Second)
+if err != nil {
+	return err
 }
-switch {
-case needsInput:
-	enqueueAnswerFlow(sessionID)
-case completed:
-	consumeCompletedTurn(sessionID)
+switch turn.State {
+case pine.TurnRunning, pine.TurnCanceling:
+	requeueWait(msg.ID) // the wait expired; the turn is still working
+case pine.TurnNeedsInput:
+	store.SaveQuestion(msg.ID, turn.TurnID, turn.Question()) // dedupe by turn ID
+case pine.TurnAnswered:
+	store.SaveTurn(msg.ID, turn.NextTurnID) // already answered elsewhere
 default:
-	requeueAgentEventWorker(sessionID)
+	store.SaveResult(msg.ID, turn.State, turn.Result) // summary, files and usage
 }
+
+// Answer with the turn ID stored with the question, never the session's latest turn.
+next, err := sess.Agent().Answer(ctx, question.TurnID, reply, pine.AnswerOptions{})
+if err != nil {
+	return err
+}
+store.SaveTurn(msg.ID, next.TurnID)
 ```
 
-`needs_input` pauses the work; `Answer` continues it. A background worker
-can save the question and return. An interactive application can answer inline
-and keep listening. Commit each event's effects and cursor together, and make
-processing safe when an event is replayed.
-
-For a reused session, the pre-submit cursor must have consumed the latest prior
-completion boundary while the Task is idle—not merely be the last event a
-lagging worker happened to process. Otherwise replay can surface an older
-terminal before the newly accepted input. If the caller cannot establish that
-invariant, it must retain its start-confirmation logic and ignore historical
-terminals until the new submission is confirmed. A fresh session starts with an
-empty cursor.
-
-`Run` sends one request and does not retry an ambiguous transport failure.
-The same operation works with older Computers; there is no route probe.
-
-If the process loses the final outcome, reconcile through `Status` and the
-durable pre-submit `Events` cursor/baseline before deciding whether to submit
-new work; blindly calling `Run` again is a distinct command. Without that
-baseline, cumulative v1 history cannot prove that a repeated goal was accepted.
-This v1 surface does not promise exactly-once submission across a process
-restart.
+`Wait` returns once the turn ends, or after the timeout with the turn still
+running; it never cancels the turn or follows its successor. A read whose
+response was lost, or whose problem is marked retryable, is read again within
+the timeout. Only the session's latest turn can be answered, so starting new
+work leaves an open question unanswered. Repeating the same answer returns the
+same next turn, and a different answer to an answered turn is a
+`/errors/stale-turn` conflict. So `Answer` and `Cancel` resend a lost response
+themselves for up to about 30 seconds, honoring `Retry-After`: a network fault,
+a `408`, or a gateway `502`, `503` or `504`, which cannot say whether the
+Computer acted. `Run` resends only with an idempotency key (it uses one of its
+own when you pass none). If no response arrives, or `ctx` ends first, `Run`
+returns a `*pine.RunUnconfirmedError` naming the key: save it and send the run
+again with it. Pass a key of your own, such as your
+message ID, so a fresh process can do the same.
+`Steer` is never resent: a conflict at a completion boundary does not prove the
+text was not delivered. `Events` is optional progress — the
+resumable activity journal for showing steps and screens — not how you learn
+that a turn ended.
 
 Tokens split by tier: **`ct_` is your backend's Computer-wide token** — control,
 agent + skills-authoring mutations, lifecycle; **`ps_` is the session's own drive + reads**.
@@ -340,8 +300,9 @@ When the Computer rejects a token that worked before, the SDK surfaces a typed
 `*pine.TokenRejectedError` — a report, not an attach instruction (`ct_` lasts as long
 as the binding, so on a live runtime this is `binding_auth_lost`). It never silently
 re-mints (that would land a fresh runtime and invalidate every `ps_`). Reconcile, and
-recover by re-attaching **only when the sandbox is confirmed gone**:
-`AttachComputer` mints a fresh `ct_` + sessions/`ps_`; persist the new creds and retry.
+read `Status` before deciding on recovery. Start requires release or authoritative
+absence; it creates a new binding and new sessions. Persist that binding and
+reconcile unfinished work instead of replaying mutations automatically.
 
 A Computer that can no longer be reached surfaces as
 `*pine.SandboxGoneError`; `errors.As` still reaches its underlying `*pine.APIError`
@@ -360,17 +321,25 @@ agent (or a human) can drive it — pick per task; they share one Computer/Sessi
 
 ### 1. Delegate mode — Pine's agent drives
 
-You hand a goal; Pine's agent runs the perceive→act loop on the Computer, pauses to ask
-when it needs input, and reports a typed outcome. One persistent task per session;
-each `Run` is a turn (the thread is the memory — `Reset` clears it).
+You hand a goal; Pine's agent runs the perceive→act loop on the Computer and ends the
+turn with a typed outcome, or with a question when it needs input. One persistent task
+per session; each `Run` or answer is a turn (the thread is the memory — `Reset` clears it).
 
 ```go
 ag := sess.Agent()
-cursor := store.LoadSessionEventCursor(sessionID) // latest terminal boundary; "" on a fresh session
-if _, err := ag.Run(ctx, "Book the cheapest SFO→JFK flight next Friday", pine.RunOptions{}); err != nil {
+turn, err := ag.Run(ctx, "Book the cheapest SFO→JFK flight next Friday", pine.RunOptions{})
+if err != nil {
 	return err // errors.Is(err, pine.ErrSessionBusy) ⇒ a turn is already running
 }
-for ev, err := range ag.Events(ctx, cursor) {
+store.SaveTurn(sessionID, turn.TurnID) // wait for, answer or cancel this turn by its ID
+// Show progress while waiting: every event names its turn.
+savedTaskID, cursor := store.LoadAgentCursor(sessionID) // persist the Task and cursor together
+task, err := ag.Status(ctx, pine.TaskOptions{})
+if err != nil {
+	return err
+}
+if savedTaskID != task.TaskID { cursor = "" }
+for ev, err := range ag.Events(ctx, cursor, pine.EventsOptions{ExpectedTaskID: task.TaskID}) {
 	if err != nil {
 		return err
 	}
@@ -378,32 +347,57 @@ for ev, err := range ag.Events(ctx, cursor) {
 		return err
 	}
 	switch ev.Type {
-	case pine.EventNeedsInput: // the agent paused on a question
-		if ask, ok := ev.Ask(); ok { // ask carries Question / Options / the ids
-			if _, err := ag.AnswerAsk(ctx, ask, answer(ask.Question)); err != nil {
-				return err
-			}
+	case pine.EventProgress: // the agent explains what it is doing
+		if p, ok := ev.Progress(); ok {
+			ui.Narrate(ev.TurnID, p.Text)
+		}
+	case pine.EventActivity: // one row per step, upserted by ID
+		if a, ok := ev.Activity(); ok {
+			// Title is the Computer's own description, such as "Click “Log in”";
+			// Kind and Facts add detail. Every step ends with one outcome,
+			// interrupted included.
+			ui.UpsertStep(ev.TurnID, a.ID, a.State, a.Title)
 		}
 	case pine.EventResult:
-		if !ev.Terminal {
-			continue
-		}
-		res, err := ag.Result(ctx) // TerminalReason, Summary, Usage, Artifacts; Author on skill-author tasks
+		// The turn ended, possibly with a question: read it with Wait and act on its state.
+		ended, err := ag.Wait(ctx, ev.TurnID, 0)
 		if err != nil {
 			return err
 		}
-		if res.TerminalReason == pine.TerminalCompleted {
-			log.Printf("done: %s", res.Summary)
-		}
-	}
-	if ev.Terminal {
-		break
+		ui.ShowTurn(ended)
+		return nil // an answer opens a new turn: follow that one the same way
 	}
 }
 ```
 
-`AgentMode.Cancel` targets whichever turn is current, so callers do not carry a
-run identifier.
+A captured screen carries its matching step when known: `frame.Activity`
+is a typed activity snapshot, so a frame read from partial history still has
+its action title and outcome. Attach it by activity ID without counting another
+outcome or changing completion time. An absent activity means an independent
+observation; do not guess from nearby events. A text-only update leaves the last
+captured screen and its original attribution visible. Keep historical selection
+separate from following new frames; the event ID identifies each image for replay.
+
+`ag.Cancel(ctx, turnID)` cancels the work while that turn is current and returns
+it, `canceling` until the agent stops. A waiting question is closed: its turn ends
+`canceled` and can no longer be answered. An answered turn's continuation is a
+different turn, so canceling the answered one is a `409` (`/errors/stale-turn`);
+any other ended turn comes back unchanged. Save each event cursor with its task
+ID and resume through
+`Events(ctx, cursor, pine.EventsOptions{ExpectedTaskID: savedTaskID})`;
+a stale-task error requires a fresh history context rather than reusing the cursor.
+
+Before mounting an agent UI, `comp.RequireAgentProtocol(ctx)` checks that the
+current binding serves the public agent protocol. Any agent or authoring call
+that reaches a Computer without it returns the same local
+`*pine.AgentProtocolUnsupportedError`, which is not an HTTP error: Stop, then
+Start the Computer to update it. Authorization, gone-Computer and network errors
+keep their original types.
+
+`Status` returns the session's Task and its latest turn, for discovering work;
+`Turns` lists the retained turns. Use `pine.TaskOptions{ExpectedTaskID:
+task.TaskID}` for `Status`, `Turns` and `Reset`; reset requires the ID. Keep the
+Task ID with saved event cursors.
 
 ### 2. Your own agent drives
 
@@ -460,8 +454,8 @@ surface reference (`go doc go.pinesandbox.io/computer`), and the wire contract
 is the published [API reference](https://pinesandbox.io/spec/computer). The
 noun/verb set matches the Ruby `pinesandbox` gem (same verbs, presented
 idiomatically per language), with Go-idiomatic
-conveniences on top: typed constants (`pine.EventNeedsInput`, `Controller*`, …),
-option funcs (`TakeControl(ctx, WithForce())`), `AnswerAsk`, and computer-use
+conveniences on top: typed constants (`pine.EventActivity`, `Controller*`, …),
+option funcs (`TakeControl(ctx, WithForce())`), turn states (`pine.TurnNeedsInput`, …), and computer-use
 helpers (`Click`/`TypeText`/`Scroll`/…). Errors are a flat, `errors.As`-able
 vocabulary (`errors.go`).
 
@@ -508,9 +502,9 @@ to stop or recover the failed runtime;
 their diagnostic formatting redacts both private keys.
 
 ```go
-if _, err := sess.Agent().Run(ctx, "book the 9am slot"); err != nil {
+if _, err := sess.Agent().Run(ctx, "book the 9am slot", pinesandbox.RunOptions{}); err != nil {
     log.Printf("agent run failed: %v", err)
-    // => "… (host=sbx_abc123.computer.<zone>, op=POST /v1/sessions/main/agent/run, request_id=req_abc123)"
+    // => "… (host=sbx_abc123.computer.<zone>, op=POST /v2/sessions/main/agent/run, request_id=req_abc123)"
     var apiErr *pinesandbox.APIError
     if errors.As(err, &apiErr) {
         report(computer.ID(), sess.Name(), time.Now().UTC(), apiErr.Host, apiErr.Op, apiErr.RequestID)
@@ -530,6 +524,26 @@ your Computer's records:
    reconnect — carries no fresh id (a mid-stream `ErrStreamLost` does fold in the last live
    stream's `request_id`); the resource spine above is enough. Every one of these still names the
    failing Computer (`host=…`) + operation (`op=…`) in its message.
+
+## Stored credentials and older integrations
+
+`comp.Credentials()` returns an independent copy, including keys retained for
+older saved state. Save credentials before Create and again only after changing
+keys. Credentials and bindings use versioned JSON shared with Ruby. Normal
+formatting redacts secrets; explicit JSON contains them and needs encrypted storage.
+
+For integrations using older storage or field-based methods:
+
+- `AdoptExisting` remains supported but does not recover capture keys. Retain the
+  original complete credentials; prefer Reconnect when both saved records exist.
+- Upgrade all readers before writing the shared credentials format: older Go
+  readers can omit capture keys. Incomplete records must be completed with the
+  original keys or explicitly marked ephemeral; JSON validation rejects ambiguity.
+- Use keyed `Credentials` literals. Positional literals from older struct layouts
+  may no longer compile.
+- Ordinary Computer methods are the integration surface. Control-plane adapters
+  and sandbox handles are SDK internals.
+
 
 ## Layout
 
