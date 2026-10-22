@@ -36,7 +36,7 @@ const (
 	ActivityRunning     = "running"
 	ActivityCompleted   = "completed" // the step finished, not proof the goal succeeded
 	ActivityFailed      = "failed"
-	ActivityDeclined    = "declined"    // the runtime refused to run it
+	ActivityDeclined    = "declined"    // the Computer refused to run it
 	ActivityInterrupted = "interrupted" // its turn stopped (an ask, a cancel, an error) first
 )
 

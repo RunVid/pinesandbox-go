@@ -50,7 +50,7 @@ func TestAdoptSession_DrivesWithProvidedPs(t *testing.T) {
 	}
 }
 
-// An adopted Computer qualifies an old runtime's unrouted agent read, made
+// An adopted Computer qualifies an older Computer's unrouted agent read, made
 // with the session's ps_, through its own ct_.
 func TestAdoptSession_AgentReadQualifiesWithComputerToken(t *testing.T) {
 	const ct, ps = "ct_tok", "ps_persisted"
@@ -77,6 +77,6 @@ func TestAdoptSession_AgentReadQualifiesWithComputerToken(t *testing.T) {
 	}
 	var unsupported *AgentProtocolUnsupportedError
 	if _, err := sess.Agent().Status(context.Background(), TaskOptions{}); !errors.As(err, &unsupported) {
-		t.Fatalf("status on an old runtime = %v, want AgentProtocolUnsupportedError", err)
+		t.Fatalf("status on an older Computer = %v, want AgentProtocolUnsupportedError", err)
 	}
 }

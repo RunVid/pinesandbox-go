@@ -42,19 +42,19 @@ type BindAuthError struct{ base }
 
 func (e *BindAuthError) Error() string { return errMsg("bind rejected", e.Status, e.Msg) }
 
-// ComputerAlreadyAttachedError: another runtime holds this Computer's epoch lease.
+// ComputerAlreadyAttachedError: another Computer sandbox holds this Computer's epoch lease.
 type ComputerAlreadyAttachedError struct{ base }
 
 func (e *ComputerAlreadyAttachedError) Error() string {
 	return errMsg("computer already attached elsewhere", e.Status, e.Msg)
 }
 
-// RuntimeUnusableError: a single-use runtime bound elsewhere / tainted — start a fresh one,
-// never replay. bind-decision-table.json still names it PodPoisonedError.
-type RuntimeUnusableError struct{ base }
+// SandboxUnusableError: a single-use Computer sandbox bound elsewhere / tainted — start a
+// fresh one, never replay.
+type SandboxUnusableError struct{ base }
 
-func (e *RuntimeUnusableError) Error() string {
-	return errMsg("runtime cannot be attached", e.Status, e.Msg)
+func (e *SandboxUnusableError) Error() string {
+	return errMsg("Computer sandbox cannot be attached", e.Status, e.Msg)
 }
 
 // SavedStateUnavailableError: the saved-state service / restore pipeline is unavailable
@@ -66,17 +66,17 @@ func (e *SavedStateUnavailableError) Error() string {
 	return errMsg("saved state unavailable", e.Status, e.Msg)
 }
 
-// BindTimeoutError: the readiness deadline elapsed before the runtime became ready
+// BindTimeoutError: the readiness deadline elapsed before the Computer sandbox became ready
 // (produced by the attach loop, not the classifier).
 type BindTimeoutError struct{ base }
 
 func (e *BindTimeoutError) Error() string { return errMsg("bind readiness timeout", e.Status, e.Msg) }
 
 // TokenRejectedError: a 401 on the binding's Computer token (ct_). Produced by the request
-// layer. A report, not an instruction: on a live, current runtime this is
-// binding_auth_lost — reconcile; only confirmed runtime-gone evidence justifies an attach.
-// The SDK never implicitly rebinds (a fresh runtime invalidates every ps_ and fences the
-// old one's state).
+// layer. A report, not an instruction: on a live, current Computer sandbox this is
+// binding_auth_lost — reconcile; only confirmed sandbox-gone evidence justifies an attach.
+// The SDK never implicitly rebinds (a fresh Computer sandbox invalidates every ps_ and
+// fences the old one's state).
 type TokenRejectedError struct{ base }
 
 func (e *TokenRejectedError) Error() string { return errMsg("token rejected", e.Status, e.Msg) }

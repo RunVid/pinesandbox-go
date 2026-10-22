@@ -80,7 +80,7 @@ func TestWaitForChangePreservesConditionalResponse(t *testing.T) {
 			case 404:
 				var missing *NotFoundError
 				if !errors.As(err, &missing) {
-					t.Fatalf("missing runtime: %v", err)
+					t.Fatalf("missing Computer sandbox: %v", err)
 				}
 			}
 		})
@@ -138,7 +138,7 @@ func TestCreateComputer_UsesPolicyOwnedRoute(t *testing.T) {
 		t.Fatalf("CreateComputer: %v", err)
 	}
 	if strings.Contains(body, "image") || strings.Contains(body, "poolRef") || strings.Contains(body, "entrypoint") {
-		t.Fatalf("runtime selection leaked into Computer create body: %s", body)
+		t.Fatalf("image selection leaked into Computer create body: %s", body)
 	}
 }
 
@@ -471,7 +471,7 @@ func TestCreateComputer_BusyKeyedCreateRepeats(t *testing.T) {
 			slept := recordSleeps(c)
 			info, err := c.CreateComputer(context.Background(), map[string]any{"timeout": 300, "create_id": testCreateID})
 			if err != nil || info.ID != "pine-abc" {
-				t.Fatalf("info=%+v err=%v, want the repeat's runtime", info, err)
+				t.Fatalf("info=%+v err=%v, want the repeat's Computer sandbox", info, err)
 			}
 			if *calls != 2 || len(*slept) != 1 || (*slept)[0] != tc.want {
 				t.Fatalf("creates=%d waits=%v, want 2 creates after one %v wait", *calls, *slept, tc.want)

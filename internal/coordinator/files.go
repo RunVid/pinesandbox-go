@@ -30,7 +30,7 @@ type fileEntryWire struct {
 	ModifiedAt   string `json:"modified_at"`
 }
 
-// Artifact is a managed session output (upload / claimed download / agent task output).
+// Artifact is a managed session output (upload / browser download / agent task output).
 type Artifact struct {
 	ID           string
 	SessionID    string
@@ -175,6 +175,18 @@ func (c *Client) ReadArtifact(ctx context.Context, token, name, id string) ([]by
 // success the caller owns the reader and MUST Close it.
 func (c *Client) OpenArtifact(ctx context.Context, token, name, id string) (io.ReadCloser, error) {
 	route := "/v1/sessions/" + url.PathEscape(name) + "/artifacts/" + url.PathEscape(id)
+	sr, err := c.openStream(ctx, "GET", route, token, "application/octet-stream", true, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	return sr.Body, nil
+}
+
+// OpenFile opens a streaming read of a workdir file's bytes — ReadFile without buffering
+// the whole file, under OpenArtifact's open-retry rules. On success the caller owns the
+// reader and MUST Close it.
+func (c *Client) OpenFile(ctx context.Context, token, name, path string) (io.ReadCloser, error) {
+	route := "/v1/sessions/" + url.PathEscape(name) + "/files?" + url.Values{"path": {path}}.Encode()
 	sr, err := c.openStream(ctx, "GET", route, token, "application/octet-stream", true, nil, nil)
 	if err != nil {
 		return nil, err

@@ -260,12 +260,12 @@ func TestAuthorQualificationPreservesGoneComputer(t *testing.T) {
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/problem+json")
 		w.WriteHeader(http.StatusNotFound)
-		_, _ = io.WriteString(w, `{"type":"/errors/sandbox-not-found","status":404,"detail":"runtime gone"}`)
+		_, _ = io.WriteString(w, `{"type":"/errors/sandbox-not-found","status":404,"detail":"sandbox gone"}`)
 	})
 	err := c.RequirePublicAgent(context.Background(), "ct_")
-	var gone *RuntimeGoneError
+	var gone *SandboxGoneError
 	if !errors.As(err, &gone) {
-		t.Fatalf("got %T (%v), want RuntimeGoneError", err, err)
+		t.Fatalf("got %T (%v), want SandboxGoneError", err, err)
 	}
 }
 
@@ -276,8 +276,8 @@ func TestV2RequestsQualifyOnlyAmbiguousNotFound(t *testing.T) {
 		unsupported, gone    bool
 	}{
 		{"success", `{}`, `{}`, 202, 0, false, false},
-		{"old runtime", "404 page not found\n", `{}`, 404, 1, true, false},
-		{"supported runtime", "404 page not found\n", `{"protocols":{"agent":[2]}}`, 404, 1, false, false},
+		{"older Computer", "404 page not found\n", `{}`, 404, 1, true, false},
+		{"supporting Computer", "404 page not found\n", `{"protocols":{"agent":[2]}}`, 404, 1, false, false},
 		{"missing resource", `{"type":"/errors/session-not-found","status":404}`, `{"protocols":{"agent":[2]}}`, 404, 0, false, false},
 		{"gone computer", `{"type":"/errors/sandbox-not-found","status":404}`, `{}`, 404, 0, false, true},
 		{"forbidden", `{"type":"/errors/feature-disabled","status":403}`, `{}`, 403, 0, false, false},
@@ -302,7 +302,7 @@ func TestV2RequestsQualifyOnlyAmbiguousNotFound(t *testing.T) {
 			_, run := c.AgentRun(ctx, "ct_", "s", "g", AgentRunOptions{IdempotencyKey: "message-41"})
 			for _, err := range []error{learn, teach, refine, cancel, run} {
 				var unsupported *AgentProtocolUnsupportedError
-				var gone *RuntimeGoneError
+				var gone *SandboxGoneError
 				if errors.As(err, &unsupported) != tc.unsupported || errors.As(err, &gone) != tc.gone {
 					t.Fatalf("unexpected error %T: %v", err, err)
 				}
@@ -323,7 +323,7 @@ func TestV2RequestsQualifyOnlyAmbiguousNotFound(t *testing.T) {
 	}
 }
 
-// A session-token read cannot read the capability manifest: an old runtime's
+// A session-token read cannot read the capability manifest: an older Computer's
 // unrouted V2 read is qualified with the Computer token instead.
 func TestAgentReadQualifiesWithTheComputerToken(t *testing.T) {
 	var discoveredWith []string

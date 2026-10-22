@@ -150,7 +150,7 @@ func (s *Session) NotifyHuman(ctx context.Context, reason, detail, ifMatch strin
 	return s.coord.ControlNotify(ctx, s.readToken(), s.name, reason, detail, ifMatch)
 }
 
-// TakeControl gives a human the control lease on the named session ("" means "main"),
+// TakeControl gives a human the control lease on the named session,
 // so the desktop viewer can drive it, with TakeControl's options and 412 retry. It reads
 // the session with the Computer token, so it works on an adopted Computer.
 func (c *Computer) TakeControl(ctx context.Context, name string, opts ...ControlOption) (*ControlState, error) {
@@ -161,7 +161,7 @@ func (c *Computer) TakeControl(ctx context.Context, name string, opts ...Control
 	return s.TakeControl(ctx, opts...)
 }
 
-// ReleaseControl returns the named session ("" means "main") to agent control.
+// ReleaseControl returns the named session to agent control.
 func (c *Computer) ReleaseControl(ctx context.Context, name string, opts ...ControlOption) (*ControlState, error) {
 	s, err := c.controlSession(ctx, name)
 	if err != nil {
@@ -172,10 +172,14 @@ func (c *Computer) ReleaseControl(ctx context.Context, name string, opts ...Cont
 
 func (c *Computer) controlSession(ctx context.Context, name string) (*Session, error) {
 	if name == "" {
-		name = "main"
+		return nil, errSessionNameRequired
 	}
 	return c.Session(ctx, name)
 }
+
+// errSessionNameRequired refuses a session helper called without a name: a Computer has
+// no default session.
+var errSessionNameRequired = errors.New("pinesandbox: session name required")
 
 // DesktopToken mints a short-lived, browser-safe desktop-stream token (dt_) with the
 // Computer token.

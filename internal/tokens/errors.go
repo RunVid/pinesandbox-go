@@ -121,11 +121,7 @@ func (e *LocationDiscoveryError) Error() string {
 type BindingRevisionConflictError struct {
 	tokenBase
 	CurrentRevision *int64
-	// CurrentRuntimeID is the runtime the winning binding names.
-	CurrentRuntimeID string
-	// CurrentSandboxID is the former name of CurrentRuntimeID; both carry the same value.
-	//
-	// Deprecated: use CurrentRuntimeID.
+	// CurrentSandboxID is the Computer sandbox the winning binding names.
 	CurrentSandboxID string
 }
 

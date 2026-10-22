@@ -11,7 +11,7 @@ import (
 	"go.pinesandbox.io/computer/internal/controlplane"
 )
 
-// sandboxControl is the control-plane subset a RuntimeHandle needs (faked in tests).
+// sandboxControl is the control-plane subset a SandboxHandle needs (faked in tests).
 type sandboxControl interface {
 	SetIdleTimeout(context.Context, string, int, string) (*controlplane.SandboxInfo, error)
 	Get(ctx context.Context, sandboxID string) (*controlplane.SandboxInfo, error)
@@ -35,9 +35,9 @@ var (
 	liveStates     = map[string]bool{"running": true, "pending": true, "stopping": true}
 )
 
-// RuntimeHandle is the lifecycle handle for an allocated runtime. An attached Computer
-// holds one; it only allocates, observes and releases the runtime.
-type RuntimeHandle struct {
+// SandboxHandle is the lifecycle handle for a started Computer. An attached Computer
+// holds one; it only starts, observes and shuts the Computer down.
+type SandboxHandle struct {
 	cp      sandboxControl
 	id      string
 	status  string
@@ -45,29 +45,24 @@ type RuntimeHandle struct {
 	sleeper func(context.Context, time.Duration) error
 }
 
-func newRuntimeHandle(cp sandboxControl, sandboxID, status string) *RuntimeHandle {
-	return &RuntimeHandle{cp: cp, id: sandboxID, status: status, clock: time.Now, sleeper: wait.Sleep}
+func newSandboxHandle(cp sandboxControl, sandboxID, status string) *SandboxHandle {
+	return &SandboxHandle{cp: cp, id: sandboxID, status: status, clock: time.Now, sleeper: wait.Sleep}
 }
 
-// SandboxHandle is the former name of RuntimeHandle.
-//
-// Deprecated: use RuntimeHandle.
-type SandboxHandle = RuntimeHandle
+// ID is the sandbox id.
+func (h *SandboxHandle) ID() string { return h.id }
 
-// ID is the runtime id.
-func (h *RuntimeHandle) ID() string { return h.id }
-
-// WaitUntilRunning blocks until the runtime reports Running, returning *RuntimeFailedError on a
+// WaitUntilRunning blocks until the Computer reports Running, returning *SandboxFailedError on a
 // terminal state or *ReadyTimeoutError if it never becomes Ready within timeout. A
 // create-time Running status (a prewarmed Computer) skips the first poll.
-func (h *RuntimeHandle) WaitUntilRunning(ctx context.Context, timeout, interval time.Duration) error {
+func (h *SandboxHandle) WaitUntilRunning(ctx context.Context, timeout, interval time.Duration) error {
 	if h.status == statusRunning {
 		return nil
 	}
 	return h.waitUntilState(ctx, statusRunning, timeout, interval)
 }
 
-func (h *RuntimeHandle) waitUntilState(ctx context.Context, target string, timeout, interval time.Duration) error {
+func (h *SandboxHandle) waitUntilState(ctx context.Context, target string, timeout, interval time.Duration) error {
 	if interval <= 0 {
 		interval = defaultPollInterval
 	}
@@ -80,7 +75,7 @@ func (h *RuntimeHandle) waitUntilState(ctx context.Context, target string, timeo
 			return err
 		}
 		if !h.clock().Before(deadline) {
-			return &ReadyTimeoutError{RuntimeID: h.id, SandboxID: h.id, LastState: h.status}
+			return &ReadyTimeoutError{SandboxID: h.id, LastState: h.status}
 		}
 		current, delay, err := h.observe(waitCtx, info, interval)
 		if err != nil {
@@ -93,7 +88,7 @@ func (h *RuntimeHandle) waitUntilState(ctx context.Context, target string, timeo
 			return nil
 		}
 		if terminalStates[state] || state == "unavailable" {
-			return &RuntimeFailedError{RuntimeID: h.id, SandboxID: h.id, State: state}
+			return &SandboxFailedError{SandboxID: h.id, State: state}
 		}
 		if delay > 0 {
 			if err := h.sleeper(waitCtx, max(0, min(delay, deadline.Sub(h.clock())))); err != nil {
@@ -103,7 +98,7 @@ func (h *RuntimeHandle) waitUntilState(ctx context.Context, target string, timeo
 	}
 }
 
-func (h *RuntimeHandle) transitionMemory(ctx context.Context, target string) error {
+func (h *SandboxHandle) transitionMemory(ctx context.Context, target string) error {
 	deadline := h.clock().Add(defaultMemoryWait)
 	operationCtx, cancel := context.WithTimeout(ctx, defaultMemoryWait)
 	defer cancel()
@@ -133,7 +128,7 @@ func (h *RuntimeHandle) transitionMemory(ctx context.Context, target string) err
 }
 
 // Stop observes existing intent first, so a saved handle works on another backend.
-func (h *RuntimeHandle) Stop(ctx context.Context) (bool, error) {
+func (h *SandboxHandle) Stop(ctx context.Context) (bool, error) {
 	const timeout = 390 * time.Second
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -213,14 +208,14 @@ func (h *RuntimeHandle) Stop(ctx context.Context) (bool, error) {
 }
 
 func stopSaveError(info *controlplane.SandboxInfo) error {
-	return &StopSaveError{Err: fmt.Errorf("runtime %s: %s", info.ID, info.Message), Retryable: info.Retryable != nil && *info.Retryable}
+	return &StopSaveError{Err: fmt.Errorf("Computer sandbox %s: %s", info.ID, info.Message), Retryable: info.Retryable != nil && *info.Retryable}
 }
 
 func computeReleased(info *controlplane.SandboxInfo) bool {
 	return info.Status == "terminated" && info.Reason == "COMPUTE_RELEASED"
 }
 
-func (h *RuntimeHandle) releaseFailedRuntime(ctx context.Context, info *controlplane.SandboxInfo) (bool, error) {
+func (h *SandboxHandle) releaseFailedSandbox(ctx context.Context, info *controlplane.SandboxInfo) (bool, error) {
 	waitCtx, cancel := context.WithTimeout(ctx, defaultTerminateWait)
 	defer cancel()
 	if info.Status != "stopping" {
@@ -230,7 +225,7 @@ func (h *RuntimeHandle) releaseFailedRuntime(ctx context.Context, info *controlp
 		switch info.Status {
 		case "save_failed", "unavailable", "failed", "terminated":
 		default:
-			return false, fmt.Errorf("pinesandbox: runtime has no recorded failure; use Stop or Resume")
+			return false, fmt.Errorf("pinesandbox: the Computer has no recorded failure; use Stop or Resume")
 		}
 		if info.ETag == "" {
 			return false, fmt.Errorf("pinesandbox: server did not supply a conditional release version")
@@ -257,10 +252,10 @@ func (h *RuntimeHandle) releaseFailedRuntime(ctx context.Context, info *controlp
 	}
 }
 
-// Terminate gracefully deletes the runtime and waits until its record is confirmed gone
+// Terminate gracefully shuts the Computer down and waits until Pine confirms it's gone
 // (GET 404) or waitTimeout elapses. true = the record is gone (its final save may still be
 // finishing); false = delete issued but not confirmed gone.
-func (h *RuntimeHandle) Terminate(ctx context.Context, waitTimeout, interval time.Duration) (bool, error) {
+func (h *SandboxHandle) Terminate(ctx context.Context, waitTimeout, interval time.Duration) (bool, error) {
 	if waitTimeout <= 0 {
 		waitTimeout = defaultTerminateWait
 	}
@@ -312,7 +307,7 @@ func (h *RuntimeHandle) Terminate(ctx context.Context, waitTimeout, interval tim
 	}
 }
 
-func (h *RuntimeHandle) observe(ctx context.Context, previous *controlplane.SandboxInfo, interval time.Duration) (*controlplane.SandboxInfo, time.Duration, error) {
+func (h *SandboxHandle) observe(ctx context.Context, previous *controlplane.SandboxInfo, interval time.Duration) (*controlplane.SandboxInfo, time.Duration, error) {
 	started := h.clock()
 	var info *controlplane.SandboxInfo
 	var err error
@@ -340,12 +335,12 @@ func (h *RuntimeHandle) observe(ctx context.Context, previous *controlplane.Sand
 }
 
 // Kill is an ungraceful best-effort delete (no wait); it never returns an error.
-func (h *RuntimeHandle) Kill(ctx context.Context) bool {
+func (h *SandboxHandle) Kill(ctx context.Context) bool {
 	return h.cp.Destroy(ctx, h.id) == nil
 }
 
-// Alive reports whether the runtime is in a live state (running/pending/stopping).
-func (h *RuntimeHandle) Alive(ctx context.Context) bool {
+// Alive reports whether the Computer is in a live state (running/pending/stopping).
+func (h *SandboxHandle) Alive(ctx context.Context) bool {
 	state, err := h.refreshStatus(ctx)
 	if err != nil {
 		return false
@@ -353,7 +348,7 @@ func (h *RuntimeHandle) Alive(ctx context.Context) bool {
 	return liveStates[state]
 }
 
-func (h *RuntimeHandle) refreshStatus(ctx context.Context) (string, error) {
+func (h *SandboxHandle) refreshStatus(ctx context.Context) (string, error) {
 	info, err := h.cp.Get(ctx, h.id)
 	if err != nil {
 		return "", err
@@ -362,9 +357,9 @@ func (h *RuntimeHandle) refreshStatus(ctx context.Context) (string, error) {
 	return info.Status, nil
 }
 
-// gone reports whether the runtime record is confirmed deleted (a 404). Any other outcome
+// gone reports whether the Computer sandbox's record is confirmed deleted (a 404). Any other outcome
 // (still present, or a transient error) is treated as not-yet-gone.
-func (h *RuntimeHandle) gone(ctx context.Context) bool {
+func (h *SandboxHandle) gone(ctx context.Context) bool {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	info, err := h.cp.Get(ctx, h.id)

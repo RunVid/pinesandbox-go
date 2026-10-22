@@ -18,9 +18,9 @@ type (
 // ---- Computer-level served skills (ct_) ----
 
 // RequireAgentProtocol checks the current binding before building an agent UI.
-// Unsupported runtimes return AgentProtocolUnsupportedError. Missing Computers,
+// A Computer started on an older release returns AgentProtocolUnsupportedError. Missing Computers,
 // authorization refusals and transport failures retain their original errors.
-// No result is cached across binding changes. Other agent calls qualify the runtime only
+// No result is cached across binding changes. Other agent calls check the Computer only
 // when an unrouted 404 needs it.
 func (c *Computer) RequireAgentProtocol(ctx context.Context) error {
 	coord, ct, err := c.bound()

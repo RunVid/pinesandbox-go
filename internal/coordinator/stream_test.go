@@ -142,6 +142,103 @@ func TestAgentEvents_MidStreamDropResumes(t *testing.T) {
 	}
 }
 
+// TestAgentEvents_SilentStreamResumes: a stream that stays open but sends nothing, not
+// even a keepalive, is closed after the idle timeout and resumed from its cursor.
+func TestAgentEvents_SilentStreamResumes(t *testing.T) {
+	defer func(d time.Duration) { streamIdleTimeout = d }(streamIdleTimeout)
+	streamIdleTimeout = 200 * time.Millisecond
+	release := make(chan struct{})
+	defer close(release)
+	var mu sync.Mutex
+	conns := 0
+	var resumeHdr string
+	c := streamTestClient(t, 5, func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		conns++
+		n := conns
+		if n == 2 {
+			resumeHdr = r.Header.Get("Last-Event-ID")
+		}
+		mu.Unlock()
+		if n == 1 {
+			fmt.Fprint(w, "id: 1\ndata: {\"type\":\"started\",\"event_id\":1}\n\n")
+			w.(http.Flusher).Flush()
+			select {
+			case <-release:
+			case <-r.Context().Done():
+			}
+			return
+		}
+		fmt.Fprint(w, "id: 2\ndata: {\"type\":\"progress\",\"event_id\":2}\n\n")
+	})
+
+	var types []string
+	for ev, err := range c.AgentEvents(context.Background(), "ps_", "s", "0", AgentEventsOptions{}) {
+		if err != nil {
+			t.Fatalf("unexpected stream error: %v", err)
+		}
+		types = append(types, ev.Type)
+		if len(types) == 2 {
+			break
+		}
+	}
+	if len(types) != 2 || types[0] != "started" || types[1] != "progress" {
+		t.Errorf("types = %v, want [started progress] (resumed after a silent stream)", types)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if resumeHdr != "1" {
+		t.Errorf("resume Last-Event-ID = %q, want 1", resumeHdr)
+	}
+}
+
+// TestAgentEvents_SlowConsumerKeepsTheStream: a consumer that takes longer than the
+// idle timeout between events doesn't make a stream that keeps sending look silent.
+func TestAgentEvents_SlowConsumerKeepsTheStream(t *testing.T) {
+	defer func(d time.Duration) { streamIdleTimeout = d }(streamIdleTimeout)
+	streamIdleTimeout = 200 * time.Millisecond
+	var mu sync.Mutex
+	conns := 0
+	// The server sends each later event only after the consumer has worked on the
+	// previous one, so every event takes its own read after a pause longer than the
+	// idle timeout.
+	worked := make(chan struct{}, 3)
+	c := streamTestClient(t, 5, func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		conns++
+		mu.Unlock()
+		for i := 1; i <= 3; i++ {
+			if i > 1 {
+				select {
+				case <-worked:
+				case <-r.Context().Done():
+					return
+				}
+			}
+			fmt.Fprintf(w, "id: %d\ndata: {\"type\":\"progress\",\"event_id\":%d}\n\n", i, i)
+			w.(http.Flusher).Flush()
+		}
+	})
+
+	seen := 0
+	for _, err := range c.AgentEvents(context.Background(), "ps_", "s", "0", AgentEventsOptions{}) {
+		if err != nil {
+			t.Fatalf("unexpected stream error: %v", err)
+		}
+		seen++
+		if seen == 3 {
+			break
+		}
+		time.Sleep(2 * streamIdleTimeout) // the consumer works on each event
+		worked <- struct{}{}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if seen != 3 || conns != 1 {
+		t.Errorf("seen %d events over %d connections, want 3 over 1", seen, conns)
+	}
+}
+
 // TestAgentEvents_ConsumerBreak: breaking out of the range halts immediately — the second
 // buffered frame is never delivered and no reconnect is attempted.
 func TestAgentEvents_ConsumerBreak(t *testing.T) {

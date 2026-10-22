@@ -38,7 +38,7 @@ type scenario struct {
 		Computer *struct {
 			ID            string `json:"id"`
 			Key           string `json:"key"`
-			RuntimeID     string `json:"runtime_id"`
+			SandboxID     string `json:"sandbox_id"`
 			ComputerToken string `json:"computer_token"`
 		} `json:"computer"`
 		Session *struct {
@@ -90,12 +90,12 @@ var scenarioErrorClasses = map[string]func(error) bool{
 	"ConnectionError":                   isErrorType[*ConnectionError],
 	"TimeoutError":                      isErrorType[*TimeoutError],
 	"TokenRejectedError":                isErrorType[*TokenRejectedError],
-	"RuntimeGoneError":                  isErrorType[*RuntimeGoneError],
+	"SandboxGoneError":                  isErrorType[*SandboxGoneError],
 	"RunUnconfirmedError":               isErrorType[*RunUnconfirmedError],
 	"CapacityExceededError":             isErrorType[*CapacityExceededError],
 	"BindingRevisionConflictError":      isErrorType[*BindingRevisionConflictError],
 	"AttachAuthorizationCommittedError": isErrorType[*AttachAuthorizationCommittedError],
-	"RuntimeUnusableError":              isErrorType[*RuntimeUnusableError],
+	"SandboxUnusableError":              isErrorType[*SandboxUnusableError],
 	"RateLimitedError":                  isErrorType[*RateLimited],
 	// Go's stream iterators yield the ErrStreamLost sentinel, wrapping the last fault.
 	"StreamLostError": func(err error) bool { return errors.Is(err, ErrStreamLost) },
@@ -137,13 +137,13 @@ func TestContractScenarios(t *testing.T) {
 
 func runScenario(t *testing.T, s scenario) {
 	clock := &virtualClock{now: time.UnixMilli(1_760_000_000_000)}
-	runtimeID := "rt-1"
+	sandboxID := "rt-1"
 	if s.Given.Computer != nil {
-		runtimeID = s.Given.Computer.RuntimeID
+		sandboxID = s.Given.Computer.SandboxID
 	}
 	script := &scriptedTransport{
 		t:           t,
-		hosts:       map[string]string{"control": scenarioControl, "computer": runtimeID + ".computer.scenario.pinesandbox.io"},
+		hosts:       map[string]string{"control": scenarioControl, "computer": sandboxID + ".computer.scenario.pinesandbox.io"},
 		pending:     append([]scenarioExchange(nil), s.Exchanges...),
 		seenHeaders: map[string]string{},
 		seenJSON:    map[string]any{},
@@ -163,7 +163,7 @@ func runScenario(t *testing.T, s scenario) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if computer, err = client.AdoptExisting(ctx, g.ID, key, g.RuntimeID, g.ComputerToken); err != nil {
+		if computer, err = client.AdoptExisting(ctx, g.ID, key, g.SandboxID, g.ComputerToken); err != nil {
 			t.Fatal(err)
 		}
 		if g := s.Given.Session; g != nil {
@@ -304,7 +304,7 @@ func callScenario(ctx context.Context, t *testing.T, s scenario, client *Client,
 			return nil, nil, err
 		}
 		return map[string]any{
-			"id": c.ID(), "runtime_id": c.RuntimeID(), "binding_revision": c.BindingRevision(),
+			"id": c.ID(), "sandbox_id": c.SandboxID(), "binding_revision": c.BindingRevision(),
 			"computer_token": c.ComputerToken(), "persistence_mode": c.PersistenceMode(),
 		}, nil, nil
 	default:
@@ -719,7 +719,7 @@ func plainValue(v reflect.Value, depth int) any {
 }
 
 // snakeCase spells a Go field name the way the wire does: TurnID → turn_id,
-// CurrentRuntimeID → current_runtime_id, ETag → etag.
+// CurrentSandboxID → current_sandbox_id, ETag → etag.
 func snakeCase(name string) string {
 	if name == "ETag" {
 		return "etag"

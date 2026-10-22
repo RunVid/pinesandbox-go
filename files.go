@@ -50,6 +50,13 @@ func (s *Session) OpenArtifact(ctx context.Context, id string) (io.ReadCloser, e
 	return s.coord.OpenArtifact(ctx, s.readToken(), s.name, id)
 }
 
+// OpenFile opens a streaming read of a workdir file's bytes — ReadFile without
+// buffering the whole file, for a large file a turn's result names, copied onward
+// in O(1) memory. The caller MUST Close the returned reader.
+func (s *Session) OpenFile(ctx context.Context, path string) (io.ReadCloser, error) {
+	return s.coord.OpenFile(ctx, s.readToken(), s.name, path)
+}
+
 // ZipArtifacts returns a zip of the session's artifacts, optionally turn-scoped (the session token, or the Computer token for a handle without one).
 func (s *Session) ZipArtifacts(ctx context.Context, turnID string) ([]byte, error) {
 	return s.coord.ZipArtifacts(ctx, s.readToken(), s.name, turnID)

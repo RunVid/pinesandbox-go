@@ -3,7 +3,90 @@
 All notable changes to the Pine Computer Go SDK (`go.pinesandbox.io/computer`,
 package `pinesandbox`) are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/). The current beta compatibility
-line is `v0.3.x`; review release notes before adopting a new minor version.
+line is `v0.3.x`: a patch release deprecates and never removes, and removals wait
+for the next minor version (`v0.3.17`, and the release after `v0.3.18` that
+renamed the Runtime names to Sandbox, were the exceptions). Review release notes
+before adopting a new minor version.
+
+## [0.3.19] — 2026-10-21
+
+### Added
+
+- `errors.Is` matches `ErrNotBound` for a call on a Computer handle with no
+  binding, such as after Stop, and `ErrIdleTimeoutUnsupported` for
+  `SetIdleTimeout` on a Computer started without a lifetime policy.
+- The module ships its Apache-2.0 `LICENSE`.
+- `Session.OpenFile` streams a file in the session's working directory without
+  buffering it, such as a file a turn's `Result.Artifacts` names (by its
+  `RelativePath`). The caller closes the returned reader.
+- `errors.Is` matches `ErrFeatureDisabled` (403 `/errors/feature-disabled`) when
+  the project doesn't have the feature a call needs.
+
+### Changed
+
+- **Breaking:** the names for what a started Computer runs in say Sandbox
+  again, matching the API's `sandbox_id`. The Runtime names from 0.3.18 are
+  removed, with no aliases:
+  - `Computer.RuntimeID` → `Computer.SandboxID`
+  - `Computer.RuntimeDetails` → `Computer.SandboxDetails`
+  - `RuntimeDetails` → `SandboxDetails`
+  - `RuntimeLifetime` → `SandboxLifetime`
+  - `RuntimeHandle` → `SandboxHandle`
+  - `RuntimeGoneError` → `SandboxGoneError`
+  - `RuntimeFailedError` → `SandboxFailedError`
+  - `RuntimeRetainedError` → `SandboxRetainedError`
+  - `RuntimeUnusableError` → `SandboxUnusableError` (`PodPoisonedError` is
+    still its deprecated alias)
+  - the `RuntimeID` field → `SandboxID` on `Binding`,
+    `AttachCredentialsRequest`, `AttachAuthorizationCommittedError`,
+    `SandboxFailedError`, `SandboxRetainedError` and `ReadyTimeoutError`
+  - `CurrentRuntimeID` → `CurrentSandboxID` on `APIError` and
+    `BindingRevisionConflictError`
+
+  The deprecated `Computer.SandboxID`, `SandboxHandle`, `SandboxGoneError`,
+  `SandboxFailedError` and `SandboxID` / `CurrentSandboxID` fields are the names
+  again and are no longer deprecated; each error and record has one id field. A
+  `Binding` logs its id as `sandbox_id` and a `Computer` prints it as `sandbox:`.
+  `RuntimeRevision` and `MaxRuntimeAgeSeconds` keep the API's names.
+- A `Binding` marshals as schema 2, which names the sandbox id `sandbox_id`.
+  Bindings saved as schema 1 (`runtime_id`) still load. Earlier SDKs can't read
+  schema 2, so upgrade every process that reads bindings before any of them saves
+  one.
+- `DelegateDesktop`, `TakeControl` and `ReleaseControl` return an error for an
+  empty session name instead of using a session called "main": a Computer has no
+  default session.
+- The artifact methods (`ListArtifacts`, `ReadArtifact`, `OpenArtifact`,
+  `ZipArtifacts` and `UploadArtifact`) return an error that matches
+  `ErrFeatureDisabled` (with `errors.Is`) when the project doesn't have the
+  `artifacts` feature. Read a turn's files with
+  `ReadFile` or `OpenFile` instead.
+
+### Removed
+
+- **Breaking:** `OrphanDownloads`, `ClaimOrphanDownload`, `DiscardOrphanDownload` and the
+  deprecated `ListOrphanDownloads` are removed, with the API's `/downloads/orphans` routes. A browser
+  download the Computer can't link to a session goes to no session and is deleted
+  after an hour. To get a download back, ask for it in the goal: the agent copies
+  it into the working directory and lists it in the turn's result.
+
+### Fixed
+
+- `Wait` ends its server-side wait a second before its context's deadline,
+  leaving that second for the turn to come back, instead of waiting until the
+  deadline and failing with the context's error and no turn.
+- `Run` on a context that has already ended sends nothing and returns the
+  context's error, rather than a `*RunUnconfirmedError` for a run never sent.
+- An event stream on which a read waits 60 seconds without receiving anything,
+  not even the Computer's keepalive, is reopened from its cursor instead of
+  hanging until the context ends. Time the caller spends handling an event
+  doesn't count.
+- `CreateComputer` rejects a `CaptureKeypair` or `PriorCaptureKeypairs` option
+  for an ephemeral Computer, which saves no state, instead of ignoring it.
+- The README's delegate loop ends on the result of the turn it started, not on
+  an earlier turn's result replayed from an empty cursor.
+- README examples use the `pine` import name throughout and check `Delegate`'s error,
+  they say that `AttachComputer` is deprecated in favour of `StartComputer`, and the
+  diagnostics section no longer calls diagnostics unreleased.
 
 ## [0.3.18] — 2026-10-17
 

@@ -7,12 +7,11 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 )
 
-func TestRuntimeDetailsReadsOnlyTheSavedGeneration(t *testing.T) {
+func TestSandboxDetailsReadsOnlyTheSavedGeneration(t *testing.T) {
 	for _, state := range []string{"Running", "Paused", "Resuming", "SaveFailed", "Unavailable", "Stopping"} {
 		t.Run(state, func(t *testing.T) {
 			reads := 0
@@ -33,7 +32,7 @@ func TestRuntimeDetailsReadsOnlyTheSavedGeneration(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			details, err := comp.RuntimeDetails(context.Background())
+			details, err := comp.SandboxDetails(context.Background())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -41,7 +40,7 @@ func TestRuntimeDetailsReadsOnlyTheSavedGeneration(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if details.ID != binding.RuntimeID || details.State != legacy || details.Reason != "reason" ||
+			if details.ID != binding.SandboxID || details.State != legacy || details.Reason != "reason" ||
 				details.Message != "message" || details.Retryable == nil || !*details.Retryable || details.OperationID != "op" ||
 				details.CreatedAt == nil || details.ExpiresAt == nil || details.ExpiresAt.Sub(*details.CreatedAt) != 5*time.Minute || reads != 2 {
 				t.Fatalf("lost lifecycle metadata: %+v (legacy=%s reads=%d)", details, legacy, reads)
@@ -50,7 +49,7 @@ func TestRuntimeDetailsReadsOnlyTheSavedGeneration(t *testing.T) {
 	}
 }
 
-func TestRuntimeDetailsPreservesOptionalRetryVerdict(t *testing.T) {
+func TestSandboxDetailsPreservesOptionalRetryVerdict(t *testing.T) {
 	for _, tc := range []struct {
 		name, status           string
 		wantPresent, wantRetry bool
@@ -81,7 +80,7 @@ func TestRuntimeDetailsPreservesOptionalRetryVerdict(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			details, err := comp.RuntimeDetails(context.Background())
+			details, err := comp.SandboxDetails(context.Background())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -92,7 +91,7 @@ func TestRuntimeDetailsPreservesOptionalRetryVerdict(t *testing.T) {
 	}
 }
 
-func TestRuntimeDetailsOldServerAndErrorsDoNotReplaceBinding(t *testing.T) {
+func TestSandboxDetailsOldServerAndErrorsDoNotReplaceBinding(t *testing.T) {
 	for _, code := range []int{200, 401, 403, 404, 500} {
 		t.Run(fmt.Sprint(code), func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -112,7 +111,7 @@ func TestRuntimeDetailsOldServerAndErrorsDoNotReplaceBinding(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			details, err := comp.RuntimeDetails(context.Background())
+			details, err := comp.SandboxDetails(context.Background())
 			if code == 200 {
 				if err != nil || details.CreatedAt != nil || details.ExpiresAt != nil || details.OperationID != "" || details.Retryable != nil {
 					t.Fatalf("old server: %+v %v", details, err)
@@ -140,7 +139,7 @@ func TestRuntimeDetailsOldServerAndErrorsDoNotReplaceBinding(t *testing.T) {
 	}
 }
 
-func TestIdleTimeoutEditUsesSavedRuntimeAndDoesNotReplayConflicts(t *testing.T) {
+func TestIdleTimeoutEditUsesSavedSandboxAndDoesNotReplayConflicts(t *testing.T) {
 	for _, code := range []int{200, 409, 412, 503} {
 		t.Run(fmt.Sprint(code), func(t *testing.T) {
 			writes := 0
@@ -199,7 +198,7 @@ func TestIdleTimeoutEditUsesSavedRuntimeAndDoesNotReplayConflicts(t *testing.T) 
 	}
 }
 
-func TestIdleTimeoutEditRejectsLegacyRuntimeWithoutWriting(t *testing.T) {
+func TestIdleTimeoutEditRejectsLegacySandboxWithoutWriting(t *testing.T) {
 	reads := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "GET" || r.URL.Path != "/sandboxes/saved-runtime" {
@@ -225,7 +224,7 @@ func TestIdleTimeoutEditRejectsLegacyRuntimeWithoutWriting(t *testing.T) {
 	if reads != 0 {
 		t.Fatal("invalid input sent a request")
 	}
-	if _, err := comp.SetIdleTimeout(context.Background(), time.Minute); err == nil || !strings.Contains(err.Error(), "no admitted lifetime policy") {
+	if _, err := comp.SetIdleTimeout(context.Background(), time.Minute); !errors.Is(err, ErrIdleTimeoutUnsupported) {
 		t.Fatalf("unexpected legacy result: %v", err)
 	}
 	if reads != 1 {

@@ -30,26 +30,6 @@ func (c *Client) Capture(ctx context.Context, token string) (json.RawMessage, er
 	return c.postJSON(ctx, "/v1/coord/capture", token, map[string]any{})
 }
 
-// ListOrphanDownloads lists unclaimed downloads (ct_, raw).
-func (c *Client) ListOrphanDownloads(ctx context.Context, token string) (json.RawMessage, error) {
-	return c.getJSON(ctx, "/downloads/orphans", token)
-}
-
-// ClaimOrphanDownload attributes an orphan download to a session (ct_, raw).
-func (c *Client) ClaimOrphanDownload(ctx context.Context, token, guid, sessionName, filename string) (json.RawMessage, error) {
-	body := map[string]any{"session_name": sessionName}
-	if filename != "" {
-		body["filename"] = filename
-	}
-	return c.postJSON(ctx, "/downloads/orphans/"+url.PathEscape(guid)+"/claim", token, body)
-}
-
-// DiscardOrphanDownload drops an orphan download (ct_).
-func (c *Client) DiscardOrphanDownload(ctx context.Context, token, guid string) error {
-	_, err := c.do(ctx, "DELETE", "/downloads/orphans/"+url.PathEscape(guid), token, nil)
-	return err
-}
-
 // ListOrphanTabs lists the browser tabs no session owns (ct_, raw).
 func (c *Client) ListOrphanTabs(ctx context.Context, token string) (json.RawMessage, error) {
 	return c.getJSON(ctx, "/orphans", token)

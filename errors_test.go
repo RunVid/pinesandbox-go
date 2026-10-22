@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -136,12 +138,59 @@ func TestControlSentinels_SlugsInTaxonomy(t *testing.T) {
 	for _, e := range f.Entries {
 		known[e.Type] = true
 	}
-	for _, s := range []*APIError{ErrControlNotHeld, ErrSessionNotFound, ErrTaskNotReady, ErrSessionBusy, ErrSessionLimit, ErrTaskNotFound, ErrNoActiveTurn, ErrNoActiveTask, ErrActionNotImplemented} {
+	for _, s := range []*APIError{ErrControlNotHeld, ErrSessionNotFound, ErrTaskNotReady, ErrSessionBusy, ErrSessionLimit, ErrTaskNotFound, ErrNoActiveTurn, ErrNoActiveTask, ErrActionNotImplemented, ErrFeatureDisabled} {
 		for _, slug := range append([]string{s.ProblemType}, s.AltProblemTypes...) {
 			if !known[slug] {
 				t.Errorf("sentinel slug %q is not in error-taxonomy.json (typo or renamed server slug)", slug)
 			}
 		}
+	}
+}
+
+// TestErrFeatureDisabled_ArtifactMethodsWithoutTheFeature: a project without the artifacts
+// feature gets 403 /errors/feature-disabled from every artifact route; each artifact method
+// surfaces it as ErrFeatureDisabled (not a token rejection), while the workdir file reads a
+// turn's result names keep working.
+func TestErrFeatureDisabled_ArtifactMethodsWithoutTheFeature(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/v1/sessions/s1/artifacts") {
+			w.Header().Set("Content-Type", "application/problem+json")
+			w.WriteHeader(http.StatusForbidden)
+			fmt.Fprint(w, `{"type":"/errors/feature-disabled","status":403,"detail":"artifacts","retryable":false}`)
+			return
+		}
+		fmt.Fprint(w, "file-bytes")
+	}))
+	defer srv.Close()
+	comp := newComputer("c1", make([]byte, 32))
+	if err := comp.adopt(buildTestConnection(t, "http://unused", srv.URL), "sb-1", "ct_tok", "running"); err != nil {
+		t.Fatal(err)
+	}
+	sess, err := comp.AdoptSession("s1", "ps_tok")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	calls := map[string]func() error{
+		"ListArtifacts":  func() error { _, e := sess.ListArtifacts(ctx, ""); return e },
+		"ReadArtifact":   func() error { _, e := sess.ReadArtifact(ctx, "a1"); return e },
+		"OpenArtifact":   func() error { _, e := sess.OpenArtifact(ctx, "a1"); return e },
+		"ZipArtifacts":   func() error { _, e := sess.ZipArtifacts(ctx, ""); return e },
+		"UploadArtifact": func() error { _, e := sess.UploadArtifact(ctx, "o.txt", []byte("b")); return e },
+	}
+	for name, call := range calls {
+		err := call()
+		if !errors.Is(err, ErrFeatureDisabled) || IsRetryable(err) {
+			t.Errorf("%s err = %T (%v), want ErrFeatureDisabled, not retryable", name, err, err)
+		}
+	}
+	rc, err := sess.OpenFile(ctx, "out/report.pdf")
+	if err != nil {
+		t.Fatalf("OpenFile: %v", err)
+	}
+	defer rc.Close()
+	if b, err := io.ReadAll(rc); err != nil || string(b) != "file-bytes" {
+		t.Errorf("OpenFile = %q, %v", b, err)
 	}
 }
 
@@ -160,7 +209,7 @@ func TestErrCapacityExceeded_PublicSurface(t *testing.T) {
 // TestCreateComputer_CreateRateLimitedReachesCaller: a create refused for the project's
 // per-minute rate reaches the caller as ErrCreateRateLimited with the server's Retry-After.
 // The SDK sends the create once and nothing after it: no retry, no readiness wait, no cleanup
-// of a runtime that was never allocated.
+// of a Computer sandbox that was never started.
 func TestCreateComputer_CreateRateLimitedReachesCaller(t *testing.T) {
 	var requests atomic.Int32
 	control := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

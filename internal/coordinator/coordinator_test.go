@@ -356,7 +356,7 @@ func TestError_RFC9457Mapping(t *testing.T) {
 	}
 }
 
-func TestSandboxNotFoundMapsToRuntimeGoneError(t *testing.T) {
+func TestSandboxNotFoundMapsToSandboxGoneError(t *testing.T) {
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/problem+json")
 		w.WriteHeader(http.StatusNotFound)
@@ -364,28 +364,28 @@ func TestSandboxNotFoundMapsToRuntimeGoneError(t *testing.T) {
 	})
 
 	_, err := c.ListSessions(context.Background(), "ct_bound")
-	var gone *RuntimeGoneError
+	var gone *SandboxGoneError
 	if !errors.As(err, &gone) {
-		t.Fatalf("sandbox-not-found → %T (%v), want *RuntimeGoneError", err, err)
+		t.Fatalf("sandbox-not-found → %T (%v), want *SandboxGoneError", err, err)
 	}
 	var ae *problem.APIError
 	if !errors.As(err, &ae) || ae.ProblemType != "/errors/sandbox-not-found" || ae.RequestID != "rid-gone" {
 		t.Errorf("wrapped APIError diagnostics lost: %+v", ae)
 	}
 	if msg := err.Error(); !strings.Contains(msg, "op=GET /sessions") || !strings.Contains(msg, "request_id=rid-gone") {
-		t.Errorf("RuntimeGoneError message lost operation/request context: %q", msg)
+		t.Errorf("SandboxGoneError message lost operation/request context: %q", msg)
 	}
 }
 
-func TestLegacyBareListSessions404MapsToRuntimeGoneError(t *testing.T) {
+func TestLegacyBareListSessions404MapsToSandboxGoneError(t *testing.T) {
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Computer not found", http.StatusNotFound)
 	})
 
 	_, err := c.ListSessions(context.Background(), "ct_bound")
-	var gone *RuntimeGoneError
+	var gone *SandboxGoneError
 	if !errors.As(err, &gone) {
-		t.Fatalf("legacy bare gateway 404 → %T (%v), want *RuntimeGoneError", err, err)
+		t.Fatalf("legacy bare gateway 404 → %T (%v), want *SandboxGoneError", err, err)
 	}
 
 	// A bare 404 on a named session is ambiguous on an old coordinator and
@@ -404,7 +404,7 @@ func TestSessionNotFoundRemainsAPIError(t *testing.T) {
 	})
 
 	_, err := c.GetSession(context.Background(), "ct_bound", "gone")
-	var gone *RuntimeGoneError
+	var gone *SandboxGoneError
 	if errors.As(err, &gone) {
 		t.Fatal("session-not-found must not be classified as a missing sandbox")
 	}
@@ -496,13 +496,13 @@ func TestMalformedTypedResponses(t *testing.T) {
 	}
 }
 
-func TestGatewayMarkerDoesNotOverrideRuntimeContract(t *testing.T) {
+func TestGatewayMarkerDoesNotOverrideComputerContract(t *testing.T) {
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Computer-Spec-Version", "2")
 		fmt.Fprint(w, `{"sessions":[]}`)
 	})
 	if _, err := c.ListSessions(context.Background(), "ct_"); err != nil {
-		t.Fatalf("gateway marker rejected a runtime response: %v", err)
+		t.Fatalf("gateway marker rejected a Computer's response: %v", err)
 	}
 }
 

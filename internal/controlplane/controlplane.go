@@ -66,14 +66,14 @@ const (
 
 // CreateComputer provisions a Computer sandbox. The body intentionally contains
 // only caller-owned settings; the lifecycle server expands the project's signed
-// runtime policy into the operator-managed platform configuration.
+// Computer policy into the operator-managed platform configuration.
 func (c *Client) CreateComputer(ctx context.Context, body map[string]any) (*SandboxInfo, error) {
 	b, err := json.Marshal(body)
 	if err != nil {
 		return nil, fmt.Errorf("pinesandbox: marshal create payload: %w", err)
 	}
 	const path = "/computer-sandboxes"
-	// A create ID permits identical retries without extending runtime expiry.
+	// A create ID permits identical retries without extending the Computer sandbox's expiry.
 	createID, _ := body["create_id"].(string)
 	keyed := createID != ""
 	for repeats := 0; ; repeats++ {
@@ -135,7 +135,7 @@ func (c *Client) Stop(ctx context.Context, sandboxID, operationID string) error 
 	return nil
 }
 
-// SetIdleTimeout updates the observed runtime once. A lost response or stale
+// SetIdleTimeout updates the observed Computer sandbox once. A lost response or stale
 // observation is returned to the caller; never replay an older policy edit.
 func (c *Client) SetIdleTimeout(ctx context.Context, sandboxID string, seconds int, etag string) (*SandboxInfo, error) {
 	if etag == "" {

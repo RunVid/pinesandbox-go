@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -264,6 +265,61 @@ func TestAgentRun_ContextEndKeepsItsKey(t *testing.T) {
 	_, err = c.AgentRun(ctx, "ct_a", "s", "g", AgentRunOptions{IdempotencyKey: "message-42"})
 	if !errors.As(err, &unconfirmed) || unconfirmed.IdempotencyKey != "message-42" || !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled in flight: err=%v", err)
+	}
+}
+
+// A run is unconfirmed only when it may have reached the Computer: a context that
+// ended before the call sends nothing, while a typed 503 may come from the gateway
+// after the Computer accepted the run.
+func TestAgentRun_UnsentIsNotUnconfirmed_TypedGateway503Is(t *testing.T) {
+	var unconfirmed *RunUnconfirmedError
+	var sent atomic.Int32
+	problemReply := func(body string) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			sent.Add(1)
+			w.Header().Set("Content-Type", "application/problem+json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			fmt.Fprint(w, body)
+		}
+	}
+
+	// A context that ended before the call sends nothing, so nothing is unconfirmed.
+	c := newTestClient(t, problemReply(`{"type":"/errors/sandbox-not-ready","status":503,"retryable":true}`))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := c.AgentRun(ctx, "ct_a", "s", "g", AgentRunOptions{IdempotencyKey: "k"})
+	if !errors.Is(err, context.Canceled) || errors.As(err, &unconfirmed) || sent.Load() != 0 {
+		t.Fatalf("canceled before the call: sent=%d err=%v", sent.Load(), err)
+	}
+
+	// The gateway answers an upstream failure, even one after the Computer accepted
+	// the run, with a typed 503: the run stays unconfirmed, with the key to resend.
+	sent.Store(0)
+	c = newTestClient(t, problemReply(`{"type":"/errors/sandbox-not-ready","status":503,"retryable":true}`))
+	_, err = c.AgentRun(context.Background(), "ct_a", "s", "g", AgentRunOptions{IdempotencyKey: "k"})
+	if !errors.As(err, &unconfirmed) || unconfirmed.IdempotencyKey != "k" || sent.Load() < 2 {
+		t.Fatalf("typed gateway 503: sent=%d err=%v", sent.Load(), err)
+	}
+}
+
+// A context deadline shorter than the timeout ends the wait before the deadline
+// with the turn as it is, never with the context's error.
+func TestAgentWait_EndsBeforeTheContextDeadline(t *testing.T) {
+	var holds []int
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		hold, _ := strconv.Atoi(r.URL.Query().Get("wait_seconds"))
+		holds = append(holds, hold)
+		fmt.Fprint(w, turnJSON)
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	turn, err := c.AgentWait(ctx, "ps_", "s", "turn_t_1", 10*time.Minute)
+	if err != nil || turn.State != "running" {
+		t.Fatalf("turn=%+v err=%v", turn, err)
+	}
+	// 3s of context less the one-second margin leaves under 2s, so no hold is over 1s.
+	if len(holds) == 0 || slices.Max(holds) > 1 {
+		t.Fatalf("holds = %v, want each to end a second before the context deadline", holds)
 	}
 }
 

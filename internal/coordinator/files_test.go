@@ -26,6 +26,7 @@ func TestOp_QueryStripped(t *testing.T) {
 		op   string
 	}{
 		{"ReadFile", func() error { _, e := c.ReadFile(ctx, "ps_", "s", "secret.txt"); return e }, "GET /v1/sessions/s/files"},
+		{"OpenFile", func() error { _, e := c.OpenFile(ctx, "ps_", "s", "secret.txt"); return e }, "GET /v1/sessions/s/files"},
 		{"ListFiles", func() error {
 			_, e := c.ListFiles(ctx, "ps_", "s", ListFilesOptions{Path: "sub", Pattern: "*.txt"})
 			return e
@@ -255,6 +256,88 @@ func TestOpenArtifact_RetriesTransientOpenFault(t *testing.T) {
 	rc, err := c.OpenArtifact(context.Background(), "ps_", "s", "a1")
 	if err != nil {
 		t.Fatalf("OpenArtifact should absorb a pre-headers fault: %v", err)
+	}
+	b, rerr := io.ReadAll(rc)
+	_ = rc.Close()
+	if rerr != nil || string(b) != "retried-bytes" {
+		t.Fatalf("stream = %q, %v", b, rerr)
+	}
+	if n != 2 {
+		t.Errorf("requests = %d, want 2 (1 fault + 1 retry)", n)
+	}
+}
+
+// TestOpenFile_StreamsBytesAndMapsErrors: the streaming workdir read sends the file route
+// with the path as a query (octet-stream Accept) and returns the live body (the caller
+// closes it); a non-2xx maps exactly like the buffered ReadFile — a typed
+// *problem.APIError with the query-less Op — before any byte reaches the caller.
+func TestOpenFile_StreamsBytesAndMapsErrors(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "GET" || r.URL.Path != "/v1/sessions/s/files" {
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+		if r.Header.Get("Accept") != "application/octet-stream" {
+			t.Errorf("Accept = %q", r.Header.Get("Accept"))
+		}
+		switch r.URL.Query().Get("path") {
+		case "out/report 1.pdf":
+			_, _ = w.Write([]byte("streamed-file-bytes"))
+		case "missing.txt":
+			w.Header().Set("Content-Type", "application/problem+json")
+			w.WriteHeader(404)
+			_, _ = io.WriteString(w, `{"type":"/errors/file-not-found","status":404,"detail":"no such file"}`)
+		default:
+			t.Errorf("path = %q", r.URL.Query().Get("path"))
+		}
+	})
+
+	rc, err := c.OpenFile(context.Background(), "ps_", "s", "out/report 1.pdf")
+	if err != nil {
+		t.Fatalf("OpenFile: %v", err)
+	}
+	b, rerr := io.ReadAll(rc)
+	if cerr := rc.Close(); cerr != nil {
+		t.Errorf("Close: %v", cerr)
+	}
+	if rerr != nil || string(b) != "streamed-file-bytes" {
+		t.Fatalf("stream = %q, %v", b, rerr)
+	}
+
+	rc, err = c.OpenFile(context.Background(), "ps_", "s", "missing.txt")
+	if rc != nil {
+		t.Errorf("OpenFile returned a reader with its error")
+	}
+	var ae *problem.APIError
+	if !errors.As(err, &ae) {
+		t.Fatalf("err = %T (%v), want *problem.APIError", err, err)
+	}
+	if ae.Status != 404 || ae.ProblemType != "/errors/file-not-found" {
+		t.Errorf("Status = %d, ProblemType = %q", ae.Status, ae.ProblemType)
+	}
+	if ae.Op != "GET /v1/sessions/s/files" {
+		t.Errorf("Op = %q", ae.Op)
+	}
+}
+
+// TestOpenFile_RetriesTransientOpenFault: like OpenArtifact, the open rides the buffered
+// read's transient-retry budget — a fault before response headers is absorbed.
+func TestOpenFile_RetriesTransientOpenFault(t *testing.T) {
+	var n int
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		n++
+		if n == 1 {
+			conn, _, err := w.(http.Hijacker).Hijack()
+			if err != nil {
+				t.Fatalf("hijack: %v", err)
+			}
+			_ = conn.Close() // pre-headers connection fault
+			return
+		}
+		_, _ = w.Write([]byte("retried-bytes"))
+	})
+	rc, err := c.OpenFile(context.Background(), "ps_", "s", "out.txt")
+	if err != nil {
+		t.Fatalf("OpenFile should absorb a pre-headers fault: %v", err)
 	}
 	b, rerr := io.ReadAll(rc)
 	_ = rc.Close()

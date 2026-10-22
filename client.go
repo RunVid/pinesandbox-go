@@ -30,7 +30,7 @@ type Connection struct {
 	specMajor int
 	// clock is the time every wait and backoff uses; nil means the system clock.
 	clock wait.Clock
-	// newCoord builds the coordinator client for a runtime's data host. A field so tests
+	// newCoord builds the coordinator client for a Computer sandbox's data host. A field so tests
 	// can point it at an httptest server instead of the derived gateway host.
 	newCoord func(sandboxID string) (*coordinator.Client, error)
 }
@@ -43,9 +43,9 @@ func (c *Connection) requirePortal(what string) (*tokens.AttachCredentialsSource
 	return c.portal, nil
 }
 
-// runtimeHandle is the lifecycle handle for one runtime, on this connection's clock.
-func (c *Connection) runtimeHandle(runtimeID, status string) *RuntimeHandle {
-	h := newRuntimeHandle(c.controlPlane, runtimeID, status)
+// sandboxHandle is the lifecycle handle for one Computer sandbox, on this connection's clock.
+func (c *Connection) sandboxHandle(sandboxID, status string) *SandboxHandle {
+	h := newSandboxHandle(c.controlPlane, sandboxID, status)
 	clock := wait.Or(c.clock)
 	h.clock, h.sleeper = clock.Now, clock.Sleep
 	return h
@@ -70,18 +70,18 @@ type ControlTokenProvider func(ctx context.Context, forceRefresh bool) (string, 
 // must exceed req.ExpectedBindingRevision, and a persistent attach needs KeyAssertion.
 type AttachCredentialsProvider func(ctx context.Context, req AttachCredentialsRequest) (*AttachCredentials, error)
 
-// AttachCredentialsRequest names the runtime incarnation one attach authorizes.
+// AttachCredentialsRequest names the Computer and the Computer sandbox one attach authorizes.
 type AttachCredentialsRequest struct {
 	ComputerID  string
 	PodUID      string
 	CoordBootID string
-	RuntimeID   string
+	SandboxID   string
 	// PKComputer is the base64url X25519 capture public key and KeyGeneration its
 	// generation; both are empty for an ephemeral attach.
 	PKComputer              string
 	KeyGeneration           int
 	ExpectedBindingRevision int64
-	// IdempotencyKey is stable for the runtime incarnation, so a resent request returns
+	// IdempotencyKey is stable for that Computer sandbox, so a resent request returns
 	// the same receipt.
 	IdempotencyKey string
 	Location       *ComputerLocation
@@ -203,7 +203,7 @@ func callableAttach(fn AttachCredentialsProvider) func(context.Context, tokens.C
 	return func(ctx context.Context, req tokens.CredentialsRequest) (*tokens.AttachCredentials, error) {
 		pub := AttachCredentialsRequest{
 			ComputerID: req.ComputerID, PodUID: req.PodUID, CoordBootID: req.CoordBootID,
-			RuntimeID: req.SandboxID, PKComputer: req.PKComputer, KeyGeneration: req.KeyGeneration,
+			SandboxID: req.SandboxID, PKComputer: req.PKComputer, KeyGeneration: req.KeyGeneration,
 			ExpectedBindingRevision: req.ExpectedBindingRevision, IdempotencyKey: req.IdempotencyKey,
 			Ephemeral: req.Ephemeral,
 		}
@@ -267,6 +267,9 @@ func (c *Client) CreateComputer(ctx context.Context, opts AttachOptions) (*Compu
 		return nil, err
 	}
 	opts.Ephemeral = opts.Ephemeral || creds.Ephemeral
+	if opts.Ephemeral && (opts.CaptureKeypair != nil || len(opts.PriorCaptureKeypairs) > 0) {
+		return nil, fmt.Errorf("pinesandbox: an ephemeral Computer takes no capture keypair")
+	}
 	comp := newComputer(creds.ID, creds.Key)
 	comp.ephemeral = opts.Ephemeral
 	for version, key := range creds.PriorKeys {
@@ -274,7 +277,7 @@ func (c *Client) CreateComputer(ctx context.Context, opts AttachOptions) (*Compu
 			return nil, err
 		}
 	}
-	if opts.PriorCaptureKeypairs == nil {
+	if opts.PriorCaptureKeypairs == nil && !opts.Ephemeral {
 		opts.PriorCaptureKeypairs = creds.PriorCaptureKeypairs
 	}
 	// An ephemeral (access-lease-only) Computer has NO capture identity: never
@@ -311,13 +314,13 @@ func (c *Client) CreateComputer(ctx context.Context, opts AttachOptions) (*Compu
 }
 
 // StartComputer starts an EXISTING persistent Computer by its stored id + state key.
-// It allocates a fresh runtime, attaches the Computer and restores its saved state.
+// It starts the Computer, attaches to it and restores its saved state.
 func (c *Client) StartComputer(ctx context.Context, creds Credentials, opts StartOptions) (*Computer, error) {
 	return c.startWithCredentials(ctx, creds, opts, false)
 }
 
 // StopComputer gracefully stops the binding observed for this Computer ID.
-// It needs project authorization, but no private key or saved runtime token.
+// It needs project authorization, but no private key or saved Computer token.
 // A concurrent newer binding is never followed by this invocation.
 func (c *Client) StopComputer(ctx context.Context, id string) (bool, error) {
 	if !computerIDRE.MatchString(id) {
@@ -338,16 +341,16 @@ func (c *Client) StopComputer(ctx context.Context, id string) (bool, error) {
 	if reference.SandboxID == "" {
 		return true, nil
 	}
-	return c.conn.runtimeHandle(reference.SandboxID, "").Stop(ctx)
+	return c.conn.sandboxHandle(reference.SandboxID, "").Stop(ctx)
 }
 
-// RecoverComputer explicitly releases a failed runtime before saved-state Start.
-// It discards unsaved memory and never replaces a healthy paused or running runtime.
+// RecoverComputer shuts down a Computer that failed, then Starts it from saved state.
+// It discards unsaved memory and never replaces a healthy running or paused Computer.
 func (c *Client) RecoverComputer(ctx context.Context, creds Credentials, opts StartOptions) (*Computer, error) {
 	return c.startWithCredentials(ctx, creds, opts, true)
 }
 
-func (c *Client) startWithCredentials(ctx context.Context, creds Credentials, opts StartOptions, recoverRuntime bool) (*Computer, error) {
+func (c *Client) startWithCredentials(ctx context.Context, creds Credentials, opts StartOptions, recovering bool) (*Computer, error) {
 	if err := creds.validate(); err != nil {
 		return nil, err
 	}
@@ -356,10 +359,10 @@ func (c *Client) startWithCredentials(ctx context.Context, creds Credentials, op
 		PriorCaptureKeypairs: creds.PriorCaptureKeypairs, Ephemeral: creds.Ephemeral,
 		Timeout: opts.Timeout, ReadyTimeout: opts.ReadyTimeout, Location: opts.Location,
 		Metadata: opts.Metadata, MaxBindAttempts: opts.MaxBindAttempts, BindReadyTimeout: opts.BindReadyTimeout,
-	}, recoverRuntime)
+	}, recovering)
 }
 
-func (c *Client) startComputer(ctx context.Context, id string, key []byte, opts AttachOptions, recoverRuntime bool) (*Computer, error) {
+func (c *Client) startComputer(ctx context.Context, id string, key []byte, opts AttachOptions, recovering bool) (*Computer, error) {
 	if err := validateIdentity(id, key); err != nil {
 		return nil, err
 	}
@@ -381,16 +384,16 @@ func (c *Client) startComputer(ctx context.Context, id string, key []byte, opts 
 			return nil, err
 		}
 		if err == nil && !computeReleased(info) {
-			if !recoverRuntime && info.Status != "stopping" {
-				return nil, &RuntimeRetainedError{RuntimeID: reference.SandboxID, State: info.Status}
+			if !recovering && info.Status != "stopping" {
+				return nil, &SandboxRetainedError{SandboxID: reference.SandboxID, State: info.Status}
 			}
-			handle := c.conn.runtimeHandle(reference.SandboxID, info.Status)
-			released, err := handle.releaseFailedRuntime(ctx, info)
+			handle := c.conn.sandboxHandle(reference.SandboxID, info.Status)
+			released, err := handle.releaseFailedSandbox(ctx, info)
 			if err != nil {
 				return nil, err
 			}
 			if !released {
-				return nil, fmt.Errorf("pinesandbox: old runtime release unconfirmed; no replacement was allocated")
+				return nil, fmt.Errorf("pinesandbox: the failed Computer's shutdown is unconfirmed; nothing was started")
 			}
 		}
 	}
@@ -420,9 +423,9 @@ func (c *Client) AttachComputer(ctx context.Context, id string, key []byte, opts
 }
 
 // DeleteComputer PERMANENTLY deletes the Computer with this id: its identity and saved
-// state end (Stop and Kill keep both). Portal tombstones the id at once, destroys any
-// bound runtime asynchronously, purges saved state after 24 hours, and never accepts the
-// id again. Idempotent and non-disclosing: an unknown, already-deleted, or other project's
+// state end (Stop and Kill keep both). Portal tombstones the id at once, shuts the
+// Computer down asynchronously if it's running, purges saved state after 24 hours,
+// and never accepts the id again. Idempotent and non-disclosing: an unknown, already-deleted, or other project's
 // id also returns nil. There is no undelete. Use Computer.Delete to kill a live handle
 // first. Errors: *ComputerDeletionError (422 malformed id), *ProjectAccessDenied (403),
 // *AttachCredentialsError (401, 429, 5xx).
@@ -447,7 +450,6 @@ func attachClientError(comp *Computer, initialRevision int64, credentials *Crede
 	}
 	return &AttachAuthorizationCommittedError{
 		BindingRevision: revision,
-		RuntimeID:       sandboxID,
 		SandboxID:       sandboxID,
 		Credentials:     credentials,
 		Err:             err,
@@ -461,11 +463,11 @@ type AdoptOptions struct {
 }
 
 // AdoptExisting reconstructs an attached Computer from its persisted
-// {id, key, runtime id, computerToken} without allocating or attaching anything. Use it
+// {id, key, sandbox id, computerToken} without starting or attaching anything. Use it
 // to keep driving a running Computer across requests from a backend that saved its
 // ct_. An optional AdoptOptions
 // preserves ephemeral mode and binding revision; omission uses persistent mode
-// and revision zero. Lifecycle operations observe the runtime's current state.
+// and revision zero. Lifecycle operations observe the Computer's current state.
 func (c *Client) AdoptExisting(ctx context.Context, id string, key []byte, sandboxID, computerToken string, options ...AdoptOptions) (*Computer, error) {
 	if len(options) > 1 {
 		return nil, fmt.Errorf("pinesandbox: AdoptExisting accepts at most one AdoptOptions")

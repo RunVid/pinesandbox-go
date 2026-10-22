@@ -3,12 +3,38 @@ package pinesandbox
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 )
+
+// TestSessionHelpers_RequireAName: a Computer has no default session, so the session
+// helpers refuse an empty name before sending anything.
+func TestSessionHelpers_RequireAName(t *testing.T) {
+	coordSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+	}))
+	defer coordSrv.Close()
+
+	conn := buildTestConnection(t, "http://unused", coordSrv.URL)
+	comp := newComputer("c1", make([]byte, 32))
+	if err := comp.adopt(conn, "sb-1", "ct_x", "running"); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if _, err := comp.DelegateDesktop(ctx, "", true, true); !errors.Is(err, errSessionNameRequired) {
+		t.Errorf("DelegateDesktop(\"\") = %v, want errSessionNameRequired", err)
+	}
+	if _, err := comp.TakeControl(ctx, ""); !errors.Is(err, errSessionNameRequired) {
+		t.Errorf("TakeControl(\"\") = %v, want errSessionNameRequired", err)
+	}
+	if _, err := comp.ReleaseControl(ctx, ""); !errors.Is(err, errSessionNameRequired) {
+		t.Errorf("ReleaseControl(\"\") = %v, want errSessionNameRequired", err)
+	}
+}
 
 // TestDelegateDesktop_CreatesAndDelegates: an absent session is created (create:true), then
 // a dt_ is minted and folded into a browser-safe envelope carrying NO ct_/ps_.

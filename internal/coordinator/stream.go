@@ -10,6 +10,7 @@ import (
 	"math"
 	"net/url"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"go.pinesandbox.io/computer/internal/base/problem"
@@ -447,7 +448,9 @@ func resumeStream[T any](ctx context.Context, c *Client, path, token string, cur
 		if rid := sr.Headers.Get("X-Request-Id"); rid != "" {
 			requestID = rid
 		}
-		delivered, ferr := pumpFrames(sr.Body, cursor, decode, terminal, yield)
+		body := watchIdle(sr.Body, &transport.TimeoutError{Host: host, Op: op, RequestID: requestID,
+			Msg: "event stream sent nothing for " + streamIdleTimeout.String()})
+		delivered, ferr := pumpFrames(body, cursor, decode, terminal, yield)
 		if errors.Is(ferr, errConsumerStopped) || errors.Is(ferr, errTerminalFrame) || ctx.Err() != nil {
 			return
 		}
@@ -495,6 +498,48 @@ func pumpFrames[T any](body io.ReadCloser, cursor *string, decode func(sse.Frame
 		}
 	}
 	return delivered, nil
+}
+
+// streamIdleTimeout is how long an established stream may send nothing, not even the
+// Computer's keepalive comment (every 20s), before it is treated as dead and reopened.
+var streamIdleTimeout = 60 * time.Second
+
+// idleBody closes a stream body when one read waits streamIdleTimeout for data; the
+// read that the close ends returns idleErr. The timer runs only while a read waits,
+// so a consumer that takes its time between events never counts as a silent stream.
+type idleBody struct {
+	io.ReadCloser
+	timer   *time.Timer
+	idle    atomic.Bool
+	idleErr error
+}
+
+func watchIdle(body io.ReadCloser, idleErr error) *idleBody {
+	b := &idleBody{ReadCloser: body, idleErr: idleErr}
+	b.timer = time.AfterFunc(streamIdleTimeout, func() {
+		b.idle.Store(true)
+		_ = body.Close()
+	})
+	b.timer.Stop()
+	return b
+}
+
+func (b *idleBody) Read(p []byte) (int, error) {
+	if b.idle.Load() {
+		return 0, b.idleErr
+	}
+	b.timer.Reset(streamIdleTimeout)
+	n, err := b.ReadCloser.Read(p)
+	b.timer.Stop()
+	if b.idle.Load() {
+		return n, b.idleErr
+	}
+	return n, err
+}
+
+func (b *idleBody) Close() error {
+	b.timer.Stop()
+	return b.ReadCloser.Close()
 }
 
 // streamRetry charges one reconnect against the budget. It returns true to reconnect (after

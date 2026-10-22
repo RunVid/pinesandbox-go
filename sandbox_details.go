@@ -8,14 +8,15 @@ import (
 	"go.pinesandbox.io/computer/internal/controlplane"
 )
 
-// RuntimeLifetime is the admitted idle policy and scheduled Stop for one runtime.
-// Nil on RuntimeDetails means a legacy runtime without the new policy.
-type RuntimeLifetime = controlplane.Lifetime
+// SandboxLifetime is the idle policy and scheduled Stop a Computer was started with.
+// Nil on SandboxDetails means the Computer was started without a lifetime policy.
+type SandboxLifetime = controlplane.Lifetime
 
-// RuntimeDetails observes one runtime. Missing policy or timestamps remain nil.
-type RuntimeDetails struct {
+// SandboxDetails describes the Computer sandbox the binding names. Missing policy or
+// timestamps remain nil.
+type SandboxDetails struct {
 	RuntimeRevision string
-	Lifecycle       *RuntimeLifetime
+	Lifecycle       *SandboxLifetime
 	ID              string
 	State           string
 	Reason          string
@@ -26,37 +27,37 @@ type RuntimeDetails struct {
 	ExpiresAt       *time.Time
 }
 
-// RuntimeDetails reads this binding directly through the lifecycle API, even
+// SandboxDetails reads this binding directly through the lifecycle API, even
 // while paused. Absence and transport errors never trigger replacement.
-func (c *Computer) RuntimeDetails(ctx context.Context) (*RuntimeDetails, error) {
+func (c *Computer) SandboxDetails(ctx context.Context) (*SandboxDetails, error) {
 	c.mu.Lock()
 	sandbox := c.sandbox
 	c.mu.Unlock()
 	if sandbox == nil {
-		return nil, fmt.Errorf("pinesandbox: Computer has no runtime binding")
+		return nil, ErrNotBound
 	}
 	info, err := sandbox.cp.Get(ctx, sandbox.id)
 	if err != nil {
 		return nil, err
 	}
-	return runtimeDetails(info), nil
+	return sandboxDetails(info), nil
 }
 
-func runtimeDetails(info *controlplane.SandboxInfo) *RuntimeDetails {
-	return &RuntimeDetails{RuntimeRevision: info.RuntimeRevision, Lifecycle: info.Lifecycle, ID: info.ID, State: info.Status, Reason: info.Reason,
+func sandboxDetails(info *controlplane.SandboxInfo) *SandboxDetails {
+	return &SandboxDetails{RuntimeRevision: info.RuntimeRevision, Lifecycle: info.Lifecycle, ID: info.ID, State: info.Status, Reason: info.Reason,
 		Message: info.Message, Retryable: info.Retryable, OperationID: info.OperationID,
 		CreatedAt: info.CreatedAt, ExpiresAt: info.ExpiresAt}
 }
 
-// SetIdleTimeout changes this runtime's idle window. The server applies it
+// SetIdleTimeout changes the running Computer's idle window. The server applies it
 // atomically, or returns a conflict. An unchanged value is not a heartbeat.
-// If the outcome is uncertain, inspect RuntimeDetails before another edit.
-func (c *Computer) SetIdleTimeout(ctx context.Context, timeout time.Duration) (*RuntimeDetails, error) {
+// If the outcome is uncertain, inspect SandboxDetails before another edit.
+func (c *Computer) SetIdleTimeout(ctx context.Context, timeout time.Duration) (*SandboxDetails, error) {
 	c.mu.Lock()
 	sandbox := c.sandbox
 	c.mu.Unlock()
 	if sandbox == nil {
-		return nil, fmt.Errorf("pinesandbox: Computer has no runtime binding")
+		return nil, ErrNotBound
 	}
 	if timeout < time.Minute || timeout%time.Second != 0 {
 		return nil, fmt.Errorf("pinesandbox: idle timeout must be whole seconds and at least one minute")
@@ -66,11 +67,11 @@ func (c *Computer) SetIdleTimeout(ctx context.Context, timeout time.Duration) (*
 		return nil, err
 	}
 	if observed.Lifecycle == nil {
-		return nil, fmt.Errorf("pinesandbox: runtime has no admitted lifetime policy; choose idle timeout on the next Start")
+		return nil, ErrIdleTimeoutUnsupported
 	}
 	updated, err := sandbox.cp.SetIdleTimeout(ctx, sandbox.id, int(timeout/time.Second), observed.ETag)
 	if err != nil {
 		return nil, err
 	}
-	return runtimeDetails(updated), nil
+	return sandboxDetails(updated), nil
 }

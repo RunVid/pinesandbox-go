@@ -105,13 +105,10 @@ var implementedServerSDKOperations = map[string]any{
 	"cancelAuthorRun":      (*Session).CancelAuthor,
 
 	// admin: state and orphans
-	"getState":              (*Computer).Snapshot,
-	"captureCheckpoint":     (*Computer).Checkpoint,
-	"listOrphans":           (*Computer).OrphanTabs,
-	"deleteOrphan":          (*Computer).CloseOrphanTab,
-	"listDownloadOrphans":   (*Computer).OrphanDownloads,
-	"claimDownloadOrphan":   (*Computer).ClaimOrphanDownload,
-	"discardDownloadOrphan": (*Computer).DiscardOrphanDownload,
+	"getState":          (*Computer).Snapshot,
+	"captureCheckpoint": (*Computer).Checkpoint,
+	"listOrphans":       (*Computer).OrphanTabs,
+	"deleteOrphan":      (*Computer).CloseOrphanTab,
 
 	// passkeys
 	"listPasskeys":                 (*Computer).ListPasskeys,

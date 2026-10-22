@@ -116,8 +116,9 @@ type (
 // repeated with the same key returns the turn that key admitted. Without one, Run uses a
 // key of its own so its retry after a lost response is safe; a fresh process recovering
 // from a crash must pass the key it saved to get the same turn back. When no response
-// arrives, or ctx ends first, Run returns a *RunUnconfirmedError naming the key: send the
-// run again with it.
+// arrives, or ctx ends while one is outstanding, Run returns a *RunUnconfirmedError naming
+// the key: send the run again with it. Any 503 counts as no response,
+// ErrLeaseRefreshUnavailable included, since it doesn't show whether the Computer acted.
 func (a *AgentMode) Run(ctx context.Context, goal string, opts RunOptions) (*AgentTurn, error) {
 	if opts.IdempotencyKey == "" {
 		key, err := uuidV7()
@@ -130,7 +131,9 @@ func (a *AgentMode) Run(ctx context.Context, goal string, opts RunOptions) (*Age
 }
 
 // Wait returns the turn once it ends, with its result or its question, or after
-// timeout with the turn still running or canceling; a zero timeout reads it once. A read
+// timeout with the turn still running or canceling; a zero timeout reads it once. When
+// ctx has a deadline, Wait's server-side wait ends a second before it, leaving that second
+// for the turn to come back; with less than a second left it reads the turn once. A read
 // that comes back before its server-side hold is followed by a pause of up to a second. A read
 // whose response was lost (a network fault, a 408, or a gateway 502, 503 or 504), or
 // whose problem is marked retryable, is read again until the timeout; any other error

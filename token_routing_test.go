@@ -83,6 +83,9 @@ func TestFacade_TokenRouting_Comprehensive(t *testing.T) {
 	if rc, err := sess.OpenArtifact(ctx, "a1"); err == nil {
 		_ = rc.Close()
 	}
+	if rc, err := sess.OpenFile(ctx, "f"); err == nil {
+		_ = rc.Close()
+	}
 	_, _ = sess.ZipArtifacts(ctx, "")
 	_, _ = sess.UploadArtifact(ctx, "o", []byte("b"))
 	_, _ = sess.ListTabs(ctx)
@@ -141,9 +144,6 @@ func TestFacade_TokenRouting_Comprehensive(t *testing.T) {
 	_, _ = comp.DeleteSkillVersion(ctx, "sk1", "1")
 	_, _ = comp.LatestSnapshot(ctx)
 	_, _ = comp.Capture(ctx)
-	_, _ = comp.ListOrphanDownloads(ctx)
-	_, _ = comp.ClaimOrphanDownload(ctx, "g1", "s1", "")
-	_ = comp.DiscardOrphanDownload(ctx, "g1")
 	_, _ = comp.ListPasskeys(ctx)
 	_ = comp.DeletePasskey(ctx, "cred")
 	_, _ = comp.PendingPasskeyCeremonies(ctx)
@@ -159,7 +159,6 @@ func TestFacade_TokenRouting_Comprehensive(t *testing.T) {
 	_, _ = comp.Checkpoint(ctx)
 	_, _ = comp.OrphanTabs(ctx)
 	_ = comp.CloseOrphanTab(ctx, "T9")
-	_, _ = comp.OrphanDownloads(ctx)
 	_, _ = sess.Agent().EventsPage(ctx, EventsPageOptions{})
 	_, _ = sess.StartLearn(ctx, "")
 
@@ -229,9 +228,6 @@ func TestFacade_TokenRouting_Comprehensive(t *testing.T) {
 		"DELETE /orphans/T9":                    ct,
 		"GET /state":                            ct,
 		"POST /v1/coord/capture":                ct,
-		"GET /downloads/orphans":                ct,
-		"POST /downloads/orphans/g1/claim":      ct,
-		"DELETE /downloads/orphans/g1":          ct,
 		"GET /v1/passkeys":                      ct,
 		"DELETE /v1/passkeys/cred":              ct,
 		"GET /v1/passkeys/ceremonies":           ct,
@@ -300,6 +296,9 @@ func TestFacade_ReadTokenFallsBackToComputerToken(t *testing.T) {
 		break
 	}
 	_, _ = sess.ListFiles(ctx, ListFilesOptions{})
+	if rc, err := sess.OpenFile(ctx, "f"); err == nil {
+		_ = rc.Close()
+	}
 	_, _ = sess.Agent().Wait(ctx, "t1", 0)
 	_, _ = sess.Agent().EventsPage(ctx, EventsPageOptions{})
 	_, _ = sess.Drive().Observe(ctx)
@@ -308,8 +307,9 @@ func TestFacade_ReadTokenFallsBackToComputerToken(t *testing.T) {
 	defer mu.Unlock()
 	for _, key := range []string{
 		"GET /v1/sessions/s1/control", "POST /v1/sessions/s1/control/notify", "GET /v1/sessions/s1/handoffs",
-		"GET /v1/sessions/s1/control/events", "GET /v1/sessions/s1/files/list", "GET /v2/sessions/s1/agent/turns/t1",
-		"GET /v2/sessions/s1/agent/events/page", "POST /v1/sessions/s1/observe", "PATCH /v1/sessions/s1/control",
+		"GET /v1/sessions/s1/control/events", "GET /v1/sessions/s1/files/list", "GET /v1/sessions/s1/files",
+		"GET /v2/sessions/s1/agent/turns/t1", "GET /v2/sessions/s1/agent/events/page", "POST /v1/sessions/s1/observe",
+		"PATCH /v1/sessions/s1/control",
 	} {
 		if got, called := auth[key]; !called || got != ct {
 			t.Errorf("%s used %q (called=%v), want the Computer token", key, tokClass(got), called)

@@ -35,11 +35,11 @@ type ComputerLocation struct {
 	Mode    string `json:"mode,omitempty"`
 }
 
-// StartOptions configures a fresh runtime for saved credentials. Identity, keys
+// StartOptions configures a Start from saved credentials. Identity, keys
 // and ephemeral mode belong to Credentials; Start reads the current binding.
 type StartOptions struct {
-	Timeout          time.Duration // runtime lifetime, default 300s
-	ReadyTimeout     time.Duration // allocation readiness budget, default 300s
+	Timeout          time.Duration // how long the Computer keeps running without use, default 300s
+	ReadyTimeout     time.Duration // how long to wait for the Computer to start, default 300s
 	Location         *ComputerLocation
 	Metadata         map[string]string
 	MaxBindAttempts  int
@@ -53,11 +53,12 @@ type AttachOptions struct {
 	// CaptureKeypair opts the attach into asymmetric state encryption. Persist
 	// both halves before attaching. PriorCaptureKeypairs keeps superseded
 	// generations available to restore components that have not been re-sealed.
+	// CreateComputer rejects both for an ephemeral Computer, which saves no state.
 	CaptureKeypair       *CaptureKeypair
 	PriorCaptureKeypairs []*CaptureKeypair
 
-	Timeout      time.Duration // runtime lifetime, default 300s
-	ReadyTimeout time.Duration // allocation readiness budget, default 300s
+	Timeout      time.Duration // how long the Computer keeps running without use, default 300s
+	ReadyTimeout time.Duration // how long to wait for the Computer to start, default 300s
 	// Deprecated: Computer attach does not support environment overrides.
 	// Nonempty maps are rejected before provisioning; leave nil or empty.
 	PodEnv   map[string]string
@@ -79,8 +80,8 @@ type AttachOptions struct {
 	BindReadyTimeout time.Duration // attach readiness budget, default 120s
 }
 
-// Computer is a persistent Pine Computer. Its identity is (ID, Key); while attached to a
-// runtime it also holds the runtime's handle and its Computer token (ct_).
+// Computer is a persistent Pine Computer. Its identity is (ID, Key); while attached it
+// also holds its SandboxHandle and its Computer token (ct_).
 type Computer struct {
 	id        string
 	key       []byte
@@ -100,7 +101,7 @@ type Computer struct {
 
 	mu            sync.Mutex
 	conn          *Connection
-	sandbox       *RuntimeHandle
+	sandbox       *SandboxHandle
 	coord         *coordinator.Client
 	computerToken string // ct_
 	// ephemeral records that this Computer was bound access-lease-only; Stop
@@ -182,7 +183,7 @@ func (c *Computer) CaptureKeypair() *CaptureKeypair {
 }
 
 // Credentials returns a copy of the caller-owned secrets. Save them before
-// Create, and again only after changing keys. It contains no live runtime tokens.
+// Create, and again only after changing keys. It contains no live tokens.
 func (c *Computer) Credentials() Credentials {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -202,8 +203,9 @@ func (c *Computer) Credentials() Credentials {
 	return result
 }
 
-// RuntimeID is the id of the runtime the Computer is attached to (empty if not attached).
-func (c *Computer) RuntimeID() string {
+// SandboxID is the id of the Computer sandbox this handle is attached to (the
+// API's sandbox_id); it changes on every start (empty if not attached).
+func (c *Computer) SandboxID() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.sandbox == nil {
@@ -212,12 +214,7 @@ func (c *Computer) RuntimeID() string {
 	return c.sandbox.ID()
 }
 
-// SandboxID is the former name of RuntimeID.
-//
-// Deprecated: use RuntimeID.
-func (c *Computer) SandboxID() string { return c.RuntimeID() }
-
-// ComputerToken is the Computer token (ct_) for the attached runtime (empty if not
+// ComputerToken is the Computer token (ct_) for the current attach (empty if not
 // attached). @api advanced — prefer the typed Session/Computer methods, which send the
 // right token.
 func (c *Computer) ComputerToken() string {
@@ -226,7 +223,7 @@ func (c *Computer) ComputerToken() string {
 	return c.computerToken
 }
 
-// PersistenceMode is the persistence mode the runtime reported on the last
+// PersistenceMode is the persistence mode the Computer reported on the last
 // successful attach (e.g. "persistent" or "ephemeral"); empty if not attached
 // or none was reported.
 func (c *Computer) PersistenceMode() string {
@@ -244,7 +241,7 @@ func (c *Computer) String() string {
 	if c.sandbox != nil {
 		sid = c.sandbox.ID()
 	}
-	return fmt.Sprintf("Computer{id:%s attached:%t runtime:%s key+ct_ redacted}", c.id, c.sandbox != nil, sid)
+	return fmt.Sprintf("Computer{id:%s attached:%t sandbox:%s key+ct_ redacted}", c.id, c.sandbox != nil, sid)
 }
 
 // GoString redacts secrets under %#v.
@@ -391,7 +388,7 @@ func (c *Computer) AddPriorKey(version int, key []byte) error {
 	return nil
 }
 
-// Attach allocates a fresh runtime, waits for it to run, and attaches the Computer to it,
+// Attach starts the Computer, waits for it to run, and attaches to it,
 // leaving the Computer ready to create sessions. It refuses to attach a Computer that is
 // already attached (call Stop or Kill first).
 func (c *Computer) Attach(ctx context.Context, conn *Connection, opts AttachOptions) error {
@@ -453,7 +450,7 @@ func (c *Computer) Attach(ctx context.Context, conn *Connection, opts AttachOpti
 	if err != nil {
 		return err
 	}
-	sandbox := conn.runtimeHandle(info.ID, info.Status)
+	sandbox := conn.sandboxHandle(info.ID, info.Status)
 	attached := false
 	defer func() {
 		if !attached {
@@ -521,13 +518,13 @@ func (c *Computer) Attach(ctx context.Context, conn *Connection, opts AttachOpti
 // deadline expire together, and the sleep between polls observes the context
 // first, so without this translation callers would see context.DeadlineExceeded
 // or a transport timeout instead. Caller cancellation stays distinguishable.
-func readinessBudgetError(callerCtx, readyCtx context.Context, err error, sandbox *RuntimeHandle) error {
+func readinessBudgetError(callerCtx, readyCtx context.Context, err error, sandbox *SandboxHandle) error {
 	var rt *ReadyTimeoutError
 	if errors.As(err, &rt) {
 		return err
 	}
 	if callerCtx.Err() == nil && errors.Is(readyCtx.Err(), context.DeadlineExceeded) {
-		return &ReadyTimeoutError{RuntimeID: sandbox.id, SandboxID: sandbox.id, LastState: sandbox.status}
+		return &ReadyTimeoutError{SandboxID: sandbox.id, LastState: sandbox.status}
 	}
 	return err
 }
@@ -549,21 +546,21 @@ func (c *Computer) adopt(conn *Connection, sandboxID, computerToken, status stri
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.conn = conn
-	c.sandbox = conn.runtimeHandle(sandboxID, status)
+	c.sandbox = conn.sandboxHandle(sandboxID, status)
 	c.coord = coord
 	c.computerToken = computerToken
 	return nil
 }
 
 // Status observes this binding through the lifecycle service. Unlike Alive,
-// it preserves errors: NotFound confirms runtime-record absence; a transport
-// or authorization error does not. It never resumes or replaces the runtime.
+// it preserves errors: NotFound confirms the Computer has stopped; a transport
+// or authorization error does not. It never resumes or restarts the Computer.
 func (c *Computer) Status(ctx context.Context) (string, error) {
 	c.mu.Lock()
 	sandbox := c.sandbox
 	c.mu.Unlock()
 	if sandbox == nil {
-		return "", fmt.Errorf("pinesandbox: Computer %s has no runtime binding", c.id)
+		return "", fmt.Errorf("%w: %s", ErrNotBound, c.id)
 	}
 	info, err := sandbox.cp.Get(ctx, sandbox.id)
 	if err != nil {
@@ -589,14 +586,14 @@ func (c *Computer) transitionMemory(ctx context.Context, target string) error {
 	sandbox := c.sandbox
 	c.mu.Unlock()
 	if sandbox == nil {
-		return fmt.Errorf("pinesandbox: Computer %s has no retained runtime", c.id)
+		return fmt.Errorf("%w: %s", ErrNotBound, c.id)
 	}
 	return sandbox.transitionMemory(ctx, target)
 }
 
-// Stop admits server-owned save-before-release, then waits for compute release.
-// A timeout only ends this wait. Another backend can continue from a saved handle.
-// After the runtime record is gone its final save outcome is unknown.
+// Stop asks Pine to save the Computer's state and shut it down, then waits for the
+// shutdown. A timeout only ends this wait. Another backend can continue from a saved
+// handle. If the Computer was already gone, its final save outcome is unknown.
 func (c *Computer) Stop(ctx context.Context) (bool, error) {
 	c.mu.Lock()
 	sandbox := c.sandbox
@@ -626,10 +623,10 @@ func (c *Computer) Kill(ctx context.Context) bool {
 	return ok
 }
 
-// Delete PERMANENTLY deletes this Computer (see Client.DeleteComputer): a live runtime is
-// force-killed first — no final capture, the state is being deleted — then the id is
+// Delete PERMANENTLY deletes this Computer (see Client.DeleteComputer): a running Computer
+// is killed first — no final capture, the state is being deleted — then the id is
 // deleted through the Client connection that attached it. A failed kill does not block
-// the delete; Portal destroys any runtime still bound to a deleted Computer. On success
+// the delete; Portal shuts down a deleted Computer that's still running. On success
 // the local binding is dropped.
 func (c *Computer) Delete(ctx context.Context) error {
 	c.mu.Lock()
@@ -650,7 +647,7 @@ func (c *Computer) Delete(ctx context.Context) error {
 	return nil
 }
 
-// Alive reports whether the attached runtime is still live.
+// Alive reports whether the attached Computer is still running, starting or stopping.
 func (c *Computer) Alive(ctx context.Context) bool {
 	c.mu.Lock()
 	sandbox := c.sandbox

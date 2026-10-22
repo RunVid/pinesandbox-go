@@ -2,6 +2,7 @@ package pinesandbox
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
@@ -102,4 +103,47 @@ func TestCreateComputerValidatesCaptureKeypairBeforeRegistration(t *testing.T) {
 	if err == nil {
 		t.Fatal("CreateComputer accepted an invalid capture keypair")
 	}
+}
+
+func TestCreateComputerRejectsCaptureKeypairForEphemeral(t *testing.T) {
+	credentials, err := GenerateCredentials()
+	if err != nil {
+		t.Fatal(err)
+	}
+	keypair, err := GenerateCaptureKeypair(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A nil provider would panic if registration were reached.
+	client := &Client{conn: &Connection{}}
+	for name, opts := range map[string]AttachOptions{
+		"current": {Credentials: credentials, Ephemeral: true, CaptureKeypair: keypair},
+		"prior":   {Credentials: credentials, Ephemeral: true, PriorCaptureKeypairs: []*CaptureKeypair{keypair}},
+	} {
+		if _, err := client.CreateComputer(context.Background(), opts); err == nil || !strings.Contains(err.Error(), "ephemeral") {
+			t.Fatalf("%s: ephemeral CreateComputer accepted a capture keypair: %v", name, err)
+		}
+	}
+}
+
+func TestCreateComputerEphemeralIgnoresCredentialCaptureKeypairs(t *testing.T) {
+	credentials, err := GenerateCredentials()
+	if err != nil {
+		t.Fatal(err)
+	}
+	prior, err := GenerateCaptureKeypair(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	credentials.CaptureKeypair.Generation = 3
+	credentials.PriorCaptureKeypairs = []*CaptureKeypair{prior}
+	// A nil provider panics once registration is reached, past every capture check.
+	client := &Client{conn: &Connection{}}
+	defer func() {
+		if recover() == nil {
+			t.Fatal("ephemeral CreateComputer stopped before registration")
+		}
+	}()
+	_, err = client.CreateComputer(context.Background(), AttachOptions{Credentials: credentials, Ephemeral: true})
+	t.Fatalf("ephemeral CreateComputer refused saved credentials: %v", err)
 }

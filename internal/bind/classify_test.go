@@ -64,9 +64,8 @@ func matchesErrorClass(err error, className string) bool {
 	case "ComputerAlreadyAttachedError":
 		var e *ComputerAlreadyAttachedError
 		return errors.As(err, &e)
-	// The table predates the runtime names; both spellings name the same Go type.
-	case "RuntimeUnusableError", "PodPoisonedError":
-		var e *RuntimeUnusableError
+	case "SandboxUnusableError":
+		var e *SandboxUnusableError
 		return errors.As(err, &e)
 	case "SavedStateUnavailableError", "BrokerUnreachableError":
 		var e *SavedStateUnavailableError

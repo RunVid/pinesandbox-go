@@ -9,7 +9,7 @@ import (
 	"go.pinesandbox.io/computer/internal/base/transport"
 )
 
-// ProjectPolicy describes current admission, not an existing runtime's terms.
+// ProjectPolicy describes current admission, not the terms a running Computer started with.
 type ProjectPolicy struct {
 	MaxConcurrentComputers *int                   `json:"max_concurrent_computers"`
 	Lifecycle              *ProjectLifetimePolicy `json:"lifecycle"`
@@ -20,8 +20,8 @@ type ProjectLifetimePolicy struct {
 	MaxRuntimeAgeSeconds  int `json:"max_runtime_age_seconds"`
 }
 
-// ProjectPolicy is optional configuration discovery before allocation. Normal
-// runtime operations never call it; RuntimeDetails contains admitted limits.
+// ProjectPolicy is optional configuration discovery before a start. Normal
+// lifecycle operations never call it; SandboxDetails contains admitted limits.
 func (c *Client) ProjectPolicy(ctx context.Context) (*ProjectPolicy, error) {
 	if c.projectKey == "" {
 		return nil, fmt.Errorf("pinesandbox: project policy requires a project API key")

@@ -166,7 +166,7 @@ func Bind(ctx context.Context, cfg Config) (*coordinator.BindResult, error) {
 					}
 					continue
 				} else if class == bind.ClassReadiness {
-					return nil, bind.NewBindTimeoutError("the Computer runtime did not become bindable within the readiness deadline", err)
+					return nil, bind.NewBindTimeoutError("the Computer did not become bindable within the readiness deadline", err)
 				}
 				return nil, err
 			}
@@ -227,7 +227,7 @@ func Bind(ctx context.Context, cfg Config) (*coordinator.BindResult, error) {
 				}
 				continue
 			}
-			return nil, bind.NewBindTimeoutError("the Computer runtime did not become bindable within the readiness deadline", err)
+			return nil, bind.NewBindTimeoutError("the Computer did not become bindable within the readiness deadline", err)
 		default: // terminal
 			return nil, termErr
 		}
@@ -340,7 +340,7 @@ func validateLocation(location *tokens.ComputerLocation) error {
 }
 
 // AttachIdempotencyKey is the Idempotency-Key of the Portal attach-credentials
-// mint for one runtime incarnation, so a resent mint returns the same receipt.
+// mint for one Computer sandbox, so a resent mint returns the same receipt.
 // contract/hpke-vectors.json pins it for every SDK.
 func AttachIdempotencyKey(computerID, sandboxID, podUID, coordBootID string) string {
 	sum := sha256.Sum256([]byte(computerID + "\x00" + sandboxID + "\x00" + podUID + "\x00" + coordBootID))

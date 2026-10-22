@@ -76,7 +76,7 @@ func (c *Client) Capabilities(ctx context.Context, token string) (json.RawMessag
 func (c *Client) RequirePublicAgent(ctx context.Context, token string) error {
 	raw, err := c.Capabilities(ctx, token)
 	var apiErr *problem.APIError
-	var gone *RuntimeGoneError
+	var gone *SandboxGoneError
 	if errors.As(err, &gone) {
 		return err
 	}

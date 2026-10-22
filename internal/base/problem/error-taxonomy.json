@@ -22,6 +22,11 @@
       "retryable": false
     },
     {
+      "type": "/errors/feature-disabled",
+      "status": 403,
+      "retryable": false
+    },
+    {
       "type": "/errors/precondition-required",
       "status": 428,
       "retryable": false

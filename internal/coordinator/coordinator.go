@@ -47,7 +47,8 @@ func WithClock(clock wait.Clock) Option { return func(c *Client) { c.clock = clo
 func (c *Client) QualifyWith(computerToken string) { c.discoveryToken = computerToken }
 
 // NewClient builds a coordinator client over raw (pointed at the Computer's data host),
-// sending the legacy gateway marker. Runtime support uses capability discovery.
+// sending the legacy gateway marker. What the Computer supports comes from capability
+// discovery.
 func NewClient(raw *transport.Client, specMajor int, opts ...Option) *Client {
 	c := &Client{
 		raw: raw,
@@ -254,7 +255,7 @@ func (c *Client) do(ctx context.Context, method, path, token string, body []byte
 // (omitted when token==""), the spec-version header (+ caller extras), a caller-chosen
 // Content-Type/Accept, and the non-2xx → typed-error mapping. retryTransient opts a
 // replay-safe POST into the transport's transient-fault retry.
-// Gateway markers cannot qualify a runtime.
+// Gateway markers cannot qualify a Computer.
 func (c *Client) send(ctx context.Context, r coordReq) (*transport.Response, error) {
 	accept := r.accept
 	if accept == "" {
@@ -285,7 +286,7 @@ func (c *Client) send(ctx context.Context, r coordReq) (*transport.Response, err
 // agentProtocolError qualifies only ambiguous V2 404s. A successful request
 // needs no discovery round trip, and the original operation is never retried.
 func (c *Client) agentProtocolError(ctx context.Context, path, token string, original error) error {
-	var gone *RuntimeGoneError
+	var gone *SandboxGoneError
 	var apiErr *problem.APIError
 	if !strings.HasPrefix(path, "/v2/") || errors.As(original, &gone) ||
 		!errors.As(original, &apiErr) || apiErr.Status != http.StatusNotFound || apiErr.ProblemType != "" {
@@ -298,7 +299,7 @@ func (c *Client) agentProtocolError(ctx context.Context, path, token string, ori
 	if err := c.RequirePublicAgent(ctx, token); errors.As(err, &unsupported) {
 		return err
 	}
-	// A supported runtime or failed discovery preserves the resource error.
+	// A supporting Computer or failed discovery preserves the resource error.
 	return original
 }
 
@@ -362,12 +363,12 @@ func (c *Client) openSSE(ctx context.Context, method, path, token string, body [
 // respError maps a non-2xx coordinator response to a typed error: a 401 on a call made
 // with the Computer token (ct_) is a *bind.TokenRejectedError — a REPORT that the
 // coordinator no longer recognizes the binding's ct_, not an instruction to re-attach. On
-// a live current runtime that is binding_auth_lost; only confirmed runtime-gone evidence
-// justifies an attach, and the SDK never implicitly rebinds (a fresh runtime invalidates
-// every ps_ and fences the old one). A 401 on a session token (ps_) says nothing about
+// a live current Computer sandbox that is binding_auth_lost; only confirmed sandbox-gone
+// evidence justifies an attach, and the SDK never implicitly rebinds (a fresh Computer
+// sandbox invalidates every ps_ and fences the old one). A 401 on a session token (ps_) says nothing about
 // the binding and stays the plain *problem.APIError. The underlying *problem.APIError is
 // wrapped, so errors.As still reaches it. A gateway /errors/sandbox-not-found response
-// becomes RuntimeGoneError for every buffered and streaming data-plane operation; attach
+// becomes SandboxGoneError for every buffered and streaming data-plane operation; attach
 // still classifies its wrapped APIError as a phase-specific readiness signal. Everything
 // else remains the RFC-9457 *problem.APIError. op is "<METHOD> <path>"; it + the data
 // host stamp WHICH operation on WHICH Computer failed (the primary spine) onto the typed
@@ -377,11 +378,11 @@ func (c *Client) respError(status int, body []byte, requestID, token, op string)
 	ae.Host = c.Host()
 	ae.Op = op
 	if status == 401 && strings.HasPrefix(token, "ct_") {
-		return bind.NewTokenRejectedError(401, "the Computer token was rejected by the runtime (binding_auth_lost on a live runtime; re-attach ONLY on confirmed runtime-gone evidence)", ae)
+		return bind.NewTokenRejectedError(401, "the Computer token was rejected by the Computer (binding_auth_lost on a running Computer; re-attach ONLY once the Computer is confirmed stopped)", ae)
 	}
 	if ae.ProblemType == "/errors/sandbox-not-found" ||
 		(status == http.StatusNotFound && ae.ProblemType == "" && op == "GET /sessions") {
-		return newRuntimeGoneError(ae)
+		return newSandboxGoneError(ae)
 	}
 	return ae
 }

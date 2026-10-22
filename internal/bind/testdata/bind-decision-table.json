@@ -80,12 +80,12 @@
   },
   {
    "problem_type": "/errors/already-bound-different-cid",
-   "error_class": "RuntimeUnusableError",
+   "error_class": "SandboxUnusableError",
    "note": "single-use pod bound elsewhere \u2014 recycle, never same-pod replay"
   },
   {
    "problem_type": "/errors/pod-tainted",
-   "error_class": "RuntimeUnusableError",
+   "error_class": "SandboxUnusableError",
    "note": "prior bind tainted this pod"
   },
   {

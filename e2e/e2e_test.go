@@ -173,16 +173,16 @@ func TestE2E_J2_Persistence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Lifecycle can report "allocated" for a moment after browsing while the runtime's
-	// readiness catches up.
+	// Lifecycle can report "allocated" for a moment after browsing while the Computer
+	// sandbox's readiness catches up.
 	details, err := runningSoon(ctx1, comp)
-	if err != nil || details.ID != binding.RuntimeID || details.State != "running" {
-		t.Fatalf("reconnected runtime: %+v %v", details, err)
+	if err != nil || details.ID != binding.SandboxID || details.State != "running" {
+		t.Fatalf("reconnected Computer sandbox: %+v %v", details, err)
 	}
 	_, err = secondBackend.StartComputer(ctx1, credentials, pine.StartOptions{})
-	var retained *pine.RuntimeRetainedError
-	if !errors.As(err, &retained) || retained.RuntimeID != binding.RuntimeID {
-		t.Fatalf("Start should retain live runtime: %v", err)
+	var retained *pine.SandboxRetainedError
+	if !errors.As(err, &retained) || retained.SandboxID != binding.SandboxID {
+		t.Fatalf("Start should retain the live Computer sandbox: %v", err)
 	}
 	if _, err := comp.Checkpoint(ctx1); err != nil {
 		teardown(comp)
@@ -235,7 +235,7 @@ func TestE2E_J2_Persistence(t *testing.T) {
 		t.Fatalf("re-attach (restore) failed: %v", err)
 	}
 	defer teardown(re)
-	if re.RuntimeID() == binding.RuntimeID {
+	if re.SandboxID() == binding.SandboxID {
 		t.Fatal("Start reused the old generation")
 	}
 	stale, err := c.ReconnectComputer(ctx2, loaded, loadedBinding)
@@ -310,6 +310,15 @@ func TestE2E_J3_Files(t *testing.T) {
 	}
 	if string(got) != marker {
 		t.Errorf("ReadFile = %q, want %q", got, marker)
+	}
+	stream, err := sess.OpenFile(ctx, fname)
+	if err != nil {
+		t.Fatalf("OpenFile: %v", err)
+	}
+	streamed, err := io.ReadAll(stream)
+	_ = stream.Close()
+	if err != nil || string(streamed) != marker {
+		t.Errorf("OpenFile = %q (err %v), want %q", streamed, err, marker)
 	}
 
 	// upload_artifact → list_artifacts round-trip.
@@ -730,7 +739,7 @@ func TestE2E_J7_SessionIsolation(t *testing.T) {
 
 // TestE2E_J8_EscapeBattery is the adversarial counterpart to J7: instead of proving
 // the wall exists, it tries to CLIMB it. Every probe runs as the session UID over the
-// real exec lane against the live runtime, and MUST be denied. Each failing assertion
+// real exec lane against the live Computer, and MUST be denied. Each failing assertion
 // names the isolation finding it regresses.
 // (F3 symlink-chown is covered transitively: A1 squat-denial removes its precondition.)
 func TestE2E_J8_EscapeBattery(t *testing.T) {
@@ -751,7 +760,7 @@ func TestE2E_J8_EscapeBattery(t *testing.T) {
 
 	// One round-trip; every attack runs as the session UID. The script prints
 	// labelled markers we assert on, then best-effort removes any litter a
-	// successful (unpatched) attack would leave on the shared runtime volume.
+	// successful (unpatched) attack would leave on the Computer sandbox's shared volume.
 	const attack = `
 echo "WHOAMI=$(id -u)"
 echo "A1_RC=$(mkdir -p /var/lib/sandbox/sessions/J8-SQUAT/files 2>/dev/null; echo $?)"
@@ -842,12 +851,12 @@ func mustExec(t *testing.T, ctx context.Context, s *pine.Session, cmd string) st
 	return res.Stdout
 }
 
-// runningSoon polls the runtime until lifecycle reports it running, for up to a minute,
+// runningSoon polls the Computer sandbox until lifecycle reports it running, for up to a minute,
 // and returns the last details it read.
-func runningSoon(ctx context.Context, comp *pine.Computer) (*pine.RuntimeDetails, error) {
+func runningSoon(ctx context.Context, comp *pine.Computer) (*pine.SandboxDetails, error) {
 	deadline := time.Now().Add(time.Minute)
 	for {
-		details, err := comp.RuntimeDetails(ctx)
+		details, err := comp.SandboxDetails(ctx)
 		if err != nil || details.State == "running" || time.Now().After(deadline) {
 			return details, err
 		}

@@ -25,20 +25,18 @@ var facadeTypes = map[string]reflect.Type{
 // working, marked // Deprecated:, until the next pool minor (0.4). The value is the
 // canonical Go name it forwards to.
 var deprecatedAliases = map[string]string{
-	"Client.AttachComputer":        "Client.StartComputer",
-	"Computer.SandboxID":           "Computer.RuntimeID",
-	"Computer.LatestSnapshot":      "Computer.Snapshot",
-	"Computer.Capture":             "Computer.Checkpoint",
-	"Computer.ListOrphanDownloads": "Computer.OrphanDownloads",
-	"Computer.ListSkills":          "Skills.List",
-	"Computer.GetSkill":            "Skills.Get",
-	"Computer.SetSkillEnabled":     "Skills.SetEnabled",
-	"Computer.ListSkillDrafts":     "Skills.Drafts",
-	"Computer.ListSkillVersions":   "Skills.Versions",
-	"Computer.GetSkillVersion":     "Skills.Version",
-	"Computer.ActivateSkill":       "Skills.Activate",
-	"Computer.DeactivateSkill":     "Skills.Deactivate",
-	"Computer.DeleteSkillVersion":  "Skills.DeleteVersion",
+	"Client.AttachComputer":       "Client.StartComputer",
+	"Computer.LatestSnapshot":     "Computer.Snapshot",
+	"Computer.Capture":            "Computer.Checkpoint",
+	"Computer.ListSkills":         "Skills.List",
+	"Computer.GetSkill":           "Skills.Get",
+	"Computer.SetSkillEnabled":    "Skills.SetEnabled",
+	"Computer.ListSkillDrafts":    "Skills.Drafts",
+	"Computer.ListSkillVersions":  "Skills.Versions",
+	"Computer.GetSkillVersion":    "Skills.Version",
+	"Computer.ActivateSkill":      "Skills.Activate",
+	"Computer.DeactivateSkill":    "Skills.Deactivate",
+	"Computer.DeleteSkillVersion": "Skills.DeleteVersion",
 }
 
 // notVerbs are exported methods that are not facade verbs: property accessors (other
@@ -54,7 +52,7 @@ var notVerbs = map[string]string{
 	"Computer.CaptureKeypair":  "accessor",
 	"Computer.ComputerToken":   "accessor",
 	"Computer.PersistenceMode": "accessor",
-	"Computer.RuntimeID":       "accessor",
+	"Computer.SandboxID":       "accessor",
 	"Computer.Skills":          "navigation to the Skills noun",
 	"Computer.String":          "fmt.Stringer (redacted)",
 	"Computer.GoString":        "fmt.GoStringer (redacted)",

@@ -10,14 +10,19 @@ import (
 
 // CreateSessionOptions configures Computer.CreateSession.
 type CreateSessionOptions struct {
-	Name    string // empty → the Computer picks a friendly name
-	Label   string
+	Name  string // empty → the Computer picks a friendly name
+	Label string
+	// Browser opens the session with a browser. The default is false (shell only),
+	// unlike the raw API, which defaults to a browser.
 	Browser bool
 	Blind   bool
 }
 
 // CreateSession opens a new session on the Computer (with the ct_) and returns it holding
-// its own ps_.
+// its own ps_. Save its Name() and Token(), with the Computer's BindingRevision(), when it
+// returns: no other call returns the token, and AdoptSession needs both to drive the
+// session from another request or process. The session ends when the Computer stops or
+// is recovered; delete the record then.
 func (c *Computer) CreateSession(ctx context.Context, opts CreateSessionOptions) (*Session, error) {
 	coord, ct, err := c.bound()
 	if err != nil {
@@ -97,7 +102,7 @@ func (c *Computer) bound() (*coordinator.Client, string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.coord == nil || c.computerToken == "" {
-		return nil, "", fmt.Errorf("pinesandbox: Computer is not attached — call Attach/CreateComputer first")
+		return nil, "", fmt.Errorf("%w: call StartComputer or CreateComputer first", ErrNotBound)
 	}
 	return c.coord, c.computerToken, nil
 }
@@ -130,7 +135,8 @@ type Session struct {
 // Name is the session name.
 func (s *Session) Name() string { return s.name }
 
-// Token is the session's ps_. @api advanced — prefer the typed methods.
+// Token is the session's ps_, or "" for a session read with Session or Sessions. Only
+// CreateSession returns it: save it then.
 func (s *Session) Token() string { return s.token }
 
 // Info exposes the parsed session metadata (browser plane, timestamps, etc.).

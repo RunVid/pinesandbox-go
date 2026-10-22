@@ -111,7 +111,7 @@ func TestMemoryTransitionFailureRetainsBinding(t *testing.T) {
 					t.Fatalf("error=%v", err)
 				}
 				if comp.sandbox != h || comp.ComputerToken() != "ct_original" || cp.destroys != 0 {
-					t.Fatal("failed transition discarded its binding or deleted its runtime")
+					t.Fatal("failed transition discarded its binding or deleted its Computer sandbox")
 				}
 			})
 		}
@@ -171,7 +171,7 @@ func TestMemoryTransitionCancellationBoundsRequestAndPoll(t *testing.T) {
 					return &controlplane.SandboxInfo{Status: "resuming"}, nil
 				},
 			}
-			h := newRuntimeHandle(cp, "sb-1", statusRunning)
+			h := newSandboxHandle(cp, "sb-1", statusRunning)
 			if err := h.transitionMemory(ctx, statusRunning); !errors.Is(err, context.DeadlineExceeded) {
 				t.Fatalf("caller deadline was not preserved: %v", err)
 			}

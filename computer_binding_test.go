@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestBindingSharedStorageContract(t *testing.T) {
@@ -19,7 +21,7 @@ func TestBindingSharedStorageContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var vectors struct{ Valid, Invalid []json.RawMessage }
+	var vectors struct{ Valid, Legacy, Invalid []json.RawMessage }
 	if err := json.Unmarshal(data, &vectors); err != nil {
 		t.Fatal(err)
 	}
@@ -36,6 +38,9 @@ func TestBindingSharedStorageContract(t *testing.T) {
 		if err := json.Unmarshal(encoded, &roundtrip); err != nil || binding != roundtrip {
 			t.Fatal("binding changed through storage")
 		}
+		if !reflect.DeepEqual(jsonObject(t, encoded), jsonObject(t, wire)) {
+			t.Fatalf("binding wrote %s, want %s", encoded, wire)
+		}
 		for _, format := range []string{"%v", "%+v", "%#v"} {
 			if strings.Contains(fmt.Sprintf(format, binding), binding.ComputerToken) {
 				t.Fatal("normal formatting exposed the token")
@@ -47,6 +52,24 @@ func TestBindingSharedStorageContract(t *testing.T) {
 			if strings.Contains(output.String(), binding.ComputerToken) || !strings.Contains(output.String(), "[redacted]") {
 				t.Fatal("structured logging failed to redact binding")
 			}
+		}
+	}
+	// A schema-1 binding still loads and is written back as schema 2, with its
+	// sandbox id under `sandbox_id` instead of `runtime_id`.
+	for _, wire := range vectors.Legacy {
+		var binding Binding
+		if err := json.Unmarshal(wire, &binding); err != nil {
+			t.Fatal(err)
+		}
+		encoded, err := json.Marshal(binding)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := jsonObject(t, wire)
+		want["schema"], want["sandbox_id"] = json.Number("2"), want["runtime_id"]
+		delete(want, "runtime_id")
+		if got := jsonObject(t, encoded); !reflect.DeepEqual(got, want) {
+			t.Fatalf("legacy binding wrote %s, want %v", encoded, want)
 		}
 	}
 	for _, wire := range append(vectors.Invalid, json.RawMessage(`{"schema":`)) {
@@ -114,12 +137,36 @@ func TestReconnectPreservesCredentialsWithoutNetworkIO(t *testing.T) {
 	}
 }
 
-func TestBindingRequiresBoundRuntime(t *testing.T) {
+func TestBindingRequiresBoundSandbox(t *testing.T) {
 	comp := newComputer("0190aaaa-bbbb-7ccc-8ddd-eeeeffff0000", make([]byte, 32))
-	if _, err := comp.Binding(); err == nil {
-		t.Fatal("unattached Computer exported a binding")
+	if _, err := comp.Binding(); !errors.Is(err, ErrNotBound) {
+		t.Fatalf("unattached Computer exported a binding: %v", err)
 	}
-	if _, err := comp.RuntimeDetails(context.Background()); err == nil {
-		t.Fatal("unattached Computer returned runtime details")
+	if _, err := comp.SandboxDetails(context.Background()); !errors.Is(err, ErrNotBound) {
+		t.Fatalf("unattached Computer returned sandbox details: %v", err)
 	}
+	if _, err := comp.SetIdleTimeout(context.Background(), time.Minute); !errors.Is(err, ErrNotBound) {
+		t.Fatalf("unattached Computer edited its idle timeout: %v", err)
+	}
+	if _, err := comp.Status(context.Background()); !errors.Is(err, ErrNotBound) {
+		t.Fatalf("unattached Computer read its status: %v", err)
+	}
+	if _, err := comp.CreateSession(context.Background(), CreateSessionOptions{}); !errors.Is(err, ErrNotBound) {
+		t.Fatalf("unattached Computer created a session: %v", err)
+	}
+	if err := comp.Pause(context.Background()); !errors.Is(err, ErrNotBound) {
+		t.Fatalf("unattached Computer paused: %v", err)
+	}
+}
+
+// jsonObject decodes raw as a JSON object, keeping numbers exact.
+func jsonObject(t *testing.T, raw []byte) map[string]any {
+	t.Helper()
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var object map[string]any
+	if err := decoder.Decode(&object); err != nil {
+		t.Fatal(err)
+	}
+	return object
 }

@@ -54,11 +54,11 @@ func (s *Session) Delegate(ctx context.Context) (*DelegatedConnection, error) {
 	}, nil
 }
 
-// DelegateDesktop is the ergonomic one-call desktop delegation: ensure the named browser
-// session exists (create:true creates it if absent), then return its DelegatedConnection.
+// DelegateDesktop returns the named session's DelegatedConnection, creating the session,
+// with a browser if browser is true, when it doesn't exist and create is true.
 func (c *Computer) DelegateDesktop(ctx context.Context, name string, create, browser bool) (*DelegatedConnection, error) {
 	if name == "" {
-		name = "main"
+		return nil, errSessionNameRequired
 	}
 	s, err := c.Session(ctx, name)
 	if err != nil {

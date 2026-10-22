@@ -86,7 +86,7 @@ type CredentialsRequest struct {
 	Ephemeral bool
 }
 
-// BindingReference is an authorization revision, not runtime health or credentials.
+// BindingReference is an authorization revision, not Computer health or credentials.
 type BindingReference struct {
 	ComputerID      string `json:"computer_id"`
 	BindingRevision *int64 `json:"binding_revision"`
@@ -144,8 +144,8 @@ func (s *AttachCredentialsSource) RegisterComputer(ctx context.Context, computer
 }
 
 // AvailableLocations returns the project-visible country intents currently
-// backed by enabled serving inventory. Runtime route qualification still occurs
-// independently when the Computer binds.
+// backed by enabled serving inventory. The Computer sandbox's route is still
+// qualified independently when the Computer binds.
 func (s *AttachCredentialsSource) AvailableLocations(ctx context.Context) (*AvailableLocations, error) {
 	resp, err := s.client.Do(ctx, http.MethodGet, locationsPath, transport.Request{
 		Headers: map[string]string{"Authorization": "Bearer " + s.apiKey},
@@ -256,8 +256,7 @@ func (s *AttachCredentialsSource) Credentials(ctx context.Context, req Credentia
 				return nil, &BindingRevisionConflictError{
 					tokenBase:        tokenBaseFrom("reload and adopt the winning binding", ae),
 					CurrentRevision:  ae.CurrentBindingRevision,
-					CurrentRuntimeID: ae.CurrentRuntimeID,
-					CurrentSandboxID: ae.CurrentRuntimeID,
+					CurrentSandboxID: ae.CurrentSandboxID,
 				}
 			}
 			return nil, s.generic(ae, "attach-credentials mint")

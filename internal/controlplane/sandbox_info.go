@@ -7,7 +7,8 @@ import (
 	"time"
 )
 
-// Lifetime is the policy admitted to this runtime, independent of current project defaults.
+// Lifetime is the policy admitted to this Computer sandbox, independent of current project
+// defaults.
 type Lifetime struct {
 	IdleTimeoutSeconds    int       `json:"idle_timeout_seconds"`
 	MinIdleTimeoutSeconds int       `json:"min_idle_timeout_seconds"`
@@ -18,7 +19,7 @@ type Lifetime struct {
 }
 
 // SandboxInfo is the parsed lifecycle observation. The zone resolver, rather
-// than the lifecycle response, supplies the runtime's data-plane address.
+// than the lifecycle response, supplies the Computer sandbox's data-plane address.
 type SandboxInfo struct {
 	RuntimeRevision string
 	Lifecycle       *Lifetime
@@ -61,7 +62,7 @@ type sandboxWire struct {
 func ParseSandboxInfo(body []byte) (*SandboxInfo, error) {
 	var w sandboxWire
 	if err := json.Unmarshal(body, &w); err != nil {
-		return nil, fmt.Errorf("pinesandbox: control plane returned an unparseable runtime: %w", err)
+		return nil, fmt.Errorf("pinesandbox: control plane returned an unparseable response: %w", err)
 	}
 	info := &SandboxInfo{
 		ID:              w.ID,

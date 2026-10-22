@@ -58,37 +58,3 @@ func (c *Computer) CloseOrphanTab(ctx context.Context, targetID string) error {
 	}
 	return coord.CloseOrphanTab(ctx, ct, targetID)
 }
-
-// OrphanDownloads lists browser downloads no session has claimed (raw).
-func (c *Computer) OrphanDownloads(ctx context.Context) (json.RawMessage, error) {
-	coord, ct, err := c.bound()
-	if err != nil {
-		return nil, err
-	}
-	return coord.ListOrphanDownloads(ctx, ct)
-}
-
-// ListOrphanDownloads lists unclaimed browser downloads (raw).
-//
-// Deprecated: use OrphanDownloads.
-func (c *Computer) ListOrphanDownloads(ctx context.Context) (json.RawMessage, error) {
-	return c.OrphanDownloads(ctx)
-}
-
-// ClaimOrphanDownload attributes an orphan download to a session (raw).
-func (c *Computer) ClaimOrphanDownload(ctx context.Context, guid, sessionName, filename string) (json.RawMessage, error) {
-	coord, ct, err := c.bound()
-	if err != nil {
-		return nil, err
-	}
-	return coord.ClaimOrphanDownload(ctx, ct, guid, sessionName, filename)
-}
-
-// DiscardOrphanDownload drops an orphan download.
-func (c *Computer) DiscardOrphanDownload(ctx context.Context, guid string) error {
-	coord, ct, err := c.bound()
-	if err != nil {
-		return err
-	}
-	return coord.DiscardOrphanDownload(ctx, ct, guid)
-}

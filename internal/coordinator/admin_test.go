@@ -8,21 +8,12 @@ import (
 )
 
 func TestAdminRoutes(t *testing.T) {
-	var claimBody string
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/state" && r.Method == "GET":
 			_, _ = io.WriteString(w, `{"snapshot_id":"snap-1"}`)
 		case r.URL.Path == "/v1/coord/capture" && r.Method == "POST":
 			_, _ = io.WriteString(w, `{"snapshot_id":"snap-2","skipped":false}`)
-		case r.URL.Path == "/downloads/orphans" && r.Method == "GET":
-			_, _ = io.WriteString(w, `{"orphans":[{"guid":"g1"}]}`)
-		case r.URL.Path == "/downloads/orphans/g1/claim" && r.Method == "POST":
-			b, _ := io.ReadAll(r.Body)
-			claimBody = string(b)
-			_, _ = io.WriteString(w, `{"claimed":true}`)
-		case r.URL.Path == "/downloads/orphans/g1" && r.Method == "DELETE":
-			w.WriteHeader(204)
 		default:
 			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 		}
@@ -34,18 +25,6 @@ func TestAdminRoutes(t *testing.T) {
 	}
 	if cap, err := c.Capture(ctx, "ct_"); err != nil || !contains(string(cap), "snap-2") {
 		t.Fatalf("Capture = %s, %v", cap, err)
-	}
-	if o, err := c.ListOrphanDownloads(ctx, "ct_"); err != nil || !contains(string(o), "g1") {
-		t.Fatalf("ListOrphanDownloads = %s, %v", o, err)
-	}
-	if _, err := c.ClaimOrphanDownload(ctx, "ct_", "g1", "sess-1", "f.pdf"); err != nil {
-		t.Fatalf("ClaimOrphanDownload: %v", err)
-	}
-	if !contains(claimBody, `"session_name":"sess-1"`) || !contains(claimBody, `"filename":"f.pdf"`) {
-		t.Errorf("claim body = %s", claimBody)
-	}
-	if err := c.DiscardOrphanDownload(ctx, "ct_", "g1"); err != nil {
-		t.Fatalf("DiscardOrphanDownload: %v", err)
 	}
 }
 

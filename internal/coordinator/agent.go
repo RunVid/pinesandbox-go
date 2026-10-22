@@ -46,8 +46,8 @@ type AgentRunOptions struct {
 
 // AgentRun starts a turn and returns it. opts.IdempotencyKey is required: a lost
 // response is resent under it, and the resend names the same turn. When no
-// response arrives within the resend budget, or ctx ends first, the error is a
-// RunUnconfirmedError naming the key to send again.
+// response arrives within the resend budget, or ctx ends while one is outstanding,
+// the error is a RunUnconfirmedError naming the key to send again.
 func (c *Client) AgentRun(ctx context.Context, token, name, goal string, opts AgentRunOptions) (*AgentTurn, error) {
 	if opts.IdempotencyKey == "" {
 		return nil, fmt.Errorf("pinesandbox: idempotency key is required")
@@ -65,9 +65,14 @@ func (c *Client) AgentRun(ctx context.Context, token, name, goal string, opts Ag
 	if len(opts.Secrets) > 0 {
 		body["secrets"] = opts.Secrets
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	headers := map[string]string{"Idempotency-Key": opts.IdempotencyKey}
 	turn, err := c.postAgentTurn(ctx, c.agentPath(name, "/run"), token, body, headers, true)
 	// A lost response, or ctx ending before one arrived, leaves the run unconfirmed.
+	// A gateway answers every upstream failure with a typed 503, including one after
+	// the Computer accepted the run, so a problem's type doesn't prove a refusal.
 	ctxEnded := errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 	if err != nil && (lostResponse(err) || ctxEnded) {
 		return nil, &RunUnconfirmedError{IdempotencyKey: opts.IdempotencyKey, Err: err}
@@ -85,12 +90,16 @@ const maxTurnHold = 25 * time.Second
 // hold is followed by a pause of up to a second, so the loop never spins. A read whose response was
 // lost, or whose problem is marked retryable, is read again within the timeout
 // after retryDelay; any other error is returned. It never cancels the turn or
-// follows NextTurnID. ctx bounds the whole call.
+// follows NextTurnID. ctx bounds the whole call; with a deadline, the timeout ends a
+// second before it, leaving that second for the last read to return the turn.
 func (c *Client) AgentWait(ctx context.Context, token, name, turnID string, timeout time.Duration) (*AgentTurn, error) {
 	if turnID == "" {
 		return nil, fmt.Errorf("pinesandbox: turn ID is required")
 	}
 	path := c.agentPath(name, "/turns/"+url.PathEscape(turnID))
+	if d, ok := ctx.Deadline(); ok {
+		timeout = max(min(timeout, time.Until(d)-time.Second), 0)
+	}
 	deadline := c.clock.Now().Add(timeout)
 	until := func() time.Duration { return deadline.Sub(c.clock.Now()) }
 	failures := 0
@@ -353,11 +362,15 @@ func lostResponse(err error) bool {
 	case errors.As(err, &conn), errors.As(err, &timeout):
 		return true
 	case errors.As(err, &apiErr):
-		return apiErr.Status == http.StatusRequestTimeout || apiErr.Status == http.StatusBadGateway ||
-			apiErr.Status == http.StatusServiceUnavailable || apiErr.Status == http.StatusGatewayTimeout
+		return gatewayStatus(apiErr.Status)
 	default:
 		return false
 	}
+}
+
+func gatewayStatus(status int) bool {
+	return status == http.StatusRequestTimeout || status == http.StatusBadGateway ||
+		status == http.StatusServiceUnavailable || status == http.StatusGatewayTimeout
 }
 
 // AgentEvents is a typed, resuming iterator — see stream.go.

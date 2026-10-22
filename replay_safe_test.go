@@ -13,11 +13,11 @@ import (
 // runner's verbs reach.
 func TestReplaySafeOperationsRetryTransportFaults(t *testing.T) {
 	const given = `{"computer":{"id":"0190aaaa-bbbb-7ccc-8ddd-eeeeffff7001","key":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
-		"runtime_id":"rt-1","computer_token":"ct_scenario"},"session":{"name":"main","token":"ps_scenario"}}`
+		"sandbox_id":"rt-1","computer_token":"ct_scenario"},"session":{"name":"main","token":"ps_scenario"}}`
 	const turn = `{"status":200,"json":{"turn_id":"t1","state":"running","first_event_id":1,"last_event_id":1}}`
 	const token = `{"status":200,"json":{"token":"eyJhbGciOiJFZERTQSJ9.eyJleHAiOjQxMDI0NDQ4MDB9.c2ln","expires_in":900}}`
 	const fault = `{"transport_error":true}`
-	runtime := `{"status":200,"headers":{"ETag":"\"v1\""},"json":{"id":"rt-1","status":{"state":"Running"},"metadata":{}}}`
+	sandboxInfo := `{"status":200,"headers":{"ETag":"\"v1\""},"json":{"id":"rt-1","status":{"state":"Running"},"metadata":{}}}`
 	cases := []struct{ name, call, exchanges string }{
 		{"runAgentV2", `{"verb":"AgentMode.run","args":{"goal":"g","idempotency_key":"k1"}}`,
 			`[{"request":{"method":"POST","host":"computer","path":"/v2/sessions/main/agent/run","auth":"computer","headers":{"Idempotency-Key":"k1"}},"response":` + fault + `},
@@ -28,10 +28,10 @@ func TestReplaySafeOperationsRetryTransportFaults(t *testing.T) {
 		{"mintControlToken", `{"verb":"Computer.status","args":{}}`,
 			`[{"request":{"method":"POST","host":"control","path":"/v1/control-token","auth":"project_key"},"response":` + fault + `},
 			  {"request":{"method":"POST","host":"control","path":"/v1/control-token","auth":"project_key"},"response":` + token + `},
-			  {"request":{"method":"GET","host":"control","path":"/sandboxes/rt-1","auth":"project_token"},"response":` + runtime + `}]`},
+			  {"request":{"method":"GET","host":"control","path":"/sandboxes/rt-1","auth":"project_token"},"response":` + sandboxInfo + `}]`},
 		{"stopComputerRuntime", `{"verb":"Computer.stop","args":{}}`,
 			`[{"request":{"method":"POST","host":"control","path":"/v1/control-token","auth":"project_key"},"response":` + token + `},
-			  {"request":{"method":"GET","host":"control","path":"/sandboxes/rt-1","auth":"project_token"},"response":` + runtime + `},
+			  {"request":{"method":"GET","host":"control","path":"/sandboxes/rt-1","auth":"project_token"},"response":` + sandboxInfo + `},
 			  {"request":{"method":"POST","host":"control","path":"/sandboxes/rt-1/stop","auth":"project_token","json":{"id":"$any"}},"response":` + fault + `},
 			  {"request":{"method":"POST","host":"control","path":"/sandboxes/rt-1/stop","auth":"project_token","json":{"id":"$same"}},"response":{"status":202,"text":""}},
 			  {"request":{"method":"GET","host":"control","path":"/sandboxes/rt-1","auth":"project_token"},"response":{"status":404,"json":{"code":"NOT_FOUND","message":"gone"}}}]`},

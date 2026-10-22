@@ -209,9 +209,9 @@ func TestRecoveryUsesObservedVersionAndWaitsForCompute(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			handle := newRuntimeHandle(conn.controlPlane, "sb-1", info.Status)
+			handle := newSandboxHandle(conn.controlPlane, "sb-1", info.Status)
 			handle.sleeper = func(context.Context, time.Duration) error { return nil }
-			released, err := handle.releaseFailedRuntime(context.Background(), info)
+			released, err := handle.releaseFailedSandbox(context.Background(), info)
 			if changed {
 				var conflict *ConflictError
 				if released || !errors.As(err, &conflict) || reads.Load() != 1 {
@@ -229,19 +229,19 @@ func TestRecoveryUsesObservedVersionAndWaitsForCompute(t *testing.T) {
 
 func TestRecoveryDoesNotDiscardAnUnsettledCapture(t *testing.T) {
 	conn := buildTestConnection(t, "http://unused", "http://unused")
-	handle := newRuntimeHandle(conn.controlPlane, "sb-1", "unavailable")
+	handle := newSandboxHandle(conn.controlPlane, "sb-1", "unavailable")
 	info := &controlplane.SandboxInfo{Status: "unavailable", Reason: "CaptureTimeout", ETag: `"uid/7"`}
-	if released, err := handle.releaseFailedRuntime(context.Background(), info); released || err == nil {
+	if released, err := handle.releaseFailedSandbox(context.Background(), info); released || err == nil {
 		t.Fatal("capture timeout is not a settled failure")
 	}
 }
 
 func TestRecoveryWaitRespectsCallerDeadline(t *testing.T) {
 	get, _ := statusSequence("stopping")
-	handle := newRuntimeHandle(&fakeCP{get: get}, "sb-1", "stopping")
+	handle := newSandboxHandle(&fakeCP{get: get}, "sb-1", "stopping")
 	ctx, cancel := context.WithCancel(context.Background())
 	handle.sleeper = func(context.Context, time.Duration) error { cancel(); return nil }
-	released, err := handle.releaseFailedRuntime(ctx, &controlplane.SandboxInfo{Status: "stopping"})
+	released, err := handle.releaseFailedSandbox(ctx, &controlplane.SandboxInfo{Status: "stopping"})
 	if released || !errors.Is(err, context.Canceled) {
 		t.Fatalf("cleanup wait escaped deadline: %v %v", released, err)
 	}
@@ -267,13 +267,13 @@ func TestStartAndRecoveryDoNotReplaceHealthyMemory(t *testing.T) {
 	defer server.Close()
 	client := &Client{conn: buildTestConnection(t, server.URL, "http://unused")}
 	_, startErr := client.StartComputer(context.Background(), creds, StartOptions{})
-	var retained *RuntimeRetainedError
-	if !errors.As(startErr, &retained) || retained.RuntimeID != "old" || retained.State != "paused" {
+	var retained *SandboxRetainedError
+	if !errors.As(startErr, &retained) || retained.SandboxID != "old" || retained.State != "paused" {
 		t.Fatalf("Start lost typed conflict: %v", startErr)
 	}
 	for _, operation := range []func(context.Context, Credentials, StartOptions) (*Computer, error){client.StartComputer, client.RecoverComputer} {
 		if computer, err := operation(context.Background(), creds, StartOptions{}); err == nil || computer != nil {
-			t.Fatal("healthy paused runtime replaced")
+			t.Fatal("healthy paused Computer sandbox replaced")
 		}
 	}
 	if references.Load() != 3 {
@@ -281,7 +281,7 @@ func TestStartAndRecoveryDoNotReplaceHealthyMemory(t *testing.T) {
 	}
 }
 
-func TestStopByIDUsesCurrentBindingWithoutRuntimeCredentials(t *testing.T) {
+func TestStopByIDUsesCurrentBindingWithoutSandboxCredentials(t *testing.T) {
 	creds, err := GenerateCredentials()
 	if err != nil {
 		t.Fatal(err)
@@ -325,7 +325,7 @@ func TestStopByIDDistinguishesAbsenceFromLookupFailure(t *testing.T) {
 		t.Run(fmt.Sprint(code), func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.Method != "GET" || r.URL.Path != "/v1/computers/"+creds.ID {
-					t.Error("unexpected runtime operation")
+					t.Error("unexpected lifecycle operation")
 				}
 				w.WriteHeader(code)
 				fmt.Fprint(w, `{"message":"not accessible"}`)

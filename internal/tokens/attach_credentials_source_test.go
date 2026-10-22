@@ -308,8 +308,8 @@ func TestCredentials_BindingRevisionConflictIsTerminalAndCarriesWinner(t *testin
 	if _, err := s.Credentials(context.Background(), validCredentialsRequest()); !errors.As(err, &e) {
 		t.Fatalf("err = %T (%v), want *BindingRevisionConflictError", err, err)
 	}
-	if e.CurrentRevision == nil || *e.CurrentRevision != 7 || e.CurrentRuntimeID != "sb-winner" || e.CurrentSandboxID != "sb-winner" {
-		t.Fatalf("winner = revision %v runtime %q (deprecated field %q)", e.CurrentRevision, e.CurrentRuntimeID, e.CurrentSandboxID)
+	if e.CurrentRevision == nil || *e.CurrentRevision != 7 || e.CurrentSandboxID != "sb-winner" {
+		t.Fatalf("winner = revision %v sandbox %q", e.CurrentRevision, e.CurrentSandboxID)
 	}
 	if e.Code != "urn:pinesandbox:problem:binding-revision-conflict" || e.Reason != "binding_revision_changed" {
 		t.Fatalf("code/reason = %q/%q", e.Code, e.Reason)
