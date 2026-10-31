@@ -117,18 +117,33 @@ func parseBindResult(body []byte) (*BindResult, error) {
 // Session is the per-window slice of a Computer (the create/get response). Token is the
 // ps_ used to drive this session; the ct_ is the Computer's, not held here.
 type Session struct {
-	Name         string
-	Label        string
-	Token        string // ps_
-	SessionDir   string
-	Browser      *Browser
-	Blind        bool
-	CreatedAt    *time.Time
-	LastActiveAt *time.Time
+	Name       string
+	Label      string
+	Token      string // ps_
+	SessionDir string
+	Browser    *Browser
+	// ArtifactAccess is as set at creation; ArtifactAccessNone from a Computer that
+	// doesn't say.
+	ArtifactAccess ArtifactAccess
+	CreatedAt      *time.Time
+	LastActiveAt   *time.Time
 }
 
-// Browser is the session's browser plane (present when the session was created with
-// browser:true).
+// ArtifactAccess is what a session's agent may do with the Computer's artifacts. It
+// doesn't limit the project key's own access.
+type ArtifactAccess string
+
+const (
+	// ArtifactAccessNone gives the agent no access; it isn't told about the artifacts.
+	ArtifactAccessNone ArtifactAccess = "none"
+	// ArtifactAccessReadOnly lets the agent list and read files.
+	ArtifactAccessReadOnly ArtifactAccess = "read_only"
+	// ArtifactAccessReadWrite also lets it save and remove files and make public links.
+	ArtifactAccessReadWrite ArtifactAccess = "read_write"
+)
+
+// Browser is the session's browser plane. Every session has one, but one that an SDK
+// release created with browser:false.
 type Browser struct {
 	PrimaryTabID string
 	OwnedTabIDs  []string
@@ -137,14 +152,14 @@ type Browser struct {
 }
 
 type sessionWire struct {
-	Name         string       `json:"name"`
-	Label        string       `json:"label"`
-	Token        string       `json:"token"`
-	SessionDir   string       `json:"session_dir"`
-	Browser      *browserWire `json:"browser"`
-	Blind        bool         `json:"blind"`
-	CreatedAt    string       `json:"created_at"`
-	LastActiveAt string       `json:"last_active_at"`
+	Name           string       `json:"name"`
+	Label          string       `json:"label"`
+	Token          string       `json:"token"`
+	SessionDir     string       `json:"session_dir"`
+	Browser        *browserWire `json:"browser"`
+	ArtifactAccess string       `json:"artifact_access"`
+	CreatedAt      string       `json:"created_at"`
+	LastActiveAt   string       `json:"last_active_at"`
 }
 
 type browserWire struct {
@@ -159,13 +174,16 @@ func (w *sessionWire) toSession() *Session {
 		return nil
 	}
 	s := &Session{
-		Name:         w.Name,
-		Label:        w.Label,
-		Token:        w.Token,
-		SessionDir:   w.SessionDir,
-		Blind:        w.Blind,
-		CreatedAt:    parseTime(w.CreatedAt),
-		LastActiveAt: parseTime(w.LastActiveAt),
+		Name:           w.Name,
+		Label:          w.Label,
+		Token:          w.Token,
+		SessionDir:     w.SessionDir,
+		ArtifactAccess: ArtifactAccessNone,
+		CreatedAt:      parseTime(w.CreatedAt),
+		LastActiveAt:   parseTime(w.LastActiveAt),
+	}
+	if w.ArtifactAccess != "" {
+		s.ArtifactAccess = ArtifactAccess(w.ArtifactAccess)
 	}
 	if w.Browser != nil {
 		owned := w.Browser.OwnedTabIDs

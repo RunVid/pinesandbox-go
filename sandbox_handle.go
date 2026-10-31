@@ -219,7 +219,8 @@ func (h *SandboxHandle) releaseFailedSandbox(ctx context.Context, info *controlp
 	waitCtx, cancel := context.WithTimeout(ctx, defaultTerminateWait)
 	defer cancel()
 	if info.Status != "stopping" {
-		if info.Reason == "CaptureTimeout" {
+		// Accepts CAPTURE_TIMEOUT as well as CaptureTimeout to unify on SNAKE_CASE while staying backward compatible.
+		if info.Reason == "CAPTURE_TIMEOUT" || info.Reason == "CaptureTimeout" {
 			return false, fmt.Errorf("pinesandbox: snapshot capture is still being observed; wait for it to settle")
 		}
 		switch info.Status {

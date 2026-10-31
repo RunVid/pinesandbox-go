@@ -33,6 +33,8 @@ func TestMultiFieldResponses_ConsciouslyHandled(t *testing.T) {
 		"mintDesktopToken": "modeled: DesktopToken{Token, ExpiresAt}",
 		"observeSession":   "modeled: Observation (typed observe result)",
 
+		"createArtifactLink": "modeled: ArtifactLink{URL, ExpiresAt}",
+
 		// raw — the method returns the FULL response body as json.RawMessage
 		"getSkill":           "raw: skill body json.RawMessage (full body)",
 		"getSkillVersion":    "raw: skill-version json.RawMessage (full body)",

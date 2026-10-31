@@ -8,15 +8,32 @@ import (
 	"go.pinesandbox.io/computer/internal/coordinator"
 )
 
-// CreateSessionOptions configures Computer.CreateSession.
+// CreateSessionOptions configures Computer.CreateSession. Every field is optional; every
+// session has its own browser window.
 type CreateSessionOptions struct {
 	Name  string // empty → the Computer picks a friendly name
 	Label string
-	// Browser opens the session with a browser. The default is false (shell only),
-	// unlike the raw API, which defaults to a browser.
-	Browser bool
-	Blind   bool
+	// ArtifactAccess is what the session's agent may do with the Computer's artifacts.
+	// Empty is ArtifactAccessNone: it can't use them. Your own access with the project
+	// key (Client.Artifacts) doesn't depend on it.
+	ArtifactAccess ArtifactAccess
 }
+
+// ArtifactAccess is what a session's agent may do with the Computer's artifacts, chosen
+// at CreateSession (SessionInfo.ArtifactAccess reports it).
+type ArtifactAccess = coordinator.ArtifactAccess
+
+// Artifact access for a session.
+const (
+	// ArtifactAccessNone gives the session's agent no access; it isn't told about the
+	// artifacts.
+	ArtifactAccessNone = coordinator.ArtifactAccessNone
+	// ArtifactAccessReadOnly lets the agent list and read files.
+	ArtifactAccessReadOnly = coordinator.ArtifactAccessReadOnly
+	// ArtifactAccessReadWrite also lets the agent save and remove files and make public
+	// links.
+	ArtifactAccessReadWrite = coordinator.ArtifactAccessReadWrite
+)
 
 // CreateSession opens a new session on the Computer (with the ct_) and returns it holding
 // its own ps_. Save its Name() and Token(), with the Computer's BindingRevision(), when it
@@ -29,7 +46,7 @@ func (c *Computer) CreateSession(ctx context.Context, opts CreateSessionOptions)
 		return nil, err
 	}
 	s, err := coord.CreateSession(ctx, ct, coordinator.CreateSessionOptions{
-		Name: opts.Name, Label: opts.Label, Browser: opts.Browser, Blind: opts.Blind,
+		Name: opts.Name, Label: opts.Label, ArtifactAccess: opts.ArtifactAccess,
 	})
 	if err != nil {
 		return nil, err

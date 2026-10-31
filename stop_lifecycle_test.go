@@ -236,6 +236,15 @@ func TestRecoveryDoesNotDiscardAnUnsettledCapture(t *testing.T) {
 	}
 }
 
+func TestRecoveryDoesNotDiscardAnUnsettledCaptureInTheCurrentSpelling(t *testing.T) {
+	conn := buildTestConnection(t, "http://unused", "http://unused")
+	handle := newSandboxHandle(conn.controlPlane, "sb-1", "unavailable")
+	info := &controlplane.SandboxInfo{Status: "unavailable", Reason: "CAPTURE_TIMEOUT", ETag: `"uid/7"`}
+	if released, err := handle.releaseFailedSandbox(context.Background(), info); released || err == nil {
+		t.Fatal("capture timeout is not a settled failure")
+	}
+}
+
 func TestRecoveryWaitRespectsCallerDeadline(t *testing.T) {
 	get, _ := statusSequence("stopping")
 	handle := newSandboxHandle(&fakeCP{get: get}, "sb-1", "stopping")

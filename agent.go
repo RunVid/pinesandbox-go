@@ -67,7 +67,8 @@ type (
 	// AgentDuration is how long a turn ran.
 	AgentDuration = coordinator.AgentDuration
 	// AgentCost is a turn's cost at your project's rates.
-	AgentCost = coordinator.AgentCost
+	AgentCost              = coordinator.AgentCost
+	AdditionalChargeDetail = coordinator.AdditionalChargeDetail
 	// FileRef points to a file a turn produced.
 	FileRef = coordinator.FileRef
 	// AuthorResult is the outcome of a skill-authoring run.

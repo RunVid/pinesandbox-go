@@ -1,0 +1,72 @@
+{
+  "description": "The content type every server SDK gives an artifact upload that names none, by the extension of the path's last segment (after its last '.', when that isn't the segment's first character), compared in lower case. Any other path is `default`. SDKs carry this table, not the host's MIME database, so the same upload gets the same type everywhere.",
+  "default": "application/octet-stream",
+  "types": {
+    "css": "text/css",
+    "csv": "text/csv",
+    "doc": "application/msword",
+    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "gif": "image/gif",
+    "gz": "application/gzip",
+    "htm": "text/html",
+    "html": "text/html",
+    "jpeg": "image/jpeg",
+    "jpg": "image/jpeg",
+    "js": "text/javascript",
+    "json": "application/json",
+    "md": "text/markdown",
+    "mp3": "audio/mpeg",
+    "mp4": "video/mp4",
+    "pdf": "application/pdf",
+    "png": "image/png",
+    "ppt": "application/vnd.ms-powerpoint",
+    "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "svg": "image/svg+xml",
+    "tar": "application/x-tar",
+    "tsv": "text/tab-separated-values",
+    "txt": "text/plain",
+    "wav": "audio/wav",
+    "webm": "video/webm",
+    "webp": "image/webp",
+    "xls": "application/vnd.ms-excel",
+    "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "xml": "application/xml",
+    "yaml": "application/yaml",
+    "yml": "application/yaml",
+    "zip": "application/zip"
+  },
+  "cases": [
+    {
+      "path": "reports/q3.PDF",
+      "type": "application/pdf"
+    },
+    {
+      "path": "data.tar.gz",
+      "type": "application/gzip"
+    },
+    {
+      "path": ".bashrc",
+      "type": "application/octet-stream"
+    },
+    {
+      "path": "notes",
+      "type": "application/octet-stream"
+    },
+    {
+      "path": "dir.v2/README",
+      "type": "application/octet-stream"
+    },
+    {
+      "path": "table.tsv",
+      "type": "text/tab-separated-values"
+    },
+    {
+      "path": "page.xml",
+      "type": "application/xml"
+    },
+    {
+      "path": "archive.7z",
+      "type": "application/octet-stream"
+    }
+  ]
+}

@@ -193,7 +193,7 @@ func (s *AttachCredentialsSource) AvailableLocations(ctx context.Context) (*Avai
 
 // DeleteComputer permanently deletes computer_id (DELETE /v1/computers/{id}). Portal
 // tombstones it at once, destroys any bound sandboxes asynchronously, purges saved state
-// after 24 hours, and never accepts the id again. Idempotent and non-disclosing: unknown,
+// after 25 hours, and never accepts the id again. Idempotent and non-disclosing: unknown,
 // already-deleted, and cross-project ids are the same 204 success.
 func (s *AttachCredentialsSource) DeleteComputer(ctx context.Context, computerID string) error {
 	if computerID == "" {
@@ -255,7 +255,7 @@ func (s *AttachCredentialsSource) Credentials(ctx context.Context, req Credentia
 			if ae.Status == 412 && ae.ProblemType == "urn:pinesandbox:problem:binding-revision-conflict" {
 				return nil, &BindingRevisionConflictError{
 					tokenBase:        tokenBaseFrom("reload and adopt the winning binding", ae),
-					CurrentRevision:  ae.CurrentBindingRevision,
+					CurrentRevision:  ae.CurrentRevision,
 					CurrentSandboxID: ae.CurrentSandboxID,
 				}
 			}

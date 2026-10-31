@@ -27,6 +27,11 @@ var implementedServerSDKOperations = map[string]any{
 	"createDiagnostic":       (*Client).CreateDiagnostic,
 	"getDiagnostic":          (*Client).GetDiagnostic,
 
+	// artifacts: every Artifacts call gets its storage token first; links are the
+	// running Computer's
+	"createComputerArtifactToken": (*Artifacts).List,
+	"createArtifactLink":          (*Computer).ArtifactLink,
+
 	// lifecycle
 	"createComputer":         (*Client).CreateComputer,
 	"getComputer":            (*Computer).Status,

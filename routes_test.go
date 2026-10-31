@@ -33,6 +33,7 @@ var sdkRoutes = []string{
 	"POST /v1/diagnostics",
 	"GET /v1/diagnostics/{id}",
 	"POST /v1/computers/{id}/attach-credentials",
+	"POST /v1/computers/{id}/artifacts/token",
 	// coordinator: bind + admin
 	"GET /v1/coord/bind-pubkey",
 	"POST /v1/coord/bind",
@@ -67,6 +68,7 @@ var sdkRoutes = []string{
 	"GET /v1/sessions/{name}/artifacts/{id}",
 	"GET /v1/sessions/{name}/artifacts/zip",
 	"POST /v1/sessions/{name}/artifacts",
+	"POST /v1/artifacts/links",
 	// coordinator: control + handoffs
 	"GET /v1/sessions/{name}/control",
 	"PATCH /v1/sessions/{name}/control",

@@ -16,6 +16,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -161,6 +162,33 @@ type Request struct {
 	// names the same turn when sent again, or a create carrying a stable key the server
 	// dedupes. A keyless create must NOT set it (a reset may have applied → double-provision).
 	RetryOnTransient bool
+	// RetryStatus, when set, also sends a retry-eligible request again after an answer
+	// whose status it accepts, within the same budget and backoff as a transient fault.
+	RetryStatus func(status int) bool
+	// BodyReader streams a body of ContentLength bytes in place of Body, for a body too
+	// large to hold in memory. A request with one is sent once: the reader is consumed.
+	BodyReader    io.Reader
+	ContentLength int64
+	// Op names the operation in errors in place of "<METHOD> <path>", for a path that
+	// carries a value which must stay out of them, such as a storage object's name.
+	Op string
+}
+
+// operation is the "op" a request's errors carry.
+func (r Request) operation(method, path string) string {
+	if r.Op != "" {
+		return r.Op
+	}
+	return Operation(method, path)
+}
+
+// retryAttempts is the send budget for r: the transient-retry budget for an idempotent
+// method or an opted-in replay-safe request, else one send.
+func (c *Client) retryAttempts(method string, r Request) int {
+	if c.maxAttempts > 1 && r.BodyReader == nil && (idempotentMethod(method) || r.RetryOnTransient) {
+		return c.maxAttempts
+	}
+	return 1
 }
 
 // Response is a 2xx result; Headers exposes ETag/X-Request-Id to callers.
@@ -168,6 +196,9 @@ type Response struct {
 	Status  int
 	Body    []byte
 	Headers http.Header
+	// Attempt is the send that got it: 1, or more after the transient-retry budget sent
+	// the request again, when an earlier send may have reached the server.
+	Attempt int
 }
 
 // DoRaw executes method+path and returns the *Response for ANY HTTP status (including
@@ -176,19 +207,21 @@ type Response struct {
 // mapping use Do; callers with a different error contract (the control plane's {code,message})
 // inspect the raw Response themselves.
 func (c *Client) DoRaw(ctx context.Context, method, path string, r Request) (*Response, error) {
-	attempts := 1
-	if c.maxAttempts > 1 && (idempotentMethod(method) || r.RetryOnTransient) {
-		attempts = c.maxAttempts
-	}
+	attempts := c.retryAttempts(method, r)
 	for attempt := 1; ; attempt++ {
 		resp, err := c.doOnce(ctx, method, path, r)
-		if err == nil || !isTransientFault(err) || attempt >= attempts {
+		if resp != nil {
+			resp.Attempt = attempt
+		}
+		again := err != nil && isTransientFault(err) || err == nil && r.RetryStatus != nil && r.RetryStatus(resp.Status)
+		if !again || attempt >= attempts {
 			return resp, err
 		}
-		// Transient transport fault on a retry-eligible request: back off, then retry.
-		// A ctx cancellation during the wait ends it, returning the transient fault.
+		// A transient fault, or an answer RetryStatus takes, on a retry-eligible request:
+		// back off, then retry. A ctx cancellation during the wait ends it with what the
+		// last send got.
 		if c.clock.Sleep(ctx, c.transientBackoff(attempt)) != nil {
-			return nil, err
+			return resp, err
 		}
 	}
 }
@@ -208,12 +241,12 @@ func (c *Client) doOnce(ctx context.Context, method, path string, r Request) (*R
 	}
 	resp, err := c.hc.Do(req)
 	if err != nil {
-		return nil, normalizeFault(c.Host(), method, path, err)
+		return nil, Fault(c.Host(), r.operation(method, path), err)
 	}
 	defer resp.Body.Close()
 	b, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, normalizeFault(c.Host(), method, path, err)
+		return nil, Fault(c.Host(), r.operation(method, path), err)
 	}
 	return &Response{Status: resp.StatusCode, Body: b, Headers: resp.Header}, nil
 }
@@ -243,9 +276,15 @@ func (c *Client) newRequest(ctx context.Context, method, path string, r Request)
 	if r.Body != nil {
 		body = bytes.NewReader(r.Body)
 	}
+	if r.BodyReader != nil {
+		body = r.BodyReader
+	}
 	req, err := http.NewRequestWithContext(ctx, method, c.base+path, body)
 	if err != nil {
 		return nil, fmt.Errorf("transport: build request: %w", err)
+	}
+	if r.BodyReader != nil {
+		req.ContentLength = r.ContentLength
 	}
 	accept := r.Accept
 	if accept == "" {
@@ -282,7 +321,7 @@ func (c *Client) Stream(ctx context.Context, method, path string, r Request) (*S
 	}
 	resp, err := c.streamHC.Do(req)
 	if err != nil {
-		return nil, normalizeFault(c.Host(), method, path, err)
+		return nil, Fault(c.Host(), r.operation(method, path), err)
 	}
 	return &StreamResponse{Status: resp.StatusCode, Body: resp.Body, Headers: resp.Header}, nil
 }
@@ -294,10 +333,7 @@ func (c *Client) Stream(ctx context.Context, method, path string, r Request) (*S
 // iterators own a cursor-resumed reconnect budget, and stacking this loop underneath
 // would compound the two budgets.
 func (c *Client) StreamWithRetry(ctx context.Context, method, path string, r Request) (*StreamResponse, error) {
-	attempts := 1
-	if c.maxAttempts > 1 && (idempotentMethod(method) || r.RetryOnTransient) {
-		attempts = c.maxAttempts
-	}
+	attempts := c.retryAttempts(method, r)
 	for attempt := 1; ; attempt++ {
 		sr, err := c.Stream(ctx, method, path, r)
 		if err == nil || !isTransientFault(err) || attempt >= attempts {
@@ -327,7 +363,7 @@ func (c *Client) Do(ctx context.Context, method, path string, r Request) (*Respo
 		// even in a generic handler, with no context hand-folded into Msg.
 		return nil, &TimeoutError{
 			Host:      c.Host(),
-			Op:        Operation(method, path),
+			Op:        r.operation(method, path),
 			RequestID: resp.Headers.Get("X-Request-Id"),
 			Msg:       fmt.Sprintf("status %d", resp.Status),
 		}
@@ -336,7 +372,7 @@ func (c *Client) Do(ctx context.Context, method, path string, r Request) (*Respo
 		// troubleshooting spine — so a generic `errors.As(&apiErr)` handler is self-describing.
 		ae := problem.Parse(resp.Status, resp.Body, resp.Headers.Get("X-Request-Id"))
 		ae.Host = c.Host()
-		ae.Op = Operation(method, path)
+		ae.Op = r.operation(method, path)
 		ae.RetryAfter = RetryAfter(resp.Headers)
 		return nil, ae
 	}
@@ -352,22 +388,31 @@ func RetryAfter(h http.Header) time.Duration {
 	return time.Duration(n) * time.Second
 }
 
-// normalizeFault maps a Go transport error to a typed SDK error. A caller-initiated
-// cancel propagates unchanged (it's not a transport fault). Host (WHICH Computer) + Op (WHICH
-// operation, query-stripped) ride the typed error's fields — rendered ONCE by Error() via the
-// shared suffix — so a bare connect/timeout fault (which has no response to read a request_id
+// Fault maps a Go transport error to a typed SDK error. A caller-initiated cancel
+// propagates unchanged (it's not a transport fault), and so does an error already typed
+// *TimeoutError or *ConnectionError. Host (WHICH Computer) + Op (WHICH operation,
+// query-stripped) ride the typed error's fields — rendered ONCE by Error() via the shared
+// suffix — so a bare connect/timeout fault (which has no response to read a request_id
 // from) still names the failing Computer/operation without any context hand-folded into Msg.
-func normalizeFault(host, method, path string, err error) error {
-	op := Operation(method, path)
-	if errors.Is(err, context.Canceled) {
+// Msg is the cause without net/http's request URL, which would carry the path and query
+// that Op leaves out. Callers that read a response body themselves use it for its faults.
+func Fault(host, op string, err error) error {
+	var te *TimeoutError
+	var ce *ConnectionError
+	if errors.Is(err, context.Canceled) || errors.As(err, &te) || errors.As(err, &ce) {
 		return err
 	}
+	msg := err.Error()
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		msg = ue.Err.Error()
+	}
 	if errors.Is(err, context.DeadlineExceeded) {
-		return &TimeoutError{Host: host, Op: op, Msg: err.Error()}
+		return &TimeoutError{Host: host, Op: op, Msg: msg}
 	}
 	var ne net.Error
 	if errors.As(err, &ne) && ne.Timeout() {
-		return &TimeoutError{Host: host, Op: op, Msg: err.Error()}
+		return &TimeoutError{Host: host, Op: op, Msg: msg}
 	}
-	return &ConnectionError{Host: host, Op: op, Msg: err.Error()}
+	return &ConnectionError{Host: host, Op: op, Msg: msg}
 }

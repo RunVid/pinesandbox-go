@@ -25,7 +25,7 @@ func TestSessionHelpers_RequireAName(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	if _, err := comp.DelegateDesktop(ctx, "", true, true); !errors.Is(err, errSessionNameRequired) {
+	if _, err := comp.DelegateDesktop(ctx, "", true); !errors.Is(err, errSessionNameRequired) {
 		t.Errorf("DelegateDesktop(\"\") = %v, want errSessionNameRequired", err)
 	}
 	if _, err := comp.TakeControl(ctx, ""); !errors.Is(err, errSessionNameRequired) {
@@ -66,7 +66,7 @@ func TestDelegateDesktop_CreatesAndDelegates(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	dc, err := comp.DelegateDesktop(context.Background(), "main", true, true)
+	dc, err := comp.DelegateDesktop(context.Background(), "main", true)
 	if err != nil {
 		t.Fatalf("DelegateDesktop: %v", err)
 	}

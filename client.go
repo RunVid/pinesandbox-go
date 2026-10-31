@@ -58,6 +58,9 @@ type Client struct {
 	conn            *Connection
 	portalTransport *transport.Client
 	projectKey      string
+	// newTransport builds a client for another host on the same HTTP client and clock:
+	// the storage endpoint an artifact token names.
+	newTransport func(scheme, host string) *transport.Client
 }
 
 // ControlTokenProvider returns the project token (the control-plane JWS) for lifecycle
@@ -195,7 +198,8 @@ func newClient(opts ClientOptions, hooks clientHooks) (*Client, error) {
 				coordinator.WithClock(clock)), nil
 		},
 	}
-	return &Client{zone: z, conn: conn, portalTransport: controlTransport, projectKey: opts.APIKey}, nil
+	newTransport := func(scheme, host string) *transport.Client { return transport.New(scheme, host, topts...) }
+	return &Client{zone: z, conn: conn, portalTransport: controlTransport, projectKey: opts.APIKey, newTransport: newTransport}, nil
 }
 
 // callableAttach converts between the public provider types and the internal mint types.
@@ -424,7 +428,7 @@ func (c *Client) AttachComputer(ctx context.Context, id string, key []byte, opts
 
 // DeleteComputer PERMANENTLY deletes the Computer with this id: its identity and saved
 // state end (Stop and Kill keep both). Portal tombstones the id at once, shuts the
-// Computer down asynchronously if it's running, purges saved state after 24 hours,
+// Computer down asynchronously if it's running, purges saved state after 25 hours,
 // and never accepts the id again. Idempotent and non-disclosing: an unknown, already-deleted, or other project's
 // id also returns nil. There is no undelete. Use Computer.Delete to kill a live handle
 // first. Errors: *ComputerDeletionError (422 malformed id), *ProjectAccessDenied (403),

@@ -167,6 +167,16 @@
       "retryable": false
     },
     {
+      "type": "/errors/artifacts-unavailable",
+      "status": 503,
+      "retryable": true
+    },
+    {
+      "type": "/errors/artifacts-not-configured",
+      "status": 503,
+      "retryable": false
+    },
+    {
       "type": "/errors/secret-in-skill",
       "status": 422,
       "retryable": false

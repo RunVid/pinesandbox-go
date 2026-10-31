@@ -1,0 +1,71 @@
+{
+  "description": "One artifacts list contains workdir files and artifact_store references. Select the existing file or artifact client by root; only artifact_store references carry computer_id.",
+  "cases": [
+    {
+      "name": "older result",
+      "result": {
+        "terminal_reason": "completed",
+        "summary": "Report saved.",
+        "artifacts": [],
+        "usage": {}
+      },
+      "expected": []
+    },
+    {
+      "name": "saved deliverable",
+      "result": {
+        "terminal_reason": "completed",
+        "summary": "Report saved.",
+        "artifacts": [
+          {
+            "root": "artifact_store",
+            "relative_path": "reports/large video.mp4",
+            "computer_id": "0190aaaa-bbbb-7ccc-8ddd-eeeeffff7001"
+          }
+        ],
+        "usage": {}
+      },
+      "expected": [
+        {
+          "root": "artifact_store",
+          "relative_path": "reports/large video.mp4",
+          "computer_id": "0190aaaa-bbbb-7ccc-8ddd-eeeeffff7001"
+        }
+      ]
+    },
+    {
+      "name": "mixed workdir and saved deliverables",
+      "result": {
+        "terminal_reason": "completed",
+        "summary": "Report saved.",
+        "artifacts": [
+          {
+            "root": "workdir",
+            "relative_path": "report.txt",
+            "size": 3,
+            "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "content_type": "text/plain",
+            "modified_at": "2026-10-30T00:00:00Z"
+          },
+          {
+            "root": "artifact_store",
+            "relative_path": "reports/large video.mp4",
+            "computer_id": "0190aaaa-bbbb-7ccc-8ddd-eeeeffff7001"
+          }
+        ],
+        "usage": {}
+      },
+      "expected": [
+        {
+          "root": "workdir",
+          "relative_path": "report.txt"
+        },
+        {
+          "root": "artifact_store",
+          "relative_path": "reports/large video.mp4",
+          "computer_id": "0190aaaa-bbbb-7ccc-8ddd-eeeeffff7001"
+        }
+      ]
+    }
+  ]
+}

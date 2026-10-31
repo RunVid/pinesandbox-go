@@ -70,7 +70,8 @@ type APIError struct {
 	RetryAfter time.Duration
 	// Attach authorization conflict extensions. They identify the winning
 	// integrator-side binding to reload/adopt; Portal never returns a ct_.
-	CurrentBindingRevision *int64
+	// CurrentRevision is the winning binding's revision (wire current_revision).
+	CurrentRevision *int64
 	// CurrentSandboxID is the Computer sandbox the winning binding names (wire
 	// current_sandbox_id).
 	CurrentSandboxID string
@@ -144,7 +145,8 @@ type wireProblem struct {
 	RequestID              string `json:"request_id"`
 	Retryable              *bool  `json:"retryable"`
 	Reason                 string `json:"reason"`
-	CurrentBindingRevision *int64 `json:"current_binding_revision"`
+	CurrentRevision        *int64 `json:"current_revision"`
+	CurrentBindingRevision *int64 `json:"current_binding_revision"` // deprecated wire name
 	CurrentSandboxID       string `json:"current_sandbox_id"`
 }
 
@@ -157,7 +159,10 @@ func Parse(status int, body []byte, headerRequestID string) *APIError {
 	var wp wireProblem
 	if json.Unmarshal(body, &wp) == nil {
 		e.ProblemType, e.Title, e.Detail, e.Reason = wp.Type, wp.Title, wp.Detail, wp.Reason
-		e.CurrentBindingRevision = wp.CurrentBindingRevision
+		e.CurrentRevision = wp.CurrentRevision
+		if e.CurrentRevision == nil { // a Portal that predates current_revision
+			e.CurrentRevision = wp.CurrentBindingRevision
+		}
 		e.CurrentSandboxID = wp.CurrentSandboxID
 		if wp.RequestID != "" {
 			e.RequestID = wp.RequestID

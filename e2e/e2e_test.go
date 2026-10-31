@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -57,7 +58,7 @@ func teardown(comp *pine.Computer) {
 // capture has something to persist. Returns the session.
 func driveALittle(t *testing.T, ctx context.Context, comp *pine.Computer, tag string) *pine.Session {
 	t.Helper()
-	sess, err := comp.CreateSession(ctx, pine.CreateSessionOptions{Name: "e2e-" + tag, Browser: true})
+	sess, err := comp.CreateSession(ctx, pine.CreateSessionOptions{Name: "e2e-" + tag})
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
@@ -353,9 +354,10 @@ func TestE2E_J3_Files(t *testing.T) {
 }
 
 // J4 (optional) — a delegate-mode agent turn whose caller-facing file is
-// retrieved through the public SDK. Skips cleanly where no resident agent is
-// configured (the run returns a 501/not-implemented).
+// retrieved through the public SDK. Skips where PINE_E2E_AGENT=0 declares no resident
+// agent, and where the run returns a 501/not-implemented.
 func TestE2E_J4_Agent(t *testing.T) {
+	requireAgent(t)
 	c := newClient(t)
 	ctx, cancel := newCtx(t)
 	defer cancel()
@@ -373,28 +375,7 @@ func TestE2E_J4_Agent(t *testing.T) {
 		" in your working directory with the exact bytes \"" + artifactBody +
 		"\" and no trailing newline (use printf, not echo), then complete the task with " +
 		artifactName + " as an output artifact."
-	turn, err := sess.Agent().Run(ctx, goal, pine.RunOptions{})
-	if err != nil {
-		var ae *pine.APIError
-		if errors.As(err, &ae) && (ae.Status == 501 || ae.Status == 404) {
-			t.Skipf("resident agent not configured here (run → %d); J4 needs PINE_MODEL_* in the environment", ae.Status)
-		}
-		t.Fatalf("agent.Run: %v", err)
-	}
-	// Wait for this turn — never the session's latest — until it leaves running.
-	deadline := time.Now().Add(5 * time.Minute)
-	for turn.State == pine.TurnRunning || turn.State == pine.TurnCanceling {
-		if time.Now().After(deadline) {
-			t.Fatal("agent turn still running past the window")
-		}
-		if turn, err = sess.Agent().Wait(ctx, turn.TurnID, 30*time.Second); err != nil {
-			t.Fatalf("agent.Wait: %v", err)
-		}
-		// Typed AgentTurn — assert the parse held against the LIVE wire.
-		if len(turn.Raw) == 0 || turn.TurnID == "" {
-			t.Fatalf("agent.Wait: typed turn lost its identity or Raw: %+v", turn)
-		}
-	}
+	turn := runTurn(t, ctx, sess, "J4", goal)
 	if turn.State != pine.TurnCompleted || turn.Result == nil {
 		t.Fatalf("agent turn state=%q, want %q; turn=%+v", turn.State, pine.TurnCompleted, turn)
 	}
@@ -471,6 +452,7 @@ func TestE2E_J4_Agent(t *testing.T) {
 // is terminal, so the test never hangs on a continuous feed). Skips cleanly where no resident
 // agent is configured (run → 501/404), the same gate as J4.
 func TestE2E_J5_AgentEventStream(t *testing.T) {
+	requireAgent(t)
 	c := newClient(t)
 	ctx, cancel := newCtx(t)
 	defer cancel()
@@ -892,7 +874,7 @@ func fieldVal(stdout, key string) string {
 // J9 — permanent delete. Create → drive → checkpoint → stop → restore on a fresh pod →
 // Delete. After delete the id never attaches again, a repeat delete is still a success,
 // and the pod is gone. The saved-state purge and id retirement run on Portal timers
-// (24h / 30d in production); the local loop shortens them via
+// (25h / 30d in production); the local loop shortens them via
 // COMPUTER_STATE_PURGE_DELAY_SECONDS / COMPUTER_TOMBSTONE_RETENTION_SECONDS, and the test
 // checks them when PINE_E2E_STATE_OBJECTS_URL (the fake-GCS object listing for the state
 // bucket) is set.
@@ -964,7 +946,7 @@ func TestE2E_J9_Delete(t *testing.T) {
 		}
 		var allocation *pine.ServerError
 		if errors.As(err, &allocation) && allocation.Status == http.StatusGatewayTimeout &&
-			allocation.Code == "KUBERNETES::POD_READY_TIMEOUT" && attempt < 6 {
+			(allocation.Code == "COMPUTER_START_TIMEOUT" || allocation.Code == "KUBERNETES::POD_READY_TIMEOUT") && attempt < 6 {
 			t.Logf("attach after delete: pool busy (attempt %d), retrying", attempt)
 			time.Sleep(20 * time.Second)
 			continue
@@ -1014,4 +996,223 @@ func stateObjects(t *testing.T, computerID string) int {
 		t.Fatalf("decode state object listing: %v", err)
 	}
 	return len(listing.Items)
+}
+
+// J10 — a Computer's artifacts, from your application: the project key's
+// Client.Artifacts reaches them whether or not the Computer runs, and each session
+// reports the access its agent was given. Storage is wherever the artifact token points
+// (the local loop's fake-gcs, Cloud Storage on staging); the files never pass through
+// Pine. The agent's side is J11.
+func TestE2E_J10_Artifacts(t *testing.T) {
+	c := newClient(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*attachTimeout)
+	defer cancel()
+
+	comp, err := c.CreateComputer(ctx, pine.AttachOptions{})
+	if err != nil {
+		t.Fatalf("CreateComputer: %v", err)
+	}
+	defer teardown(comp)
+	arts := c.Artifacts(comp.ID())
+	const markerPath, copyPath, note = "e2e/marker.txt", "e2e/copy.txt", "J10 marker"
+	marker := "pine-e2e-artifact-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	defer cleanUpArtifacts(arts, markerPath, copyPath)
+
+	for _, tc := range []struct {
+		name string
+		set  pine.ArtifactAccess
+		want pine.ArtifactAccess
+	}{
+		{"e2e-artifacts-none", "", pine.ArtifactAccessNone},
+		{"e2e-artifacts-ro", pine.ArtifactAccessReadOnly, pine.ArtifactAccessReadOnly},
+		{"e2e-artifacts-rw", pine.ArtifactAccessReadWrite, pine.ArtifactAccessReadWrite},
+	} {
+		sess, err := comp.CreateSession(ctx, pine.CreateSessionOptions{Name: tc.name, ArtifactAccess: tc.set})
+		if err != nil {
+			t.Fatalf("CreateSession %s: %v", tc.name, err)
+		}
+		if got := sess.Info().ArtifactAccess; got != tc.want {
+			t.Errorf("session %s reports artifact access %q, want %q", tc.name, got, tc.want)
+		}
+	}
+
+	if _, err := arts.Upload(ctx, markerPath, pine.ArtifactFromBytes([]byte(marker)), pine.ArtifactUploadOptions{Note: note}); err != nil {
+		t.Fatalf("Upload: %v", err)
+	}
+	list, err := arts.List(ctx, pine.ArtifactListOptions{Prefix: "e2e/"})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if f := findArtifact(list, markerPath); f == nil || f.Note != note || f.Size != int64(len(marker)) {
+		t.Errorf("listing %+v, want %s with note %q and %d bytes", list.Files, markerPath, note, len(marker))
+	}
+	destination := filepath.Join(t.TempDir(), "marker.txt")
+	if n, err := arts.Download(ctx, markerPath, destination); err != nil || n != int64(len(marker)) {
+		t.Fatalf("Download = %d, %v; want %d bytes", n, err, len(marker))
+	}
+	if got, err := os.ReadFile(destination); err != nil || string(got) != marker {
+		t.Errorf("downloaded %q (%v), want %q", got, err, marker)
+	}
+	if got := readArtifact(t, ctx, arts, markerPath); got != marker {
+		t.Errorf("Open read %q, want %q", got, marker)
+	}
+
+	if _, err := arts.Copy(ctx, comp.ID(), markerPath, copyPath); err != nil {
+		t.Fatalf("Copy: %v", err)
+	}
+	if got := readArtifact(t, ctx, arts, copyPath); got != marker {
+		t.Errorf("the copy holds %q, want %q", got, marker)
+	}
+
+	// The running Computer serves the public link. Only its address is checked.
+	link, err := comp.ArtifactLink(ctx, markerPath, 0)
+	if err != nil {
+		t.Fatalf("ArtifactLink: %v", err)
+	}
+	if u, err := url.Parse(link.URL); err != nil || (u.Scheme != "https" && u.Scheme != "http") ||
+		!strings.HasPrefix(u.Host, comp.SandboxID()+".computer.") || !strings.HasPrefix(u.Path, "/a/") {
+		t.Errorf("link = %q, want a URL on the Computer's host (%s.computer.…) under /a/", link.URL, comp.SandboxID())
+	}
+
+	// The project key reaches the files while the Computer is stopped.
+	if gone, err := comp.Stop(ctx); err != nil || !gone {
+		t.Fatalf("Stop = %v, %v; want the Computer stopped", gone, err)
+	}
+	list, err = arts.List(ctx, pine.ArtifactListOptions{Prefix: "e2e/"})
+	if err != nil {
+		t.Fatalf("List while stopped: %v", err)
+	}
+	if findArtifact(list, markerPath) == nil || findArtifact(list, copyPath) == nil {
+		t.Errorf("listing while stopped %+v, want %s and %s", list.Files, markerPath, copyPath)
+	}
+	for _, p := range []string{markerPath, copyPath} {
+		if err := arts.Delete(ctx, p); err != nil {
+			t.Fatalf("Delete %s: %v", p, err)
+		}
+	}
+	if list, err = arts.List(ctx, pine.ArtifactListOptions{Prefix: "e2e/"}); err != nil || len(list.Files) != 0 {
+		t.Errorf("listing after the deletes = %+v (%v), want no files", list, err)
+	}
+	var missing *pine.ArtifactNotFoundError
+	if err := arts.Delete(ctx, markerPath); !errors.As(err, &missing) || missing.Path != markerPath {
+		t.Errorf("second Delete = %v, want ArtifactNotFoundError for %s", err, markerPath)
+	}
+}
+
+// J11 (optional) — Pine's agent reads and keeps the Computer's artifacts in a session
+// created with read_write access. The goal names the files and the result it wants, not
+// how the agent reaches them.
+func TestE2E_J11_AgentArtifacts(t *testing.T) {
+	requireAgent(t)
+	c := newClient(t)
+	ctx, cancel := newCtx(t)
+	defer cancel()
+
+	comp, err := c.CreateComputer(ctx, pine.AttachOptions{})
+	if err != nil {
+		t.Fatalf("CreateComputer: %v", err)
+	}
+	defer teardown(comp)
+	arts := c.Artifacts(comp.ID())
+	const inputPath, outputPath, suffix = "e2e/input.txt", "e2e/output.txt", "-KEPT-BY-PINE"
+	marker := "pine-e2e-agent-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	defer cleanUpArtifacts(arts, inputPath, outputPath)
+	if _, err := arts.Upload(ctx, inputPath, pine.ArtifactFromBytes([]byte(marker)), pine.ArtifactUploadOptions{}); err != nil {
+		t.Fatalf("Upload: %v", err)
+	}
+	sess, err := comp.CreateSession(ctx, pine.CreateSessionOptions{
+		Name: "e2e-agent-artifacts", ArtifactAccess: pine.ArtifactAccessReadWrite,
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	goal := "Read the Computer's artifact " + inputPath + ". Then keep a file holding exactly that text " +
+		"followed by \"" + suffix + "\", with nothing before or after it, as the Computer's artifact " +
+		outputPath + ". Then complete the task."
+	turn := runTurn(t, ctx, sess, "J11", goal)
+	if turn.State != pine.TurnCompleted || turn.Result == nil || turn.Result.TerminalReason != pine.TerminalCompleted {
+		t.Fatalf("agent turn state=%q, want a completed turn; turn=%+v", turn.State, turn)
+	}
+
+	destination := filepath.Join(t.TempDir(), "output.txt")
+	if _, err := arts.Download(ctx, outputPath, destination); err != nil {
+		t.Fatalf("Download(%s): %v (summary %q)", outputPath, err, turn.Result.Summary)
+	}
+	got, err := os.ReadFile(destination)
+	// A trailing newline is the one addition a file's writer may make on its own.
+	if want := marker + suffix; err != nil || strings.TrimSuffix(string(got), "\n") != want {
+		t.Fatalf("%s holds %q (%v), want %q", outputPath, got, err, want)
+	}
+	_, _ = comp.Stop(ctx)
+}
+
+// requireAgent skips an agent journey where PINE_E2E_AGENT=0 declares an environment
+// without a resident model (contract/E2E_JOURNEYS.md).
+func requireAgent(t *testing.T) {
+	t.Helper()
+	if os.Getenv("PINE_E2E_AGENT") == "0" {
+		t.Skip("PINE_E2E_AGENT=0: no resident model here")
+	}
+}
+
+// runTurn runs goal on the session's agent and waits for that turn — never the session's
+// latest — until it leaves running, for up to five minutes. A Computer without Pine's
+// agent (run → 501/404) skips the journey.
+func runTurn(t *testing.T, ctx context.Context, sess *pine.Session, journey, goal string) *pine.AgentTurn {
+	t.Helper()
+	turn, err := sess.Agent().Run(ctx, goal, pine.RunOptions{})
+	if err != nil {
+		var ae *pine.APIError
+		if errors.As(err, &ae) && (ae.Status == 501 || ae.Status == 404) {
+			t.Skipf("resident agent not configured here (run → %d); %s needs PINE_MODEL_* in the environment", ae.Status, journey)
+		}
+		t.Fatalf("agent.Run: %v", err)
+	}
+	deadline := time.Now().Add(5 * time.Minute)
+	for turn.State == pine.TurnRunning || turn.State == pine.TurnCanceling {
+		if time.Now().After(deadline) {
+			t.Fatal("agent turn still running past the window")
+		}
+		if turn, err = sess.Agent().Wait(ctx, turn.TurnID, 30*time.Second); err != nil {
+			t.Fatalf("agent.Wait: %v", err)
+		}
+		// Typed AgentTurn — assert the parse held against the LIVE wire.
+		if len(turn.Raw) == 0 || turn.TurnID == "" {
+			t.Fatalf("agent.Wait: typed turn lost its identity or Raw: %+v", turn)
+		}
+	}
+	return turn
+}
+
+// readArtifact reads a whole artifact through the streaming Open.
+func readArtifact(t *testing.T, ctx context.Context, arts *pine.Artifacts, path string) string {
+	t.Helper()
+	r, err := arts.Open(ctx, path)
+	if err != nil {
+		t.Fatalf("Open(%s): %v", path, err)
+	}
+	defer r.Close()
+	b, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return string(b)
+}
+
+// cleanUpArtifacts deletes a journey's files, best-effort, so one that fails before its
+// own deletes leaves none behind.
+func cleanUpArtifacts(arts *pine.Artifacts, paths ...string) {
+	for _, p := range paths {
+		_ = arts.Delete(context.Background(), p)
+	}
+}
+
+func findArtifact(list *pine.ArtifactPage, path string) *pine.ArtifactFile {
+	for i := range list.Files {
+		if list.Files[i].Path == path {
+			return &list.Files[i]
+		}
+	}
+	return nil
 }

@@ -19,6 +19,7 @@ var facadeTypes = map[string]reflect.Type{
 	"Session":   reflect.TypeOf(&Session{}),
 	"AgentMode": reflect.TypeOf(&AgentMode{}),
 	"DriveMode": reflect.TypeOf(&DriveMode{}),
+	"Artifacts": reflect.TypeOf(&Artifacts{}),
 }
 
 // deprecatedAliases are the released Go names a canonical verb replaced. Each keeps
@@ -45,6 +46,7 @@ var deprecatedAliases = map[string]string{
 var notVerbs = map[string]string{
 	"Client.String":            "fmt.Stringer (redacted)",
 	"Client.GoString":          "fmt.GoStringer (redacted)",
+	"Client.Artifacts":         "navigation to the Artifacts noun",
 	"Computer.ID":              "accessor",
 	"Computer.Key":             "accessor",
 	"Computer.BindingRevision": "accessor",

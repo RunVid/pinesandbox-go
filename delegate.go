@@ -54,9 +54,9 @@ func (s *Session) Delegate(ctx context.Context) (*DelegatedConnection, error) {
 	}, nil
 }
 
-// DelegateDesktop returns the named session's DelegatedConnection, creating the session,
-// with a browser if browser is true, when it doesn't exist and create is true.
-func (c *Computer) DelegateDesktop(ctx context.Context, name string, create, browser bool) (*DelegatedConnection, error) {
+// DelegateDesktop returns the named session's DelegatedConnection, creating the session
+// when it doesn't exist and create is true.
+func (c *Computer) DelegateDesktop(ctx context.Context, name string, create bool) (*DelegatedConnection, error) {
 	if name == "" {
 		return nil, errSessionNameRequired
 	}
@@ -68,7 +68,7 @@ func (c *Computer) DelegateDesktop(ctx context.Context, name string, create, bro
 		if !create || !errors.As(err, &ae) || ae.Status != 404 {
 			return nil, err
 		}
-		s, err = c.CreateSession(ctx, CreateSessionOptions{Name: name, Browser: browser})
+		s, err = c.CreateSession(ctx, CreateSessionOptions{Name: name})
 		if err != nil {
 			return nil, err
 		}

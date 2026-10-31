@@ -30,6 +30,35 @@ func TestSleep_ReturnsOnCancel(t *testing.T) {
 	}
 }
 
+// jitterClock is a Clock whose jitter is fixed; it never sleeps.
+type jitterClock float64
+
+func (jitterClock) Now() time.Time                             { return time.Unix(1_760_000_000, 0) }
+func (jitterClock) Sleep(context.Context, time.Duration) error { return nil }
+func (c jitterClock) Jitter() float64                          { return float64(c) }
+
+// TestReconnectBackoff_FollowsTheSharedCadence: 500ms·2^(attempt-1) plus the clock's
+// jitter (up to 200ms), capped at 5s.
+func TestReconnectBackoff_FollowsTheSharedCadence(t *testing.T) {
+	for _, tc := range []struct {
+		jitter  float64
+		attempt int
+		want    time.Duration
+	}{
+		{0, 1, 500 * time.Millisecond},
+		{0, 2, time.Second},
+		{0, 4, 4 * time.Second},
+		{0, 5, 5 * time.Second},
+		{0.5, 1, 600 * time.Millisecond},
+		{0.5, 4, 4100 * time.Millisecond},
+		{0.99, 9, 5 * time.Second},
+	} {
+		if got := ReconnectBackoff(jitterClock(tc.jitter), tc.attempt); got != tc.want {
+			t.Errorf("ReconnectBackoff(jitter %v, attempt %d) = %v, want %v", tc.jitter, tc.attempt, got, tc.want)
+		}
+	}
+}
+
 func TestSleep_NonPositiveHonorsCancelledContext(t *testing.T) {
 	if err := Sleep(context.Background(), 0); err != nil {
 		t.Errorf("Sleep(live ctx, 0) = %v, want nil", err)

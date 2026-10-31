@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -582,3 +584,70 @@ func TestDriveTrack(t *testing.T) {
 }
 
 // The typed agent/control event-iterator tests live in stream_test.go.
+
+func TestAdditionalChargesPreserveAmountsAndUnknownCost(t *testing.T) {
+	for _, cost := range []string{`0.65`, `null`} {
+		var result AgentResult
+		raw := `{"usage":{"cost":{"currency":"USD","llm":0.25,"additional":` + cost + `,"additional_details":[{"description":"480p video generation","amount":` + cost + `}],"total":null,"compute":null}}}`
+		if err := json.Unmarshal([]byte(raw), &result); err != nil {
+			t.Fatal(err)
+		}
+		if len(result.Usage.Cost.AdditionalDetails) != 1 || result.Usage.Cost.AdditionalDetails[0].Description != "480p video generation" {
+			t.Fatal("lost charge details")
+		}
+		detail := result.Usage.Cost.AdditionalDetails[0]
+		if cost == "null" {
+			if detail.Amount != nil {
+				t.Fatal("unknown detail became zero")
+			}
+			if result.Usage.Cost.Additional != nil {
+				t.Fatal("unknown media cost became zero")
+			}
+		} else if detail.Amount == nil || *detail.Amount != 0.65 || result.Usage.Cost.Additional == nil || *result.Usage.Cost.Additional != 0.65 {
+			t.Fatal("lost media cost")
+		}
+	}
+}
+
+func TestResultArtifactsContract(t *testing.T) {
+	raw, err := os.ReadFile("testdata/result-artifacts.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var vectors struct {
+		Cases []struct {
+			Name     string
+			Result   json.RawMessage
+			Expected []struct {
+				Root         string
+				RelativePath string `json:"relative_path"`
+				ComputerID   string `json:"computer_id"`
+			}
+		}
+	}
+	if err := json.Unmarshal(raw, &vectors); err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range vectors.Cases {
+		t.Run(v.Name, func(t *testing.T) {
+			result, err := parseAgentResult(v.Result)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(result.Artifacts) != len(v.Expected) {
+				t.Fatalf("result=%+v", result)
+			}
+			for i, ref := range result.Artifacts {
+				want := v.Expected[i]
+				if ref.Root != want.Root || ref.RelativePath != want.RelativePath || ref.ComputerID != want.ComputerID {
+					t.Fatalf("ref=%+v want=%+v", ref, want)
+				}
+			}
+			event := AgentEvent{Type: "result", Payload: v.Result}
+			streamed, ok := event.Result()
+			if !ok || !reflect.DeepEqual(streamed.Artifacts, result.Artifacts) {
+				t.Fatalf("event=%+v", streamed)
+			}
+		})
+	}
+}

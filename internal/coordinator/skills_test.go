@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"go.pinesandbox.io/computer/internal/base/problem"
+	"go.pinesandbox.io/computer/internal/base/wait"
 )
 
 func TestSkills_ServedAndVersions(t *testing.T) {
@@ -191,8 +192,8 @@ func TestSkills_AuthorEvents_StreamLost(t *testing.T) {
 	var opens atomic.Int32
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) { opens.Add(1) })
 	_, err := c.AuthorEvents(context.Background(), "ps_", "s", "au1", "7", func([]byte) error { return nil })
-	if !errors.Is(err, ErrStreamLost) || opens.Load() != defaultReconnectBudget+1 {
-		t.Fatalf("err = %v after %d opens, want ErrStreamLost after %d", err, opens.Load(), defaultReconnectBudget+1)
+	if !errors.Is(err, ErrStreamLost) || opens.Load() != wait.ReconnectBudget+1 {
+		t.Fatalf("err = %v after %d opens, want ErrStreamLost after %d", err, opens.Load(), wait.ReconnectBudget+1)
 	}
 }
 

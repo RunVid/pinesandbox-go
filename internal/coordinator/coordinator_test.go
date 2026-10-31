@@ -170,25 +170,17 @@ func TestCreateSession_BodyAndAuth(t *testing.T) {
 		fmt.Fprint(w, `{"session":{"name":"s1","token":"ps_abc","browser":{"primary_tab_id":"t1","window_id":42},"created_at":"2026-01-01T00:00:00Z"}}`)
 	})
 
-	sess, err := c.CreateSession(context.Background(), "ct_admin", CreateSessionOptions{Browser: true})
+	sess, err := c.CreateSession(context.Background(), "ct_admin", CreateSessionOptions{})
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
 	if auth != "ct_admin" {
 		t.Errorf("bearer = %q, want ct_admin", auth)
 	}
-	// name + label omitted (empty); browser always present; blind omitted (false).
-	if _, ok := body["name"]; ok {
-		t.Errorf("name should be omitted when empty: %v", body)
-	}
-	if _, ok := body["label"]; ok {
-		t.Errorf("label should be omitted when empty: %v", body)
-	}
-	if _, ok := body["blind"]; ok {
-		t.Errorf("blind should be omitted when false: %v", body)
-	}
-	if b, ok := body["browser"].(bool); !ok || !b {
-		t.Errorf("browser should always be present and true: %v", body)
+	// With no options the body is empty: no browser or blind, which the Computer keeps
+	// for older SDK releases, so every session gets its default browser window.
+	if len(body) != 0 {
+		t.Errorf("body = %v, want {}", body)
 	}
 	if sess.Name != "s1" || sess.Token != "ps_abc" {
 		t.Errorf("session = %+v", sess)
@@ -211,7 +203,7 @@ func TestCreateSession_SetupFailureIsRetryableServerError(t *testing.T) {
 			`"detail":"the Computer couldn't set up the session; try again","request_id":"req_1","retryable":true}`)
 	})
 
-	_, err := c.CreateSession(context.Background(), "ct_admin", CreateSessionOptions{Name: "beta", Browser: true})
+	_, err := c.CreateSession(context.Background(), "ct_admin", CreateSessionOptions{Name: "beta"})
 	var apiErr *problem.APIError
 	if !errors.As(err, &apiErr) {
 		t.Fatalf("CreateSession error = %v, want a *problem.APIError", err)
@@ -224,24 +216,31 @@ func TestCreateSession_SetupFailureIsRetryableServerError(t *testing.T) {
 	}
 }
 
-func TestCreateSession_BlindSent(t *testing.T) {
+// TestCreateSession_ArtifactAccessSentOnlyWhenSet: an unset access sends no
+// artifact_access field, and a session the Computer reports without one (an older
+// Computer) has none.
+func TestCreateSession_ArtifactAccessSentOnlyWhenSet(t *testing.T) {
 	var body map[string]any
+	reply := `{"session":{"name":"s"}}`
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		body = nil
 		_ = json.NewDecoder(r.Body).Decode(&body)
-		fmt.Fprint(w, `{"session":{"name":"s","blind":true}}`)
+		fmt.Fprint(w, reply)
 	})
-	sess, err := c.CreateSession(context.Background(), "ct_", CreateSessionOptions{Name: "s", Blind: true})
+	sess, err := c.CreateSession(context.Background(), "ct_", CreateSessionOptions{Name: "s"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if b, ok := body["blind"].(bool); !ok || !b {
-		t.Errorf("blind should be sent true: %v", body)
+	if _, sent := body["artifact_access"]; sent || sess.ArtifactAccess != ArtifactAccessNone {
+		t.Errorf("unset: body %v, parsed %q; want no artifact_access field and none", body, sess.ArtifactAccess)
 	}
-	if body["name"] != "s" {
-		t.Errorf("name should be sent: %v", body)
+	reply = `{"session":{"name":"s","artifact_access":"read_write"}}`
+	sess, err = c.CreateSession(context.Background(), "ct_", CreateSessionOptions{Name: "s", ArtifactAccess: ArtifactAccessReadWrite})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !sess.Blind {
-		t.Errorf("parsed Blind = false, want true")
+	if body["artifact_access"] != "read_write" || sess.ArtifactAccess != ArtifactAccessReadWrite {
+		t.Errorf("read_write: body %v, parsed %q", body, sess.ArtifactAccess)
 	}
 }
 

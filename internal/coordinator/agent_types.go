@@ -43,14 +43,20 @@ type AgentDuration struct {
 }
 
 // AgentCost is the public customer-facing rated charge. It is not Pine's
-// provider cost or an account invoice. Total and LLM are nil only when the
-// project's customer rate card cannot price the observation; Compute is
-// currently nil.
+// provider cost or an account invoice. An unavailable LLM or additional-charge valuation
+// is nil and makes Total nil. Compute is currently nil.
+type AdditionalChargeDetail struct {
+	Description string   `json:"description"`
+	Amount      *float64 `json:"amount"`
+}
+
 type AgentCost struct {
-	Currency string   `json:"currency"`
-	Total    *float64 `json:"total"`
-	LLM      *float64 `json:"llm"`
-	Compute  *float64 `json:"compute"`
+	AdditionalDetails []AdditionalChargeDetail `json:"additional_details,omitempty"`
+	Currency          string                   `json:"currency"`
+	Total             *float64                 `json:"total"`
+	LLM               *float64                 `json:"llm"`
+	Compute           *float64                 `json:"compute"`
+	Additional        *float64                 `json:"additional"`
 }
 
 // AuthorResult is present only for skill-author tasks. Draft is a LearnedSkillMeta
@@ -62,10 +68,12 @@ type AuthorResult struct {
 }
 
 // FileRef is a validated, path-jailed reference to a file a Task produced (spec
-// FileRef — TaskResult.artifacts items). Retrieve via the {Root, RelativePath} file route.
+// FileRef — TaskResult.artifacts items). Use the file route for workdir, and
+// the artifact client for artifact_store. Metadata fields apply to workdir files.
 // Built from fileRefWire (tolerant timestamp), so no json tags here.
 type FileRef struct {
-	Root         string // workdir | artifact | download_quarantine
+	Root         string // workdir | artifact | download_quarantine | artifact_store
+	ComputerID   string // Set for artifact_store; use Client.Artifacts(ComputerID).Download(RelativePath, ...).
 	RelativePath string
 	ContentType  string
 	Size         int64
@@ -131,6 +139,7 @@ type AgentResult struct {
 
 type fileRefWire struct {
 	Root         string `json:"root"`
+	ComputerID   string `json:"computer_id"`
 	RelativePath string `json:"relative_path"`
 	ContentType  string `json:"content_type"`
 	Size         int64  `json:"size"`
@@ -141,6 +150,7 @@ type fileRefWire struct {
 func (w fileRefWire) toFileRef() FileRef {
 	return FileRef{
 		Root:         w.Root,
+		ComputerID:   w.ComputerID,
 		RelativePath: w.RelativePath,
 		ContentType:  w.ContentType,
 		Size:         w.Size,

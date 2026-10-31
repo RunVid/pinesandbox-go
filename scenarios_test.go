@@ -19,9 +19,11 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"testing/iotest"
 	"time"
 	"unicode"
 )
@@ -30,6 +32,8 @@ const (
 	scenarioEndpoint = "https://scenario.pinesandbox.io"
 	scenarioAPIKey   = "pk_scenario"
 	scenarioControl  = "api.scenario.pinesandbox.io"
+	// scenarioStorage is the storage endpoint the scenarios' artifact tokens name.
+	scenarioStorage = "storage.scenario.test"
 )
 
 type scenario struct {
@@ -73,6 +77,7 @@ type scenarioExchange struct {
 		Text           *string           `json:"text"`
 		SSE            *string           `json:"sse"`
 		TransportError bool              `json:"transport_error"`
+		Cut            bool              `json:"cut"`
 	} `json:"response"`
 }
 
@@ -97,13 +102,27 @@ var scenarioErrorClasses = map[string]func(error) bool{
 	"AttachAuthorizationCommittedError": isErrorType[*AttachAuthorizationCommittedError],
 	"SandboxUnusableError":              isErrorType[*SandboxUnusableError],
 	"RateLimitedError":                  isErrorType[*RateLimited],
+	"ArtifactNotFoundError":             isErrorType[*ArtifactNotFoundError],
+	"ArtifactStorageFullError":          isErrorType[*ArtifactStorageFullError],
 	// Go's stream iterators yield the ErrStreamLost sentinel, wrapping the last fault.
 	"StreamLostError": func(err error) bool { return errors.Is(err, ErrStreamLost) },
+	"PineError":       isPlainError,
 }
 
 func isErrorType[T error](err error) bool {
 	_, ok := err.(T)
 	return ok
+}
+
+// isPlainError is the base error class in Go, which has no base error type: an SDK
+// error ("pinesandbox: …") of no type of the SDK's own, as errors.New and fmt.Errorf
+// make.
+func isPlainError(err error) bool {
+	typ := reflect.TypeOf(err)
+	if typ.Kind() == reflect.Pointer {
+		typ = typ.Elem()
+	}
+	return strings.HasPrefix(err.Error(), "pinesandbox: ") && !strings.HasPrefix(typ.PkgPath(), "go.pinesandbox.io/")
 }
 
 func TestContractScenarios(t *testing.T) {
@@ -143,7 +162,7 @@ func runScenario(t *testing.T, s scenario) {
 	}
 	script := &scriptedTransport{
 		t:           t,
-		hosts:       map[string]string{"control": scenarioControl, "computer": sandboxID + ".computer.scenario.pinesandbox.io"},
+		hosts:       map[string]string{"control": scenarioControl, "computer": sandboxID + ".computer.scenario.pinesandbox.io", "storage": scenarioStorage},
 		pending:     append([]scenarioExchange(nil), s.Exchanges...),
 		seenHeaders: map[string]string{},
 		seenJSON:    map[string]any{},
@@ -296,8 +315,49 @@ func callScenario(ctx context.Context, t *testing.T, s scenario, client *Client,
 		return value(needComputer().Stop(ctx))
 	case "Computer.sessions":
 		return value(needComputer().Sessions(ctx))
+	case "Computer.createSession":
+		sess, err := needComputer().CreateSession(ctx, CreateSessionOptions{
+			Name: str("name"), ArtifactAccess: ArtifactAccess(str("artifact_access")),
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+		return map[string]any{"name": sess.Name(), "artifact_access": string(sess.Info().ArtifactAccess)}, nil, nil
 	case "Client.stopComputer":
 		return value(client.StopComputer(ctx, str("id")))
+	case "Artifacts.list":
+		return value(client.Artifacts(str("computer_id")).List(ctx, ArtifactListOptions{Prefix: str("prefix")}))
+	case "Artifacts.upload":
+		return value(client.Artifacts(str("computer_id")).Upload(ctx, str("path"), ArtifactFromBytes([]byte(str("content"))),
+			ArtifactUploadOptions{ContentType: str("content_type"), Note: str("note")}))
+	case "Artifacts.open":
+		r, err := client.Artifacts(str("computer_id")).Open(ctx, str("path"))
+		if err != nil {
+			return nil, nil, err
+		}
+		defer r.Close()
+		content, err := io.ReadAll(r)
+		if err != nil {
+			return nil, nil, err
+		}
+		return map[string]any{"content": string(content)}, nil, nil
+	case "Artifacts.download":
+		destination := filepath.Join(t.TempDir(), "download")
+		if _, err := client.Artifacts(str("computer_id")).Download(ctx, str("path"), destination); err != nil {
+			return nil, nil, err
+		}
+		content, err := os.ReadFile(destination)
+		if err != nil {
+			t.Fatalf("read the download back: %v", err)
+		}
+		return map[string]any{"content": string(content)}, nil, nil
+	case "Artifacts.copy":
+		return value(client.Artifacts(str("computer_id")).Copy(ctx, str("from_computer_id"), str("from_path"), str("path")))
+	case "Artifacts.delete":
+		return nil, nil, client.Artifacts(str("computer_id")).Delete(ctx, str("path"))
+	case "Computer.artifactLink":
+		seconds, _ := s.Call.Args["expires_in_seconds"].(float64)
+		return value(needComputer().ArtifactLink(ctx, str("path"), time.Duration(seconds)*time.Second))
 	case "Client.createComputer":
 		c, err := client.CreateComputer(ctx, AttachOptions{Credentials: credentials})
 		if err != nil {
@@ -410,6 +470,9 @@ type scriptedTransport struct {
 	pending     []scenarioExchange
 	seenHeaders map[string]string // lower-cased name → the last request's value
 	seenJSON    map[string]any    // path → the last JSON body sent to it
+	// storageToken is the access_token of the latest artifact token response, the
+	// credential auth "storage" names.
+	storageToken string
 }
 
 func (s *scriptedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -431,7 +494,7 @@ func (s *scriptedTransport) RoundTrip(req *http.Request) (*http.Response, error)
 			s.t.Errorf("%s query %s = %q, want %q", label, k, got, v)
 		}
 	}
-	if got := authClass(req.Header.Get("Authorization")); got != want.Auth {
+	if got := authClass(req.Header.Get("Authorization"), s.storageToken); got != want.Auth {
 		s.t.Errorf("%s auth = %s, want %s", label, got, want.Auth)
 	}
 	for name, v := range want.Headers {
@@ -477,8 +540,16 @@ func (s *scriptedTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	}
 
 	resp := next.Response
+	if strings.HasSuffix(want.Path, "/artifacts/token") {
+		var issued struct {
+			AccessToken string `json:"access_token"`
+		}
+		if json.Unmarshal(resp.JSON, &issued) == nil && issued.AccessToken != "" {
+			s.storageToken = issued.AccessToken
+		}
+	}
 	if resp.TransportError {
-		return nil, errors.New("scenario: connection reset by peer")
+		return nil, errScenarioReset
 	}
 	status := resp.Status
 	if status == 0 {
@@ -510,19 +581,36 @@ func (s *scriptedTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	if status == http.StatusNoContent || status == http.StatusNotModified {
 		out = ""
 	}
+	var reply io.Reader = strings.NewReader(out)
+	length := int64(len(out))
+	if resp.Cut {
+		// The body fails after its text, short of the length the headers declare.
+		reply = io.MultiReader(reply, iotest.ErrReader(errScenarioReset))
+		length = -1
+		if n, err := strconv.ParseInt(header.Get("Content-Length"), 10, 64); err == nil {
+			length = n
+		}
+	}
 	return &http.Response{
 		Status:     fmt.Sprintf("%d %s", status, http.StatusText(status)),
 		StatusCode: status, Proto: "HTTP/1.1", ProtoMajor: 1, ProtoMinor: 1,
-		Header: header, Body: io.NopCloser(strings.NewReader(out)), ContentLength: int64(len(out)), Request: req,
+		Header: header, Body: io.NopCloser(reply), ContentLength: length, Request: req,
 	}, nil
 }
 
-// authClass names the credential a request carried, as the scenarios spell it.
-func authClass(header string) string {
+// errScenarioReset is a scripted connection reset: a request that gets no response, or a
+// cut body.
+var errScenarioReset = errors.New("scenario: connection reset by peer")
+
+// authClass names the credential a request carried, as the scenarios spell it;
+// storageToken is the artifact token's access token.
+func authClass(header, storageToken string) string {
 	token, ok := strings.CutPrefix(header, "Bearer ")
 	switch {
 	case !ok || token == "":
 		return "none"
+	case token == storageToken:
+		return "storage"
 	case strings.HasPrefix(token, "ct_"):
 		return "computer"
 	case strings.HasPrefix(token, "ps_"):

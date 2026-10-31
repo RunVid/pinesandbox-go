@@ -7,10 +7,8 @@ import (
 	"fmt"
 	"io"
 	"iter"
-	"math"
 	"net/url"
 	"strconv"
-	"sync/atomic"
 	"time"
 
 	"go.pinesandbox.io/computer/internal/base/problem"
@@ -25,12 +23,9 @@ import (
 // gone) or budget exhaustion ends the loop. The caller stops early by breaking; cancelling
 // ctx ends it cleanly.
 
-// defaultReconnectBudget bounds CONSECUTIVE failed reconnects (a dead/recycling Computer)
-// before the iterator surfaces ErrStreamLost. Reset whenever an event is delivered.
-const defaultReconnectBudget = 5
-
 // ErrStreamLost is the terminal error yielded when the feed can't be re-established within
-// the reconnect budget.
+// the reconnect budget: wait.ReconnectBudget CONSECUTIVE failed reconnects (a
+// dead/recycling Computer), a count reset whenever an event is delivered.
 var ErrStreamLost = errors.New("pinesandbox: event stream lost (reconnect budget exhausted)")
 
 // AgentEvent is one public activity event. Payload follows the event type; Raw
@@ -49,7 +44,7 @@ type AgentEvent struct {
 	// without a trustworthy turn; never infer one from event order.
 	TurnID     string
 	Ts         *time.Time // event timestamp; nil if absent/unparseable (a bad ts never fails the event)
-	Type       string     // status|input|progress|activity|frame|controller_changed|result
+	Type       string     // status|input|progress|activity|frame|controller_changed|usage|result
 	Controller string     // agent|human|locked; empty on legacy/synthetic events
 	ModeEpoch  int64      // per-session controller ordering fence
 	Payload    json.RawMessage
@@ -448,7 +443,7 @@ func resumeStream[T any](ctx context.Context, c *Client, path, token string, cur
 		if rid := sr.Headers.Get("X-Request-Id"); rid != "" {
 			requestID = rid
 		}
-		body := watchIdle(sr.Body, &transport.TimeoutError{Host: host, Op: op, RequestID: requestID,
+		body := transport.WatchIdle(sr.Body, streamIdleTimeout, &transport.TimeoutError{Host: host, Op: op, RequestID: requestID,
 			Msg: "event stream sent nothing for " + streamIdleTimeout.String()})
 		delivered, ferr := pumpFrames(body, cursor, decode, terminal, yield)
 		if errors.Is(ferr, errConsumerStopped) || errors.Is(ferr, errTerminalFrame) || ctx.Err() != nil {
@@ -503,44 +498,6 @@ func pumpFrames[T any](body io.ReadCloser, cursor *string, decode func(sse.Frame
 // streamIdleTimeout is how long an established stream may send nothing, not even the
 // Computer's keepalive comment (every 20s), before it is treated as dead and reopened.
 var streamIdleTimeout = 60 * time.Second
-
-// idleBody closes a stream body when one read waits streamIdleTimeout for data; the
-// read that the close ends returns idleErr. The timer runs only while a read waits,
-// so a consumer that takes its time between events never counts as a silent stream.
-type idleBody struct {
-	io.ReadCloser
-	timer   *time.Timer
-	idle    atomic.Bool
-	idleErr error
-}
-
-func watchIdle(body io.ReadCloser, idleErr error) *idleBody {
-	b := &idleBody{ReadCloser: body, idleErr: idleErr}
-	b.timer = time.AfterFunc(streamIdleTimeout, func() {
-		b.idle.Store(true)
-		_ = body.Close()
-	})
-	b.timer.Stop()
-	return b
-}
-
-func (b *idleBody) Read(p []byte) (int, error) {
-	if b.idle.Load() {
-		return 0, b.idleErr
-	}
-	b.timer.Reset(streamIdleTimeout)
-	n, err := b.ReadCloser.Read(p)
-	b.timer.Stop()
-	if b.idle.Load() {
-		return n, b.idleErr
-	}
-	return n, err
-}
-
-func (b *idleBody) Close() error {
-	b.timer.Stop()
-	return b.ReadCloser.Close()
-}
 
 // streamRetry charges one reconnect against the budget. It returns true to reconnect (after
 // sleeping the backoff), or false to stop — either because the budget is spent (it yields
@@ -606,13 +563,4 @@ func lastEventIDHeader(cursor string) map[string]string {
 // ended during the wait.
 func (c *Client) streamWait(ctx context.Context, attempt int) bool {
 	return c.clock.Sleep(ctx, c.streamBackoff(attempt)) == nil && ctx.Err() == nil
-}
-
-// defaultStreamBackoff is the shared reconnect cadence for a dropped event feed
-// (x-pine-retry.client.stream_reconnect): 500ms·2^(attempt-1) plus up to 200ms of
-// jitter, capped at 5s.
-func (c *Client) defaultStreamBackoff(attempt int) time.Duration {
-	d := time.Duration(float64(500*time.Millisecond)*math.Pow(2, float64(attempt-1))) +
-		time.Duration(c.clock.Jitter()*float64(200*time.Millisecond))
-	return min(d, 5*time.Second)
 }

@@ -8,6 +8,82 @@ for the next minor version (`v0.3.17`, and the release after `v0.3.18` that
 renamed the Runtime names to Sandbox, were the exceptions). Review release notes
 before adopting a new minor version.
 
+## [0.3.20] — 2026-10-31
+
+- Return saved deliverables in the existing result `artifacts` list with `root: artifact_store`, `computer_id` and `relative_path`. Use the existing artifact client to download them. Update result handling before enabling session artifact access; workdir entries keep their existing shape.
+
+- Turn usage exposes optional `cost.additional_details` with customer-facing descriptions and amounts, including late settlements.
+
+### Added
+
+- Turn usage includes generic additional customer charges, with unknown amounts
+  preserved. Late usage events carry cumulative totals for their original turn;
+  provider measurements and audit details remain private.
+- `Client.Artifacts(computerID)` reaches a Computer's artifacts, the files it keeps
+  beyond its sessions, with the project key, whether the Computer is running or
+  stopped. `List` returns an `ArtifactPage`: one page of files (path, size, update
+  time, content type and note) and folders under a prefix, with a `NextPageToken`;
+  `Upload` saves a local file (`ArtifactFromFile`), bytes (`ArtifactFromBytes`) or an
+  `io.ReaderAt` of known size (`ArtifactFromReader`), with an optional content type
+  and note; `Download` saves a file to a local path, writing beside it and renaming
+  into place; `Open` streams a file; `Copy` copies a file from another of the
+  project's Computers; and `Delete` removes one. Uploads and downloads resume after a
+  dropped connection, one that moves no bytes for 60 seconds, or a storage 408, 429 or
+  5xx other than 501, the same answers every Pine SDK retries, and `List`, `Delete`,
+  an upload's start and each step of a `Copy` are sent again after them; a 412, a file
+  replaced during a resumed download, is not retryable. The handle gets one short-lived
+  storage token from Pine and renews it before it lapses; the files go to and from
+  storage directly, never through Pine. A Computer that is unknown, deleted or in
+  another project is `*UnknownComputerError`. A `Delete` sent again after a lost response
+  succeeds when the first one already removed the file.
+- An upload that names no content type gets the type one shared table gives its
+  path's extension, such as `application/pdf` for `reports/q3.PDF`, or
+  `application/octet-stream` for an extension the table doesn't list. Every Pine SDK
+  uses the same table, so an upload gets the same type from any SDK on any machine.
+- Artifact paths, such as `reports/q3.pdf`, follow one rule in every Pine SDK and on
+  the Computer: 1 to 900 bytes of valid UTF-8, with no control characters and no
+  empty, `.` or `..` part between slashes (so no leading, trailing or doubled `/`).
+  Any other character is allowed. The artifact methods and `Computer.ArtifactLink`
+  return an error for a path outside the rule before sending anything.
+- `CreateSessionOptions.ArtifactAccess` chooses what the session's agent may do with
+  the Computer's artifacts: `ArtifactAccessReadOnly` lets it list and read files, and
+  `ArtifactAccessReadWrite` also lets it save and remove files and make public links.
+  The agent can use the artifacts only when you create the session with one of
+  these; by default (`ArtifactAccessNone`) it can't. `SessionInfo.ArtifactAccess`
+  reports a session's access, `ArtifactAccessNone` from a Computer that doesn't say.
+  Your own access with the project key is unaffected.
+- `Computer.ArtifactLink(ctx, path, expiresIn)` makes a public link to one of the
+  Computer's artifacts. The running Computer serves it until `expiresIn` passes or
+  the Computer stops. `expiresIn` is whole seconds from a minute to 30 days, or 0;
+  another value returns an error before anything is sent.
+- `*ArtifactNotFoundError`, with the `Path` the call named and wrapping the storage
+  `*APIError`, when an artifact isn't there, and `*ArtifactStorageFullError`, with
+  `UsedBytes` and `LimitBytes`, when `Upload` or `Copy` is refused because the
+  Computer's artifacts are over their storage limit. Each refused write checks the
+  limit again, so once deletes make room the same handle saves again.
+
+### Changed
+
+- A `412 BINDING_REVISION_CONFLICT` is read from the API's `current_revision`,
+  falling back to the deprecated `current_binding_revision` from an older Portal.
+  `APIError.CurrentBindingRevision` is renamed `APIError.CurrentRevision` to match
+  the API; `BindingRevisionConflictError.CurrentRevision` is unchanged.
+- The message of a `*ConnectionError` or `*TimeoutError` no longer repeats the
+  request's URL, whose path or query can carry a file's path. It still names the host
+  and the operation.
+- `RecoverComputer` also recognizes `CAPTURE_TIMEOUT`, the SNAKE_CASE spelling a later server will
+  send for `CaptureTimeout`, and refuses to release a Computer sandbox whose Pause is still
+  confirming its capture under either spelling. Nothing changes with current servers.
+- With servers that use the public status vocabulary, `StopSaveError`'s message is product
+  text and no longer says why saving failed; Pine's server logs keep that detail.
+
+### Removed
+
+- `CreateSessionOptions.Browser` and `Blind`, `SessionInfo.Blind`, and
+  `DelegateDesktop`'s `browser` argument. Every session gets its own browser window.
+  A person enters a password by taking control of the session over the desktop, and
+  a task's secrets reach the agent through `$SESSION_SECRETS`.
+
 ## [0.3.19] — 2026-10-21
 
 ### Added

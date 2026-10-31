@@ -1,8 +1,9 @@
 // Package wait provides a context-cancellable sleep — the cancellation point for the SDK's
 // retry/poll loops (bind handshake, token mint, sandbox readiness). A bare time.Sleep keeps
 // a loop running for its full local budget after the caller's context is already cancelled;
-// Sleep returns ctx.Err() the instant the context is done instead. Generic base primitive
-// (Computer-agnostic, stdlib only — must not import a domain package).
+// Sleep returns ctx.Err() the instant the context is done instead. It also holds the
+// shared reconnect cadence those loops wait by. Generic base primitive (Computer-agnostic,
+// stdlib only — must not import a domain package).
 package wait
 
 import (

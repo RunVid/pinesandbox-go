@@ -298,6 +298,27 @@ func TestCredentials_404Unknown(t *testing.T) {
 	}
 }
 
+// TestComputerDeletedIsUnknownComputerWithItsCode: Portal's computer-deleted 404, on
+// the binding read and on attach, is the same *UnknownComputerError, and Code names it.
+func TestComputerDeletedIsUnknownComputerWithItsCode(t *testing.T) {
+	s := newAttachSource(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(404)
+		fmt.Fprint(w, `{"type":"urn:pinesandbox:problem:computer-deleted","title":"Computer deleted","status":404,"detail":"This Computer was deleted.","retryable":false,"computer_id":"c","deleted_at":"2026-10-28T00:00:00Z"}`)
+	})
+	_, readErr := s.CurrentBinding(context.Background(), "c")
+	_, attachErr := s.Credentials(context.Background(), validCredentialsRequest())
+	for name, err := range map[string]error{"binding read": readErr, "attach": attachErr} {
+		var e *UnknownComputerError
+		if !errors.As(err, &e) {
+			t.Fatalf("%s: err = %T (%v), want *UnknownComputerError", name, err, err)
+		}
+		if e.Status != 404 || e.Code != "urn:pinesandbox:problem:computer-deleted" {
+			t.Errorf("%s: status=%d code=%q", name, e.Status, e.Code)
+		}
+	}
+}
+
 func TestCredentials_BindingRevisionConflictIsTerminalAndCarriesWinner(t *testing.T) {
 	s := newAttachSource(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/problem+json")

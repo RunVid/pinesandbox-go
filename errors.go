@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 
+	"go.pinesandbox.io/computer/internal/artifacts"
 	"go.pinesandbox.io/computer/internal/base/problem"
 	"go.pinesandbox.io/computer/internal/base/spec"
 	"go.pinesandbox.io/computer/internal/base/transport"
@@ -199,6 +200,18 @@ type (
 	ComputerRegistrationError    = tokens.ComputerRegistrationError
 	ComputerDeletionError        = tokens.ComputerDeletionError
 	UnknownComputerError         = tokens.UnknownComputerError
+)
+
+// Errors from a Computer's artifacts. Other storage refusals are an *APIError with the
+// storage status and its message.
+type (
+	// ArtifactNotFoundError means the Computer's artifacts have no file at Path, the
+	// path the call named. It wraps the storage *APIError.
+	ArtifactNotFoundError = artifacts.NotFoundError
+	// ArtifactStorageFullError means the Computer stores more than its storage limit
+	// (UsedBytes of LimitBytes), so Upload and Copy wrote nothing. Delete files to make
+	// room.
+	ArtifactStorageFullError = artifacts.StorageFullError
 )
 
 // Errors from lifecycle requests.

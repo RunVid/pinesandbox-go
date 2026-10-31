@@ -472,3 +472,50 @@ func TestDo_RetryAfterOnAPIError(t *testing.T) {
 		}
 	}
 }
+
+// TestBodyReader_StreamedAndSentOnce: a streamed body goes out with its declared length,
+// and a request carrying one is never resent, even on a retry-eligible method, because
+// the reader was consumed.
+func TestBodyReader_StreamedAndSentOnce(t *testing.T) {
+	var n int
+	var got string
+	var length int64
+	c := retryClient(rtFunc(func(r *http.Request) (*http.Response, error) {
+		n++
+		b, _ := io.ReadAll(r.Body)
+		got, length = string(b), r.ContentLength
+		return nil, io.ErrUnexpectedEOF
+	}))
+	_, err := c.Stream(context.Background(), "PUT", "/upload?upload_id=u1", Request{
+		BodyReader: strings.NewReader("hello"), ContentLength: 5, RetryOnTransient: true,
+	})
+	var ce *ConnectionError
+	if !errors.As(err, &ce) || got != "hello" || length != 5 {
+		t.Fatalf("err=%v body=%q length=%d, want a ConnectionError after sending the 5 bytes", err, got, length)
+	}
+	_, _ = c.DoRaw(context.Background(), "DELETE", "/x", Request{BodyReader: strings.NewReader("x"), ContentLength: 1})
+	if n != 2 {
+		t.Errorf("sends = %d, want each streamed-body request sent once", n)
+	}
+}
+
+// TestOp_OverridesTheOperationInErrors: Request.Op replaces "<METHOD> <path>" on the
+// fault and API errors, so a value in the path stays out of them.
+func TestOp_OverridesTheOperationInErrors(t *testing.T) {
+	const op = "GET /storage/v1/b/bkt/o/{object}"
+	c := New("http", "h", WithRetry(1, nil), WithHTTPClient(&http.Client{Transport: rtFunc(func(*http.Request) (*http.Response, error) {
+		return nil, io.ErrUnexpectedEOF
+	})}))
+	_, err := c.DoRaw(context.Background(), "GET", "/storage/v1/b/bkt/o/secret%2Fname", Request{Op: op})
+	var ce *ConnectionError
+	if !errors.As(err, &ce) || ce.Op != op || strings.Contains(err.Error(), "secret") {
+		t.Fatalf("fault = %v, want op %q and no object name", err, op)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(403) }))
+	defer srv.Close()
+	_, err = clientFor(t, srv).Do(context.Background(), "GET", "/storage/v1/b/bkt/o/secret%2Fname", Request{Op: op})
+	var ae *problem.APIError
+	if !errors.As(err, &ae) || ae.Op != op {
+		t.Fatalf("API error = %v, want op %q", err, op)
+	}
+}

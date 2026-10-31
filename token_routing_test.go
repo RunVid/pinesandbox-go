@@ -161,6 +161,7 @@ func TestFacade_TokenRouting_Comprehensive(t *testing.T) {
 	_ = comp.CloseOrphanTab(ctx, "T9")
 	_, _ = sess.Agent().EventsPage(ctx, EventsPageOptions{})
 	_, _ = sess.StartLearn(ctx, "")
+	_, _ = comp.ArtifactLink(ctx, "reports/q3.pdf", 0)
 
 	expect := map[string]string{
 		// ps_ (session-scoped)
@@ -233,6 +234,7 @@ func TestFacade_TokenRouting_Comprehensive(t *testing.T) {
 		"GET /v1/passkeys/ceremonies":           ct,
 		"POST /v1/passkeys/ceremonies/pwc_abc":  ct,
 		"POST /v1/sessions/s1/passkeys/intents": ps,
+		"POST /v1/artifacts/links":              ct,
 		// token-less
 	}
 

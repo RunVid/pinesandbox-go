@@ -150,3 +150,9 @@ func (e *ComputerDeletionError) Error() string {
 type UnknownComputerError struct{ tokenBase }
 
 func (e *UnknownComputerError) Error() string { return tokErr("unknown computer", e.tokenBase) }
+
+// NewUnknownComputerError is the UnknownComputerError for the Portal's 404 ae on a route
+// outside this package, such as the artifact token route.
+func NewUnknownComputerError(msg string, ae *problem.APIError) *UnknownComputerError {
+	return &UnknownComputerError{tokenBaseFrom(msg, ae)}
+}

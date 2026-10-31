@@ -44,7 +44,7 @@ binding, err := comp.Binding()
 if err != nil { return err }
 if err := store.SaveBinding(creds.ID, binding); err != nil { return err }
 
-sess, err := comp.CreateSession(ctx, pine.CreateSessionOptions{Browser: true})
+sess, err := comp.CreateSession(ctx, pine.CreateSessionOptions{})
 if err != nil { return err }
 fmt.Println(sess.Name())
 // Use sess to drive the browser or run Pine's agent; examples below.
@@ -57,6 +57,14 @@ fmt.Println(sess.Name())
 
 Both JSON records contain secrets. Keep them encrypted on your backend, never in
 a browser. Your project API key also stays backend-only.
+
+Every session has its own browser window, and every option is optional. A session's
+agent can use the Computer's [artifacts](#artifacts) only when you create the session
+with them: `pine.CreateSessionOptions{ArtifactAccess: pine.ArtifactAccessReadOnly}`
+lets it list and read files, and `pine.ArtifactAccessReadWrite` also lets it save and
+remove files and make public links. Without it the agent gets none.
+`sess.Info().ArtifactAccess` reports a session's access (`pine.ArtifactAccessNone`
+from a Computer that doesn't say). Your own access with the project key is unaffected.
 
 ## Reuse it from another backend
 
@@ -131,7 +139,7 @@ replacement. Stop can restore a paused Computer before saving it.
 Stop/Start restores supported saved browser state, not live tabs, page memory or
 session files. Export files first. `Kill` releases compute without an acknowledged
 save. `Delete` permanently retires the Computer ID and purges its saved state
-after 24 hours; there is no undelete. Stop and Kill retain the identity and saved state.
+after 25 hours; there is no undelete. Stop and Kill retain the identity and saved state.
 
 ## Idle timeout and maximum age
 
@@ -462,6 +470,42 @@ json.NewEncoder(w).Encode(env)       // → your frontend
 // In the browser: connectionFromDelegation(env) → <pine-desktop url=… token=…/>
 ```
 
+## Artifacts
+
+A Computer's artifacts are the files it keeps beyond its sessions. Reach them with the
+project key whether the Computer is running or stopped. The handle gets one short-lived
+storage token from Pine and renews it before it lapses; the files go to and from storage
+directly, never through Pine, and uploads and downloads resume after a dropped
+connection.
+
+```go
+arts := client.Artifacts(creds.ID)
+if _, err := arts.Upload(ctx, "inputs/brief.txt", pine.ArtifactFromFile("brief.txt"),
+	pine.ArtifactUploadOptions{Note: "the brief"}); err != nil {
+	return err // *pine.ArtifactStorageFullError while the Computer is over its limit
+}
+page, err := arts.List(ctx, pine.ArtifactListOptions{Prefix: "reports/"})
+if err != nil {
+	return err
+}
+for _, f := range page.Files { // and page.Folders; page.NextPageToken continues
+	fmt.Println(f.Path, f.Size, f.Note)
+}
+if _, err := arts.Download(ctx, "reports/q3.pdf", "q3.pdf"); err != nil {
+	return err // *pine.ArtifactNotFoundError when there is no such file
+}
+```
+
+`Open` streams a file, `Copy` copies one from another of the project's Computers, and
+`Delete` removes one. A running Computer also serves public links to its artifacts:
+`comp.ArtifactLink(ctx, "reports/q3.pdf", 24*time.Hour)` returns a URL anyone can
+download the file from until it expires or the Computer stops.
+
+This access is yours, with the project key, and doesn't depend on any session. A
+session's agent can use the artifacts only when you create the session with
+`ArtifactAccess: pine.ArtifactAccessReadOnly` or `pine.ArtifactAccessReadWrite`; by
+default it can't.
+
 ## Surface
 
 `Client` → `Computer` → `Session`, with `Session.Agent()` (delegate mode) and
@@ -568,7 +612,7 @@ For integrations using older storage or field-based methods:
 - root package `pinesandbox` — the hand-written facade.
 - `internal/base/*` — generic, Computer-agnostic primitives (zone, transport,
   SSE, problem, spec-version); enforced to never import a domain package.
-- `internal/{bindhpke,bind,binder,tokens,controlplane,coordinator}` — the domain.
+- `internal/{bindhpke,bind,binder,tokens,controlplane,coordinator,artifacts}` — the domain.
 - `interop/` — monorepo-only module proving the attach HPKE envelope is byte-
   compatible with the Computer's implementation.
 

@@ -22,8 +22,9 @@ import (
 type Client struct {
 	raw  *transport.Client
 	spec spec.Negotiator
-	// Typed-event-iterator reconnect knobs (see stream.go). Defaults set in NewClient;
-	// tests in this package override them so a reconnect doesn't actually sleep.
+	// Typed-event-iterator reconnect knobs (see stream.go). NewClient sets the shared
+	// cadence (wait.ReconnectBackoff, wait.ReconnectBudget); tests in this package
+	// override them so a reconnect doesn't actually sleep.
 	streamBackoff func(attempt int) time.Duration
 	streamBudget  int
 	// clock is every wait between requests — before lost agent work is sent again
@@ -57,13 +58,13 @@ func NewClient(raw *transport.Client, specMajor int, opts ...Option) *Client {
 			ResponseHeader: "X-Computer-Spec-Version",
 			SupportedMajor: specMajor,
 		},
-		streamBudget: defaultReconnectBudget,
+		streamBudget: wait.ReconnectBudget,
 	}
 	for _, o := range opts {
 		o(c)
 	}
 	c.clock = wait.Or(c.clock)
-	c.streamBackoff = c.defaultStreamBackoff
+	c.streamBackoff = func(attempt int) time.Duration { return wait.ReconnectBackoff(c.clock, attempt) }
 	return c
 }
 
@@ -123,25 +124,29 @@ func (c *Client) Bind(ctx context.Context, bindToken, podUID, coordBootID, ciphe
 
 // ---- session lifecycle ----
 
-// CreateSessionOptions are the optional knobs for CreateSession.
+// CreateSessionOptions are the optional knobs for CreateSession. The request sends
+// neither browser nor blind, so every session gets the Computer's default, a browser
+// window.
 type CreateSessionOptions struct {
-	Name    string
-	Label   string
-	Browser bool
-	Blind   bool
+	Name  string
+	Label string
+	// ArtifactAccess is what the session's agent may do with the Computer's artifacts;
+	// empty sends nothing, which the Computer takes as ArtifactAccessNone.
+	ArtifactAccess ArtifactAccess
 }
 
 type createSessionBody struct {
-	Name    string `json:"name,omitempty"`
-	Browser bool   `json:"browser"`
-	Label   string `json:"label,omitempty"`
-	Blind   bool   `json:"blind,omitempty"`
+	Name           string         `json:"name,omitempty"`
+	Label          string         `json:"label,omitempty"`
+	ArtifactAccess ArtifactAccess `json:"artifact_access,omitempty"`
 }
 
 // CreateSession opens a session (POST sessions, no v1 prefix). An empty Name lets the
 // coordinator mint a friendly one. token is typically the ct_.
 func (c *Client) CreateSession(ctx context.Context, token string, opts CreateSessionOptions) (*Session, error) {
-	body, err := json.Marshal(createSessionBody{Name: opts.Name, Browser: opts.Browser, Label: opts.Label, Blind: opts.Blind})
+	body, err := json.Marshal(createSessionBody{
+		Name: opts.Name, Label: opts.Label, ArtifactAccess: opts.ArtifactAccess,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("pinesandbox: marshal create-session body: %w", err)
 	}
