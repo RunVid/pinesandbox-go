@@ -3,7 +3,7 @@ package pinesandbox
 import (
 	"context"
 	"encoding/json"
-	"fmt"
+	"iter"
 
 	"go.pinesandbox.io/computer/internal/coordinator"
 )
@@ -51,7 +51,7 @@ func (c *Computer) CreateSession(ctx context.Context, opts CreateSessionOptions)
 	if err != nil {
 		return nil, err
 	}
-	return c.wrapSession(coord, s), nil
+	return c.wrapSession(s), nil
 }
 
 // Session fetches an existing session's metadata by name (with the ct_).
@@ -71,7 +71,7 @@ func (c *Computer) Session(ctx context.Context, name string) (*Session, error) {
 	if err != nil {
 		return nil, err
 	}
-	return c.wrapSession(coord, s), nil
+	return c.wrapSession(s), nil
 }
 
 // AdoptSession rebuilds a drive-capable *Session from a persisted ps_, with no
@@ -80,11 +80,10 @@ func (c *Computer) Session(ctx context.Context, name string) (*Session, error) {
 // AdoptExisting the Computer, then AdoptSession). The Computer must be attached; a
 // wrong/expired ps_ surfaces as a 401 on first use.
 func (c *Computer) AdoptSession(name, sessionToken string) (*Session, error) {
-	coord, _, err := c.bound()
-	if err != nil {
+	if _, _, err := c.bound(); err != nil {
 		return nil, err
 	}
-	return &Session{parent: c, coord: coord, name: name, token: sessionToken}, nil
+	return &Session{parent: c, name: name, token: sessionToken}, nil
 }
 
 // Sessions lists all of the Computer's sessions.
@@ -99,7 +98,7 @@ func (c *Computer) Sessions(ctx context.Context) ([]*Session, error) {
 	}
 	out := make([]*Session, 0, len(list))
 	for _, s := range list {
-		out = append(out, c.wrapSession(coord, s))
+		out = append(out, c.wrapSession(s))
 	}
 	return out, nil
 }
@@ -118,16 +117,12 @@ func (c *Computer) DestroySession(ctx context.Context, name string, clean bool) 
 func (c *Computer) bound() (*coordinator.Client, string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.coord == nil || c.computerToken == "" {
-		return nil, "", fmt.Errorf("%w: call StartComputer or CreateComputer first", ErrNotBound)
-	}
-	return c.coord, c.computerToken, nil
+	_, coord, ct, err := c.boundLocked()
+	return coord, ct, err
 }
 
-// wrapSession builds a Session from the coordinator client snapshot the caller already took
-// via bound() — it must NOT re-read c.coord (which a concurrent reset() could be nilling).
-func (c *Computer) wrapSession(coord *coordinator.Client, s *coordinator.Session) *Session {
-	return &Session{parent: c, coord: coord, name: s.Name, token: s.Token, info: s}
+func (c *Computer) wrapSession(s *coordinator.Session) *Session {
+	return &Session{parent: c, name: s.Name, token: s.Token, info: s}
 }
 
 // SessionInfo is the parsed session metadata (browser plane, timestamps, etc.). Re-exported
@@ -143,7 +138,6 @@ type Browser = coordinator.Browser
 // reads that accept either token use the ps_ when the handle has one.
 type Session struct {
 	parent *Computer
-	coord  *coordinator.Client
 	name   string
 	token  string // ps_
 	info   *coordinator.Session
@@ -167,28 +161,65 @@ func (s *Session) Drive() *DriveMode { return &DriveMode{s: s} }
 
 // Epoch returns the session's current epoch document (raw).
 func (s *Session) Epoch(ctx context.Context) (json.RawMessage, error) {
-	return s.coord.Epoch(ctx, s.token, s.name)
+	return sessionCall(s, func(coord *coordinator.Client, _ string) (json.RawMessage, error) {
+		return coord.Epoch(ctx, s.token, s.name)
+	})
 }
 
 // Focus raises the session's window.
 func (s *Session) Focus(ctx context.Context) error {
-	return s.coord.Focus(ctx, s.token, s.name)
+	return sessionDo(s, func(coord *coordinator.Client, _ string) error {
+		return coord.Focus(ctx, s.token, s.name)
+	})
 }
 
 // RecreateTerminal rebuilds the session's bash terminal after a restart lost it.
 func (s *Session) RecreateTerminal(ctx context.Context) error {
-	return s.coord.RecreateTerminal(ctx, s.token, s.name)
+	return sessionDo(s, func(coord *coordinator.Client, _ string) error {
+		return coord.RecreateTerminal(ctx, s.token, s.name)
+	})
 }
 
-// computerToken returns the parent Computer's ct_ (for ct_-only mutations).
-func (s *Session) computerToken() string { return s.parent.ComputerToken() }
+// client is the parent Computer's current coordinator and ct_, read together so a call
+// never pairs one binding's ct_ with another's coordinator. After the Computer's Stop or
+// Kill the session's calls fail with the Computer's *BindError without sending a request.
+func (s *Session) client() (*coordinator.Client, string, error) {
+	return s.parent.bound()
+}
+
+// sessionCall runs f with the parent Computer's current coordinator and ct_ (see client),
+// or returns the Computer's *BindError without calling f.
+func sessionCall[T any](s *Session, f func(coord *coordinator.Client, ct string) (T, error)) (T, error) {
+	coord, ct, err := s.client()
+	if err != nil {
+		var zero T
+		return zero, err
+	}
+	return f(coord, ct)
+}
+
+// sessionDo is sessionCall for a call that returns only an error.
+func sessionDo(s *Session, f func(coord *coordinator.Client, ct string) error) error {
+	coord, ct, err := s.client()
+	if err != nil {
+		return err
+	}
+	return f(coord, ct)
+}
+
+func failedSeq[T any](err error) iter.Seq2[T, error] {
+	return func(yield func(T, error) bool) {
+		var zero T
+		yield(zero, err)
+	}
+}
 
 // readToken is the token for a route that accepts either token: the session's ps_ when
-// this handle has one, else the Computer's ct_ (a handle from Computer.Session or
-// Computer.Sessions, whose ps_ the Computer redacts on read).
-func (s *Session) readToken() string {
+// this handle has one, else ct, the Computer's ct_ from client() (a handle from
+// Computer.Session or Computer.Sessions, whose ps_ the Computer redacts on read).
+func (s *Session) readToken(ct string) string {
 	if s.token != "" {
 		return s.token
 	}
-	return s.computerToken()
+	return ct
 }

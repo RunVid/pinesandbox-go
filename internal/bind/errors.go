@@ -4,7 +4,14 @@
 // root SDK re-exports these error types. Pure classification — no I/O, no crypto.
 package bind
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
+
+// ErrNotBound is the cause of the BindError a Computer handle without a binding returns;
+// the root package re-exports it as pinesandbox.ErrNotBound.
+var ErrNotBound = errors.New("pinesandbox: Computer has no binding")
 
 // base carries the common fields of every bind error: the HTTP status (0 for a
 // transport/deadline failure) and the underlying cause (for errors.Unwrap).
@@ -35,7 +42,12 @@ func errMsg(label string, status int, m string) string {
 // BindError is a generic bind failure (the 409 / catch-all fallback).
 type BindError struct{ base }
 
-func (e *BindError) Error() string { return errMsg("bind failed", e.Status, e.Msg) }
+func (e *BindError) Error() string {
+	if e.Status == 0 && e.Cause == ErrNotBound {
+		return "pinesandbox: " + e.Msg
+	}
+	return errMsg("bind failed", e.Status, e.Msg)
+}
 
 // BindAuthError: bind_token verification failed (401/403, /errors/bind-rejected).
 type BindAuthError struct{ base }

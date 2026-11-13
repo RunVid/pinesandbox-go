@@ -25,22 +25,30 @@ type (
 
 // ListTabs returns the session's tabs.
 func (s *Session) ListTabs(ctx context.Context) ([]Tab, error) {
-	return s.coord.ListTabs(ctx, s.token, s.name)
+	return sessionCall(s, func(coord *coordinator.Client, _ string) ([]Tab, error) {
+		return coord.ListTabs(ctx, s.token, s.name)
+	})
 }
 
 // CreateTab opens a tab at url and returns it.
 func (s *Session) CreateTab(ctx context.Context, url, label string) (*Tab, error) {
-	return s.coord.CreateTab(ctx, s.token, s.name, url, label)
+	return sessionCall(s, func(coord *coordinator.Client, _ string) (*Tab, error) {
+		return coord.CreateTab(ctx, s.token, s.name, url, label)
+	})
 }
 
 // PatchTab updates a tab and returns it.
 func (s *Session) PatchTab(ctx context.Context, targetID string, opts PatchTabOptions) (*Tab, error) {
-	return s.coord.PatchTab(ctx, s.token, s.name, targetID, opts)
+	return sessionCall(s, func(coord *coordinator.Client, _ string) (*Tab, error) {
+		return coord.PatchTab(ctx, s.token, s.name, targetID, opts)
+	})
 }
 
 // CloseTab closes a tab.
 func (s *Session) CloseTab(ctx context.Context, targetID string) error {
-	return s.coord.CloseTab(ctx, s.token, s.name, targetID)
+	return sessionDo(s, func(coord *coordinator.Client, _ string) error {
+		return coord.CloseTab(ctx, s.token, s.name, targetID)
+	})
 }
 
 // ---- control lease ----
@@ -53,7 +61,9 @@ func (s *Session) CloseTab(ctx context.Context, targetID string) error {
 // ControlState returns the session's control state + ETag (use the ETag as the next
 // UpdateControl If-Match).
 func (s *Session) ControlState(ctx context.Context) (*ControlState, error) {
-	return s.coord.GetControl(ctx, s.readToken(), s.name)
+	return sessionCall(s, func(coord *coordinator.Client, ct string) (*ControlState, error) {
+		return coord.GetControl(ctx, s.readToken(ct), s.name)
+	})
 }
 
 // UpdateControl applies a typed control patch (take/release control, pin idle).
@@ -68,7 +78,9 @@ func (s *Session) UpdateControl(ctx context.Context, patch ControlPatch, opts Pa
 		}
 		opts.IdempotencyKey = key
 	}
-	return s.coord.PatchControl(ctx, s.computerToken(), s.name, patch, opts)
+	return sessionCall(s, func(coord *coordinator.Client, ct string) (*ControlState, error) {
+		return coord.PatchControl(ctx, ct, s.name, patch, opts)
+	})
 }
 
 // ControlOption configures TakeControl / ReleaseControl.
@@ -147,7 +159,9 @@ func (s *Session) NotifyHuman(ctx context.Context, reason, detail, ifMatch strin
 		}
 		ifMatch = current.ETag
 	}
-	return s.coord.ControlNotify(ctx, s.readToken(), s.name, reason, detail, ifMatch)
+	return sessionDo(s, func(coord *coordinator.Client, ct string) error {
+		return coord.ControlNotify(ctx, s.readToken(ct), s.name, reason, detail, ifMatch)
+	})
 }
 
 // TakeControl gives a human the control lease on the named session,
@@ -184,7 +198,9 @@ var errSessionNameRequired = errors.New("pinesandbox: session name required")
 // DesktopToken mints a short-lived, browser-safe desktop-stream token (dt_) with the
 // Computer token.
 func (s *Session) DesktopToken(ctx context.Context) (*DesktopToken, error) {
-	return s.coord.MintDesktopToken(ctx, s.computerToken(), s.name)
+	return sessionCall(s, func(coord *coordinator.Client, ct string) (*DesktopToken, error) {
+		return coord.MintDesktopToken(ctx, ct, s.name)
+	})
 }
 
 // ---- handoffs + control events ----
@@ -194,12 +210,16 @@ func (s *Session) DesktopToken(ctx context.Context) (*DesktopToken, error) {
 // to walk older pages ("" = no more). List items are summaries; use GetHandoff for
 // one handoff's full forensic detail. limit<=0 / before="" omit the bounds.
 func (s *Session) ListHandoffs(ctx context.Context, limit int, before string) (*HandoffList, error) {
-	return s.coord.ListHandoffs(ctx, s.readToken(), s.name, limit, before)
+	return sessionCall(s, func(coord *coordinator.Client, ct string) (*HandoffList, error) {
+		return coord.ListHandoffs(ctx, s.readToken(ct), s.name, limit, before)
+	})
 }
 
 // GetHandoff returns one handoff with full forensic detail in Handoff.Raw.
 func (s *Session) GetHandoff(ctx context.Context, handoffID string) (*Handoff, error) {
-	return s.coord.GetHandoff(ctx, s.readToken(), s.name, handoffID)
+	return sessionCall(s, func(coord *coordinator.Client, ct string) (*Handoff, error) {
+		return coord.GetHandoff(ctx, s.readToken(ct), s.name, handoffID)
+	})
 }
 
 // ControlEvents streams the session's control-plane event feed (controller_changed /
@@ -208,5 +228,9 @@ func (s *Session) GetHandoff(ctx context.Context, handoffID string) (*Handoff, e
 // the last one to resume); Data holds the raw per-type payload. Pass lastEventID to
 // resume (""=from now); break to stop; cancel ctx to end cleanly.
 func (s *Session) ControlEvents(ctx context.Context, lastEventID string) iter.Seq2[ControlEvent, error] {
-	return s.coord.ControlEvents(ctx, s.readToken(), s.name, lastEventID)
+	coord, ct, err := s.client()
+	if err != nil {
+		return failedSeq[ControlEvent](err)
+	}
+	return coord.ControlEvents(ctx, s.readToken(ct), s.name, lastEventID)
 }

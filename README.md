@@ -119,8 +119,11 @@ if err := store.SaveBinding(creds.ID, binding); err != nil { return err }
 ```
 
 Stop waits up to 390 seconds, or the caller's earlier deadline. Cancellation ends
-the wait, not accepted work. Keep the binding until release is confirmed. A true
-result proves release or authoritative absence, not a successful final save.
+the wait, not accepted work: when ctx is cancelled or expires, Stop returns an
+error, and the Stop may already have been submitted. Keep the binding until
+release is confirmed. A true result proves release or authoritative absence of
+the runtime the handle names, or that the handle has no binding; it does not
+prove a successful final save.
 Saving is best effort: a failed or unconfirmed save still shuts the Computer down,
 and the next Start restores the last saved state. Only older servers keep the
 Computer running and return `StopSaveError` when the final save fails or is unconfirmed.
@@ -143,9 +146,15 @@ after 25 hours; there is no undelete. Stop and Kill retain the identity and save
 
 ## Idle timeout and maximum age
 
-`AttachOptions.Timeout` is the inactivity window (default five minutes), not an
+`AttachOptions.Timeout` is the inactivity window (default 30 minutes), not an
 HTTP request timeout. Work renews it; observation does not. It starts when the
 Computer starts, so a one-minute window can expire during slow setup.
+
+When the agent asks a question, nothing happens on the Computer until the answer
+arrives, so the countdown keeps running. Choose a timeout longer than a person
+may take to reply, or raise it with `SetIdleTimeout` when the question arrives.
+A Computer that stops this way saves its state once without confirming it; call
+`Stop` yourself when the state matters.
 
 Projects have a lifetime policy unless Pine removed it for one. The standard
 allowance is one minute to 24 hours of idle time and seven days of maximum age;
@@ -187,18 +196,32 @@ Computer. `Retryable` is a pointer: nil means no verdict, not permission to retr
   stopped. Read `Status`; its `NotFoundError` confirms that it has.
   A data-plane `SandboxGoneError` alone does not: paused/restoring Computers can
   temporarily have no route.
-- `SandboxRetainedError` names the existing `SandboxID` and `State` when Start
-  cannot replace it. Match the ID to your saved binding, or reload the latest
-  binding from your database. Reconnect, Resume or finish Stop as appropriate;
-  an ID alone cannot reconstruct a missing token.
+- `ComputerAlreadyStartedError` names the existing `SandboxID`, `State` and
+  `Reason` when Start or Recover finds the Computer already started; nothing was
+  released or started. Reconnect with the saved binding, or Stop it first to
+  start over. It is not a `SandboxRetainedError`.
+- `SandboxRetainedError` names the existing `SandboxID`, `State` and `Reason`
+  when Start or Recover cannot replace it; nothing was released or started.
+  For `State` `failed`, call `RecoverComputer`, or Stop and then Start; with the
+  reason `CaptureTimeout` (`CAPTURE_TIMEOUT` on later servers) `RecoverComputer`
+  refuses until the capture settles.
+  Otherwise match the ID to your saved binding, or reload the
+  latest binding from your database, and Reconnect or Resume; an ID alone cannot
+  reconstruct a missing token.
 - A Stop timeout is unconfirmed, not canceled. Keep the binding and observe or
   retry Stop. Older servers return `StopSaveError` and retain the source after a
   failed save; current servers still shut the Computer down.
 - Serialize Create/Start per Computer. On a binding-revision conflict, reload the
   winner's saved binding instead of retrying with a higher revision.
+- An `*AttachCredentialsError` with `Status` 409 and `Code`
+  `urn:pinesandbox:problem:idempotency-receipt-expired` means an attach was sent
+  again after Portal's receipt for it had expired. Start doesn't send it again
+  and shuts the new runtime down, so starting again is safe.
 - If a registered Computer's Start reply is lost before saving its binding,
   serialize recovery, call `client.StopComputer(ctx, id)`, then Start separately
-  with saved credentials. This stops the Computer whose token was lost.
+  with saved credentials. It stops whichever runtime the Computer's binding
+  points to when it's called, which may be one another worker has just started,
+  so use it only for this recovery.
 - An interrupted first Create can fail before registering the Computer. Stop-by-ID
   then returns success, but Start raises `UnknownComputerError`. For that initial
   creation, retry Create with your saved credentials after confirming the project
@@ -209,11 +232,18 @@ Computer. `Retryable` is a pointer: nil means no verdict, not permission to retr
   credentials when provided and reconcile the registered Computer before Start.
   Private keys cannot be recovered from an ID.
 
-`RecoverComputer(ctx, creds, opts)` is an explicit choice for a Computer you
-recorded as failed: it shuts the Computer down, then Starts it from saved state.
-It accepts possible unsaved-state loss and refuses healthy running or paused
-Computers. If shutting it down times out, nothing new is started. It never
-follows a concurrent newer binding.
+`StartComputer` waits within `ReadyTimeout` while the current Computer runtime is
+saving or stopping and refuses the other states, an already started runtime with
+`ComputerAlreadyStartedError` and the rest with `SandboxRetainedError`;
+[When Start waits or refuses](https://console.pinecomputer.io/docs/integration#when-start-waits-or-refuses)
+covers every state. `RecoverComputer(ctx, creds, opts)` is an explicit choice for
+a Computer that failed: it shuts the Computer down, then Starts it from saved state.
+It accepts possible unsaved-state loss and refuses a running Computer with
+`ComputerAlreadyStartedError` and a paused one with `SandboxRetainedError`. If
+shutting it down outlasts `ReadyTimeout`,
+it returns `*ReadyTimeoutError` and nothing new is started. It never
+follows a concurrent newer binding. `(*Computer).Attach` is deprecated: it skips
+this check; use `StartComputer` or `RecoverComputer`.
 
 Retries within one call reuse its create ID. A fresh call is a new attempt. A
 failed attach shuts down the Computer sandbox it started, on a best-effort
@@ -222,9 +252,15 @@ Longer requested timeouts can leave abandoned compute running longer.
 
 ## Timeouts
 
-`AttachOptions.Timeout` sets the inactivity window. `ReadyTimeout` separately
-bounds waiting for the Computer to start and become ready; `BindReadyTimeout` bounds the following
-attach. Expiry counts from the start, independently of those wait budgets.
+`AttachOptions.Timeout` sets the inactivity window. `ReadyTimeout` (default 300s)
+separately bounds the whole Start: waiting for the current Computer runtime's
+release, creating the new one and waiting until it's ready. `BindReadyTimeout`
+bounds the following attach. Expiry counts from the start, independently of those
+wait budgets. When `ReadyTimeout` runs out, `*ReadyTimeoutError` carries the runtime
+waited on (`SandboxID`), `LastState`, `LastReason` and `Waited`; nothing was
+attached and the binding is unchanged. It also matches
+`errors.Is(err, context.DeadlineExceeded)`, as your own context's deadline does;
+`errors.As` tells them apart.
 The caller's context can shorten either wait. Defaults and cleanup
 semantics are defined in the [attach timeout contract](https://console.pinecomputer.io/spec/computer).
 For example, `Timeout: 8 * time.Hour` keeps a long-lived Computer while
@@ -234,6 +270,34 @@ Ordinary requests use a 30s fallback when the caller's context has no deadline.
 Failed attach cleanup uses its own 30s context so cancellation does not prevent
 shutting down the Computer sandbox it started. This cleanup may extend the time
 until attach returns; it is best-effort, and a process crash skips it.
+
+### Slow or interrupted networks
+
+```go
+client, err := pinesandbox.NewClient(pinesandbox.ClientOptions{
+	Endpoint: "https://pinesandbox.io", APIKey: os.Getenv("PINE_API_KEY"),
+	ConnectTimeout: 20 * time.Second, RequestTimeout: time.Minute,
+})
+```
+
+`ConnectTimeout` (default 10s) bounds opening one connection: the TCP connect,
+then the TLS handshake. `RequestTimeout` (default 30s) is the fallback for a
+request whose context has no deadline; a turn `Wait` read gets the time the
+Computer holds it on top. Raise them for a slow or distant network, for example
+behind a proxy whose TLS handshake takes seconds. Connections stay open between
+requests, so most requests need no new handshake.
+
+A request whose connection could not be opened never reached Pine, so the SDK
+sends it again, three attempts in all, whatever it is. After a fault on an open
+connection, only reads, deletes and writes that are safe to repeat are sent
+again; the others return a `*pinesandbox.ConnectionError` or
+`*pinesandbox.TimeoutError`. A rejected certificate or a host that doesn't exist
+is not special-cased: it goes through the same three attempts and returns a
+`*pinesandbox.ConnectionError`.
+
+A `ConnectionError` or `TimeoutError` from `Wait`, `Events` or another read means
+this process lost the network, not that the turn or the Computer failed. The turn
+keeps running: wait again, and don't stop the Computer because of it.
 
 ## Continuing session work
 
@@ -285,7 +349,9 @@ store.SaveTurn(msg.ID, next.TurnID)
 `Wait` returns once the turn ends, or after the timeout with the turn still
 running; it never cancels the turn or follows its successor. A read whose
 response was lost, or whose problem is marked retryable, is read again within
-the timeout. Only the session's latest turn can be answered, so starting new
+the timeout; at the timeout `Wait` returns the turn as it last read it, or the
+last error when no read came back (see
+[Slow or interrupted networks](#slow-or-interrupted-networks)). Only the session's latest turn can be answered, so starting new
 work leaves an open question unanswered. Repeating the same answer returns the
 same next turn, and a different answer to an answered turn is a
 `/errors/stale-turn` conflict. So `Answer` and `Cancel` resend a lost response
@@ -296,7 +362,9 @@ Computer acted.
 none). If no response arrives, or `ctx` ends while one is outstanding, `Run`
 returns a `*pine.RunUnconfirmedError` naming the key: save it and send the run
 again with it. Any `503` counts as no response, `ErrLeaseRefreshUnavailable`
-included, since it doesn't show whether the Computer acted. Pass a key of your
+included, since it doesn't show whether the Computer acted. After a lost response,
+a resend's error, a `*pine.SandboxGoneError` included, comes wrapped in a
+`*pine.RunUnconfirmedError` too: check for it first. Pass a key of your
 own, such as your message ID, so a fresh process can do the same.
 `Steer` is never resent: a conflict at a completion boundary does not prove the
 text was not delivered. `Events` is optional progress — the
@@ -328,7 +396,9 @@ for host, operation, request id, and wire detail. Reconcile it with `comp.Status
 paused or restoring Computers can't be reached, but they haven't stopped.
 A missing session on a live
 Computer instead matches `pine.ErrSessionNotFound`, and a control ownership
-conflict matches `pine.ErrControlNotHeld`. Use `pine.IsRetryable(err)` for the
+conflict matches `pine.ErrControlNotHeld`. Once a Stop has begun, whoever sent
+it, every call matches `pine.ErrComputerStopped`: follow the Stop with
+`comp.Status(ctx)`, then Start. Use `pine.IsRetryable(err)` for the
 server's retry judgment; it intentionally does not guess whether an
 opaque transport failure or mutation is safe to replay.
 

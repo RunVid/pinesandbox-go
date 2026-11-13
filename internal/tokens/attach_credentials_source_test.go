@@ -19,7 +19,7 @@ func newAttachSource(t *testing.T, handler http.HandlerFunc) *AttachCredentialsS
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
 	client := transport.New("http", strings.TrimPrefix(srv.URL, "http://"))
-	s, err := NewAttachCredentialsSource(client, "pk_test")
+	s, err := NewAttachCredentialsSource(client, "pk_test", "pinesandbox-go/test")
 	if err != nil {
 		t.Fatalf("NewAttachCredentialsSource: %v", err)
 	}
@@ -27,7 +27,7 @@ func newAttachSource(t *testing.T, handler http.HandlerFunc) *AttachCredentialsS
 }
 
 func TestAttach_NewRejectsEmpty(t *testing.T) {
-	if _, err := NewAttachCredentialsSource(transport.New("http", "x"), ""); err == nil {
+	if _, err := NewAttachCredentialsSource(transport.New("http", "x"), "", ""); err == nil {
 		t.Fatal("expected error for empty api_key")
 	}
 }
@@ -395,6 +395,31 @@ func TestCredentials_GenericByStatus(t *testing.T) {
 		} else if e.Status != status {
 			t.Errorf("status = %d, want %d", e.Status, status)
 		}
+	}
+}
+
+func TestCredentials_ReceiptExpiredIsTerminalAndNamesTheProblem(t *testing.T) {
+	calls := 0
+	s := newAttachSource(t, func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if got := r.Header.Get("User-Agent"); got != "pinesandbox-go/test" {
+			t.Errorf("User-Agent = %q, want the SDK's", got)
+		}
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(409)
+		fmt.Fprint(w, `{"type":"urn:pinesandbox:problem:idempotency-receipt-expired","status":409,"retryable":false,`+
+			`"detail":"The original attach receipt expired; reload the current binding before retrying.","reason":"idempotency_receipt_expired"}`)
+	})
+	_, err := s.Credentials(context.Background(), validCredentialsRequest())
+	var e *AttachCredentialsError
+	if !errors.As(err, &e) || e.Status != 409 || e.Code != "urn:pinesandbox:problem:idempotency-receipt-expired" || e.Reason != "idempotency_receipt_expired" {
+		t.Fatalf("err = %T %+v", err, err)
+	}
+	if !strings.Contains(err.Error(), "(409): urn:pinesandbox:problem:idempotency-receipt-expired: The original attach receipt expired") {
+		t.Errorf("message drops Portal's problem: %q", err)
+	}
+	if calls != 1 {
+		t.Errorf("a 409 was resent: %d requests", calls)
 	}
 }
 

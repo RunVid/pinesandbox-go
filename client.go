@@ -1,10 +1,12 @@
 package pinesandbox
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"net/http"
+	"time"
 
 	"go.pinesandbox.io/computer/internal/base/transport"
 	"go.pinesandbox.io/computer/internal/base/wait"
@@ -120,6 +122,14 @@ type ClientOptions struct {
 	ControlTokenProvider ControlTokenProvider
 	// AttachCredentialsProvider issues attach credentials instead of Portal with APIKey.
 	AttachCredentialsProvider AttachCredentialsProvider
+	// ConnectTimeout bounds opening one connection: the TCP connect, then the TLS
+	// handshake (zero means the default, 10s). A connection that could not be opened sent
+	// nothing, so the request is sent again, three attempts in all.
+	ConnectTimeout time.Duration
+	// RequestTimeout bounds each attempt of a request whose context has no deadline (zero
+	// means the default, 30s); a turn wait's read gets the time the Computer holds it on
+	// top. A context deadline always applies instead.
+	RequestTimeout time.Duration
 }
 
 // clientHooks are the test seams behind NewClient: the HTTP client every request goes
@@ -155,15 +165,23 @@ func newClient(opts ClientOptions, hooks clientHooks) (*Client, error) {
 		return nil, err
 	}
 
-	clock := wait.Or(hooks.clock)
-	topts := []transport.Option{transport.WithClock(clock)}
-	if hooks.httpClient != nil {
-		topts = append(topts, transport.WithHTTPClient(hooks.httpClient))
+	if opts.ConnectTimeout < 0 || opts.RequestTimeout < 0 {
+		return nil, fmt.Errorf("pinesandbox: ConnectTimeout and RequestTimeout must not be negative")
 	}
+	connectTimeout := cmp.Or(opts.ConnectTimeout, transport.DefaultConnectTimeout)
+	requestTimeout := cmp.Or(opts.RequestTimeout, transport.DefaultRequestTimeout)
+
+	clock := wait.Or(hooks.clock)
+	httpClient := hooks.httpClient
+	if httpClient == nil {
+		httpClient = &http.Client{Transport: transport.NewHTTPTransport(connectTimeout)}
+	}
+	topts := []transport.Option{transport.WithClock(clock), transport.WithHTTPClient(httpClient),
+		transport.WithUnaryTimeout(requestTimeout)}
 	controlTransport := transport.New(z.HTTPScheme(), z.ControlHost(), topts...)
 	var portal *tokens.AttachCredentialsSource
 	if opts.APIKey != "" {
-		if portal, err = tokens.NewAttachCredentialsSource(controlTransport, opts.APIKey); err != nil {
+		if portal, err = tokens.NewAttachCredentialsSource(controlTransport, opts.APIKey, userAgent); err != nil {
 			return nil, err
 		}
 	}
@@ -311,7 +329,7 @@ func (c *Client) CreateComputer(ctx context.Context, opts AttachOptions) (*Compu
 	// public Attach path applies its direct-caller configuration hook.
 	opts.CaptureKeypair = nil
 	opts.PriorCaptureKeypairs = nil
-	if err := comp.Attach(ctx, c.conn, opts); err != nil {
+	if err := comp.attach(ctx, c.conn, opts, wait.Or(c.conn.clock).Now()); err != nil {
 		return nil, attachClientError(comp, opts.BindingRevision, &recoveryCredentials, err)
 	}
 	return comp, nil
@@ -323,9 +341,14 @@ func (c *Client) StartComputer(ctx context.Context, creds Credentials, opts Star
 	return c.startWithCredentials(ctx, creds, opts, false)
 }
 
-// StopComputer gracefully stops the binding observed for this Computer ID.
-// It needs project authorization, but no private key or saved Computer token.
-// A concurrent newer binding is never followed by this invocation.
+// StopComputer stops the runtime that the Computer's binding points to when it's called, which
+// may be a runtime another worker has just started. Use it only to recover after losing the
+// Computer handle, and run the recoveries of one Computer one at a time. It returns true when
+// that runtime is no longer running, or when there was nothing to stop. true does not confirm
+// that the final save succeeded. It returns (false, nil) when the runtime did not stop within
+// its own 390 s wait. When ctx is cancelled or expires, StopComputer returns an error, and the
+// Stop may already have been submitted. When Computer.Stop returns false, call Stop on that
+// handle again instead.
 func (c *Client) StopComputer(ctx context.Context, id string) (bool, error) {
 	if !computerIDRE.MatchString(id) {
 		return false, fmt.Errorf("pinesandbox: valid Computer ID required")
@@ -366,41 +389,32 @@ func (c *Client) startWithCredentials(ctx context.Context, creds Credentials, op
 	}, recovering)
 }
 
+// startComputer is Start and Recover; ReadyTimeout covers the release wait, the create and the start.
 func (c *Client) startComputer(ctx context.Context, id string, key []byte, opts AttachOptions, recovering bool) (*Computer, error) {
 	if err := validateIdentity(id, key); err != nil {
+		return nil, err
+	}
+	if err := opts.validate(); err != nil {
 		return nil, err
 	}
 	portal, err := c.conn.requirePortal("start")
 	if err != nil {
 		return nil, err
 	}
-	reference, err := portal.CurrentBinding(ctx, id)
+	clock := wait.Or(c.conn.clock)
+	started := clock.Now()
+	// The binding and the current runtime are read within what is left of the budget.
+	current := readyWait{target: targetCurrent, started: started}
+	readCtx, cancel := context.WithTimeout(ctx, started.Add(opts.readyTimeout()).Sub(clock.Now()))
+	defer cancel()
+	reference, err := portal.CurrentBinding(readCtx, id)
 	if err != nil {
-		return nil, err
+		return nil, currentReadError(ctx, readCtx, err, "", current, clock.Now())
 	}
 	// Freeze this revision for the entire invocation. Never advance it after
 	// an attach conflict; concurrent Starts must meet the same Portal CAS.
 	opts.BindingRevision = *reference.BindingRevision
-	if reference.SandboxID != "" {
-		info, err := c.conn.controlPlane.Get(ctx, reference.SandboxID)
-		var missing *NotFoundError
-		if err != nil && !errors.As(err, &missing) {
-			return nil, err
-		}
-		if err == nil && !computeReleased(info) {
-			if !recovering && info.Status != "stopping" {
-				return nil, &SandboxRetainedError{SandboxID: reference.SandboxID, State: info.Status}
-			}
-			handle := c.conn.sandboxHandle(reference.SandboxID, info.Status)
-			released, err := handle.releaseFailedSandbox(ctx, info)
-			if err != nil {
-				return nil, err
-			}
-			if !released {
-				return nil, fmt.Errorf("pinesandbox: the failed Computer's shutdown is unconfirmed; nothing was started")
-			}
-		}
-	}
+	// Invalid caller material fails here, before Recover can release anything.
 	comp := newComputer(id, key)
 	for version, key := range opts.Credentials.PriorKeys {
 		if err := comp.AddPriorKey(version, key); err != nil {
@@ -413,7 +427,26 @@ func (c *Client) startComputer(ctx context.Context, id string, key []byte, opts 
 	}
 	opts.CaptureKeypair = nil
 	opts.PriorCaptureKeypairs = nil
-	if err := comp.Attach(ctx, c.conn, opts); err != nil {
+	if reference.SandboxID != "" {
+		info, err := c.conn.controlPlane.Get(readCtx, reference.SandboxID)
+		var missing *NotFoundError
+		if errors.As(err, &missing) {
+			info, err = nil, nil // authoritative project-scoped absence
+		}
+		if err != nil {
+			return nil, currentReadError(ctx, readCtx, err, reference.SandboxID, current, clock.Now())
+		}
+		column := admissionStart
+		if recovering {
+			column = admissionRecover
+		}
+		release := readyWait{target: targetReleased, started: started}
+		handle := c.conn.sandboxHandle(reference.SandboxID, "")
+		if err := handle.admit(ctx, column, info, release, started.Add(opts.readyTimeout())); err != nil {
+			return nil, err
+		}
+	}
+	if err := comp.attach(ctx, c.conn, opts, started); err != nil {
 		return nil, attachClientError(comp, opts.BindingRevision, nil, err)
 	}
 	return comp, nil

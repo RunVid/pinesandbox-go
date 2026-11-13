@@ -245,6 +245,10 @@ type coordReq struct {
 	// retryTransient marks an operation the contract declares replay-safe
 	// (operations.json replay_safe), so a transient fault is sent again.
 	retryTransient bool
+	// hold is how long the Computer may hold the request before answering.
+	hold time.Duration
+	// reached, when set, is increased by the sends that may have reached the Computer.
+	reached *int
 }
 
 // do is the JSON common case: a request whose body (if any) is JSON, no extra headers.
@@ -273,7 +277,16 @@ func (c *Client) send(ctx context.Context, r coordReq) (*transport.Response, err
 		Body:             r.body,
 		Headers:          c.baseHeaders(r.headers),
 		RetryOnTransient: r.retryTransient,
+		Hold:             r.hold,
 	})
+	if r.reached != nil {
+		switch {
+		case resp != nil:
+			*r.reached += resp.Attempt
+		case !transport.NotSent(err):
+			*r.reached++
+		}
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -337,8 +350,10 @@ func (c *Client) openStream(ctx context.Context, method, path, token, accept str
 	if body != nil {
 		contentType = "application/json"
 	}
+	// A write's open (exec) is sent again only when its connection could not be opened;
+	// the event feeds' iterators own their reconnects.
 	open := c.raw.Stream
-	if retryTransient {
+	if retryTransient || method != http.MethodGet {
 		open = c.raw.StreamWithRetry
 	}
 	sr, err := open(ctx, method, path, transport.Request{

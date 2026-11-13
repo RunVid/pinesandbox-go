@@ -97,10 +97,11 @@ func (b *Binding) UnmarshalJSON(data []byte) error {
 func (c *Computer) Binding() (Binding, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.sandbox == nil || c.computerToken == "" {
-		return Binding{}, ErrNotBound
+	sandbox, _, ct, err := c.boundLocked()
+	if err != nil {
+		return Binding{}, err
 	}
-	b := Binding{c.id, c.sandbox.id, c.computerToken, c.bindingRevision}
+	b := Binding{c.id, sandbox.id, ct, c.bindingRevision}
 	return b, b.validate()
 }
 

@@ -8,6 +8,127 @@ for the next minor version (`v0.3.17`, and the release after `v0.3.18` that
 renamed the Runtime names to Sandbox, were the exceptions). Review release notes
 before adopting a new minor version.
 
+## [0.3.21] — 2026-11-12
+
+### Changed
+
+- The default idle timeout is 30 minutes (was five): a Computer started without `Timeout`
+  keeps running that long without use. Pass `Timeout: 5 * time.Minute` to keep the old window. A project whose
+  maximum idle timeout is under 30 minutes refuses a start that names no timeout.
+- `StartComputer` (and `AttachComputer`) and `RecoverComputer` decide from one table whether a
+  new Computer runtime may replace the Computer's current one. Start now waits while the current
+  runtime is Saving, as it already did while Stopping, and Recover waits on both instead of
+  refusing Saving. The wait reads the runtime again until it is released; if it moves to a state
+  the table refuses (for example SaveFailed), Start returns `*SandboxRetainedError` at once.
+- `ReadyTimeout` (still 300 seconds by default) now covers the whole Start: the wait for the
+  current runtime's release, the create, and the new runtime's start. The separate fixed
+  90-second release wait is gone. A Stop issued while the Computer is Paused can stay in Saving
+  for several minutes, so a Start right after it needs a larger `ReadyTimeout` or gets
+  `*ReadyTimeoutError`.
+- A release wait that runs out of `ReadyTimeout` returns `*ReadyTimeoutError`, as a new runtime
+  that never runs does. It was a bare `context.DeadlineExceeded`, so `err ==
+  context.DeadlineExceeded` no longer matches; `errors.Is(err, context.DeadlineExceeded)` does.
+- `*ReadyTimeoutError` satisfies `errors.Is(err, context.DeadlineExceeded)`, also for Pause,
+  Resume and a new runtime that never runs. `errors.As(err, &timeout)` reaches it only when the
+  SDK's budget ran out: when the caller's own context ends first, the call returns the context's
+  error.
+- A read of the current runtime that fails during the wait with anything but a transient error
+  (for example 401, 403 or 500) is returned at once instead of waited out. Nothing was started.
+- Recover's refusals return `*SandboxRetainedError`: a runtime with no recorded failure, and
+  one whose capture hasn't resolved. They were plain errors.
+- `SandboxRetainedError`, `ReadyTimeoutError` and `SandboxFailedError` messages name the
+  Computer runtime and its exact state and reason, for example "Start refused: Computer runtime
+  rt-1 hasn't been released (state failed, reason STOPPED_UNEXPECTEDLY); nothing was started;
+  recover it with RecoverComputer, or Stop it and then Start". A Portal failure other than 401,
+  403 and 429 keeps Portal's problem type and detail in its message, so a 409
+  `idempotency-receipt-expired` names its code. Code that matches message text needs updating.
+- Start and Recover check their options and capture keypairs before they read the current
+  runtime, so invalid input never costs a failed runtime its release.
+- `StartComputer` and `RecoverComputer` now return `*ComputerAlreadyStartedError` (new, not a
+  `*SandboxRetainedError`) when the current runtime is running, pending, allocated or resuming.
+  Code that matches `*SandboxRetainedError` with `errors.As` for those states must also handle
+  the new type.
+- Start's refusal for a SaveFailed runtime, or a Terminated one without `COMPUTE_RELEASED`, now
+  names `RecoverComputer` (or Stop and then Start).
+- A call that needs a binding on a Computer handle without one (never attached, or
+  after `Stop`, `Kill` or `Delete` on that handle) returns a `*BindError`, and
+  `errors.Is(err, ErrNotBound)` still matches. It
+  returned `ErrNotBound` itself (`Binding`, `SandboxDetails`, `SetIdleTimeout`) or an
+  error wrapping it (`Status`, `Pause`, `Resume` and the calls through the Computer
+  token, such as `CreateSession`, `Sessions`, `Snapshot` and `ArtifactLink`). An
+  `err == ErrNotBound` comparison no longer matches; use `errors.Is`.
+- A handle from `AdoptExisting` with an empty Computer token has no binding too:
+  `Status`, `Pause`, `Resume`, `SandboxDetails` and `SetIdleTimeout` now return the
+  `*BindError` too.
+- Its message says why the handle has no binding:
+  `pinesandbox: Computer <id>: this handle has no binding (Stop was called on this handle)`
+  (or `Kill`, `Delete`), or
+  `pinesandbox: Computer <id>: this handle has no binding (it was never attached)`. It
+  was `pinesandbox: Computer has no binding`, on some calls followed by the id or by
+  `call StartComputer or CreateComputer first`.
+- The connect default is 10s (the dial was 30s; the TLS handshake stays 10s).
+- A request whose connection could not be opened is sent again, three attempts in
+  all, whatever its operation: nothing reached Pine. A creating write such as
+  `DesktopToken` or `CreateSession` used to fail at once, and so did `Exec`. After a
+  fault on an open connection, only replay-safe requests are sent again, as before.
+- A rejected certificate or a host that doesn't exist is not special-cased: it goes
+  through the same three attempts as any other connect failure and raises
+  `*pinesandbox.ConnectionError`.
+- A turn `Wait` read gets the time the Computer holds it on top of the request
+  timeout; a 25s hold used to leave 5s of the 30s fallback for the round trip.
+- `Wait` that reads through a network fault until its timeout returns the turn as it
+  last read it, still running, instead of the error; it returns the error only when
+  no read came back. Such an error means this process lost the network, not that the
+  turn failed.
+- `StartComputer` and `RecoverComputer` read the Computer's binding and current runtime within
+  what is left of `ReadyTimeout`. When it runs out there they return `*ReadyTimeoutError` ("The
+  Computer's current runtime wasn't read within 5 s; nothing was released or started") instead of
+  `*TimeoutError` after up to three 30-second attempts.
+- A create that `ReadyTimeout` cut off after it may have reached Pine is sent once more with the
+  same `create_id`, and the runtime it names is deleted: Start returns `*ReadyTimeoutError` for it
+  instead of `*TimeoutError`, and no runtime is left behind. If that resend fails, the
+  `*TimeoutError` stays. A create that answers after `ReadyTimeout` ran out is never bound, even
+  when its runtime already runs.
+
+### Added
+
+- `SandboxRetainedError.Reason`.
+- `ReadyTimeoutError.LastReason` and `.Waited` (time spent against the budget).
+- `SandboxFailedError.Reason`.
+- The three error types gained unexported fields, so unkeyed composite literals of them no
+  longer compile.
+- `ErrComputerStopped` matches the Computer's `409 /errors/computer-stopped`, its answer to every call once a Stop has begun, whoever sent it. It isn't retryable: follow the Stop with `Status`, then Start.
+- `TerminalTimeout`, `TerminalIncomplete`, `TerminalStorageExhausted` and `TerminalTerminalMissing`
+  (`terminal_missing`, named with the same `Terminal` prefix as the others), so every
+  `terminal_reason` the API sends has a constant. The `Terminal*` constants are now generated
+  from the API spec; the existing names and values are unchanged.
+- `ClientOptions.ConnectTimeout` (default 10s) bounds opening one connection, the
+  TCP connect and then the TLS handshake; `ClientOptions.RequestTimeout` (default
+  30s) is the fallback for a request whose context has no deadline. Both apply to
+  every connection the client opens.
+- `ErrStaleTask`, `ErrHistoryExpired` and `ErrEventsUnavailable` match an agent read's answers about its task and history, beside `ErrTaskNotFound`: `409 /errors/stale-task` (a read pinned with `ExpectedTaskID` found another task), `410 /errors/history-expired` (the cursor is older than the kept history) and `503 /errors/events-unavailable` (retry with the same cursor).
+- `ErrSessionNameTaken`, `ErrStaleTurn`, `ErrNoPendingRequest`, `ErrTurnNotFound`, `ErrAuthorInFlight`, `ErrSecretInSkill` and `ErrSkillsUnavailable` match more of a Computer's answers: a taken session name, an agent action on a turn that moved on, isn't waiting for an answer or doesn't exist, and a skill that is already being written, holds a secret, or can't be used on this Computer.
+
+### Deprecated
+
+- `(*Computer).Attach`. Use `Client.StartComputer` or `Client.RecoverComputer`, which check the
+  Computer's current runtime first.
+- `ControlPatch.IdlePaused`. To give a person more time, set a later `IdleDeadline` or
+  `IdleDeadlineIn`; a paused hold doesn't keep the Computer running, so the Computer can stop
+  while the person works. It is still sent.
+
+### Fixed
+
+- A session's calls after its Computer's `Stop` or `Kill` return a `*BindError` matching
+  `errors.Is(err, ErrNotBound)`, as the Computer's own calls do, instead of a
+  `SandboxGoneError` from the stopped Computer. A session also follows its Computer to the
+  Computer sandbox of a later `Attach`.
+- `Run` returns a `*RunUnconfirmedError` when a resend after a lost response gets any
+  error, such as a `*SandboxGoneError` because the Computer stopped. It used to return
+  that error alone, which read as a run that never started although the first send
+  may have started the turn. `errors.As` still reaches the error; check for
+  `*RunUnconfirmedError` first.
+
 ## [0.3.20] — 2026-10-31
 
 - Return saved deliverables in the existing result `artifacts` list with `root: artifact_store`, `computer_id` and `relative_path`. Use the existing artifact client to download them. Update result handling before enabling session artifact access; workdir entries keep their existing shape.

@@ -181,9 +181,9 @@ func TestE2E_J2_Persistence(t *testing.T) {
 		t.Fatalf("reconnected Computer sandbox: %+v %v", details, err)
 	}
 	_, err = secondBackend.StartComputer(ctx1, credentials, pine.StartOptions{})
-	var retained *pine.SandboxRetainedError
-	if !errors.As(err, &retained) || retained.SandboxID != binding.SandboxID {
-		t.Fatalf("Start should retain the live Computer sandbox: %v", err)
+	var started *pine.ComputerAlreadyStartedError
+	if !errors.As(err, &started) || started.SandboxID != binding.SandboxID {
+		t.Fatalf("Start should refuse the live Computer sandbox as already started: %v", err)
 	}
 	if _, err := comp.Checkpoint(ctx1); err != nil {
 		teardown(comp)

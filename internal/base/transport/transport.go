@@ -16,9 +16,11 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"go.pinesandbox.io/computer/internal/base/problem"
@@ -31,6 +33,13 @@ import (
 // honored — a longer one is no longer clipped to 30s. Streaming uses a separate client with
 // no total timeout (an SSE stream is long-lived; cancel it via the context).
 const defaultTimeout = 30 * time.Second
+
+// DefaultConnectTimeout bounds opening one connection: the TCP connect, then the TLS
+// handshake.
+const DefaultConnectTimeout = 10 * time.Second
+
+// DefaultRequestTimeout is the fallback deadline for a unary call with no deadline of its own.
+const DefaultRequestTimeout = defaultTimeout
 
 // streamHeaderTimeout floors how long the streaming client waits for the response HEADERS.
 // The stream itself is long-lived (no total timeout), but a server that accepts the TCP
@@ -74,6 +83,15 @@ func WithHTTPClient(hc *http.Client) Option { return func(c *Client) { c.hc = hc
 // passed no context deadline. A caller's own deadline is always honored regardless; d <= 0
 // disables the fallback (unbounded unless the caller sets a deadline).
 func WithUnaryTimeout(d time.Duration) Option { return func(c *Client) { c.unaryTimeout = d } }
+
+// NewHTTPTransport is http.DefaultTransport with connectTimeout bounding each TCP connect
+// and each TLS handshake. Keep one per client so its connections are reused.
+func NewHTTPTransport(connectTimeout time.Duration) *http.Transport {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.DialContext = (&net.Dialer{Timeout: connectTimeout, KeepAlive: 30 * time.Second}).DialContext
+	t.TLSHandshakeTimeout = connectTimeout
+	return t
+}
 
 // WithRetry overrides the transient-retry budget + backoff (tests inject a zero backoff so
 // they don't actually sleep). attempts < 1 disables retry; a nil backoff keeps the shared one.
@@ -132,6 +150,12 @@ func streamTransport(base http.RoundTripper) http.RoundTripper {
 	return base
 }
 
+// HTTPClient is the unary *http.Client requests go through.
+func (c *Client) HTTPClient() *http.Client { return c.hc }
+
+// UnaryTimeout is the fallback deadline of a unary call whose context has none.
+func (c *Client) UnaryTimeout() time.Duration { return c.unaryTimeout }
+
 // Host returns the host[:port] this client targets (the scheme stripped) — the public
 // gateway host in production.
 func (c *Client) Host() string {
@@ -172,6 +196,9 @@ type Request struct {
 	// Op names the operation in errors in place of "<METHOD> <path>", for a path that
 	// carries a value which must stay out of them, such as a storage object's name.
 	Op string
+	// Hold is how long the server may hold the request before answering (a wait); it is
+	// added to the fallback deadline.
+	Hold time.Duration
 }
 
 // operation is the "op" a request's errors carry.
@@ -196,8 +223,9 @@ type Response struct {
 	Status  int
 	Body    []byte
 	Headers http.Header
-	// Attempt is the send that got it: 1, or more after the transient-retry budget sent
-	// the request again, when an earlier send may have reached the server.
+	// Attempt counts the sends that may have reached the server, this one included: 1, or
+	// more after the transient-retry budget sent the request again. A send whose
+	// connection could not be opened does not count.
 	Attempt int
 }
 
@@ -206,15 +234,22 @@ type Response struct {
 // context cancel propagates raw). Callers that want the RFC-9457 non-2xx → *problem.APIError
 // mapping use Do; callers with a different error contract (the control plane's {code,message})
 // inspect the raw Response themselves.
+//
+// A request whose connection could not be opened was not sent, so it is sent again
+// within the transient budget whatever its method.
 func (c *Client) DoRaw(ctx context.Context, method, path string, r Request) (*Response, error) {
 	attempts := c.retryAttempts(method, r)
+	reached := 0
 	for attempt := 1; ; attempt++ {
 		resp, err := c.doOnce(ctx, method, path, r)
+		if !NotSent(err) {
+			reached++
+		}
 		if resp != nil {
-			resp.Attempt = attempt
+			resp.Attempt = reached
 		}
 		again := err != nil && isTransientFault(err) || err == nil && r.RetryStatus != nil && r.RetryStatus(resp.Status)
-		if !again || attempt >= attempts {
+		if !again || attempt >= c.sendBudget(attempts, err, r) {
 			return resp, err
 		}
 		// A transient fault, or an answer RetryStatus takes, on a retry-eligible request:
@@ -226,22 +261,33 @@ func (c *Client) DoRaw(ctx context.Context, method, path string, r Request) (*Re
 	}
 }
 
+// sendBudget is how many sends err allows: the request's own budget, or the transient
+// budget when err shows nothing was sent (a body reader is consumed, so it never is).
+func (c *Client) sendBudget(attempts int, err error, r Request) int {
+	if NotSent(err) && r.BodyReader == nil && c.maxAttempts > attempts {
+		return c.maxAttempts
+	}
+	return attempts
+}
+
 // doOnce is a single send: build, execute, read the full body, normalize a fault.
 func (c *Client) doOnce(ctx context.Context, method, path string, r Request) (*Response, error) {
 	// Bound this attempt by the caller's context deadline when it set one; otherwise fall
-	// back to unaryTimeout. Body is fully read before return, so the cancel is safe to defer.
+	// back to unaryTimeout plus the server's hold. Body is fully read before return, so
+	// the cancel is safe to defer.
 	if _, ok := ctx.Deadline(); !ok && c.unaryTimeout > 0 {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, c.unaryTimeout)
+		ctx, cancel = context.WithTimeout(ctx, c.unaryTimeout+r.Hold)
 		defer cancel()
 	}
 	req, err := c.newRequest(ctx, method, path, r)
 	if err != nil {
 		return nil, err
 	}
+	req, connected := c.traceConnection(req)
 	resp, err := c.hc.Do(req)
 	if err != nil {
-		return nil, Fault(c.Host(), r.operation(method, path), err)
+		return nil, c.fault(r.operation(method, path), err, connected)
 	}
 	defer resp.Body.Close()
 	b, err := io.ReadAll(resp.Body)
@@ -319,9 +365,10 @@ func (c *Client) Stream(ctx context.Context, method, path string, r Request) (*S
 	if err != nil {
 		return nil, err
 	}
+	req, connected := c.traceConnection(req)
 	resp, err := c.streamHC.Do(req)
 	if err != nil {
-		return nil, Fault(c.Host(), r.operation(method, path), err)
+		return nil, c.fault(r.operation(method, path), err, connected)
 	}
 	return &StreamResponse{Status: resp.StatusCode, Body: resp.Body, Headers: resp.Header}, nil
 }
@@ -336,7 +383,7 @@ func (c *Client) StreamWithRetry(ctx context.Context, method, path string, r Req
 	attempts := c.retryAttempts(method, r)
 	for attempt := 1; ; attempt++ {
 		sr, err := c.Stream(ctx, method, path, r)
-		if err == nil || !isTransientFault(err) || attempt >= attempts {
+		if err == nil || !isTransientFault(err) || attempt >= c.sendBudget(attempts, err, r) {
 			return sr, err
 		}
 		if c.clock.Sleep(ctx, c.transientBackoff(attempt)) != nil {
@@ -415,4 +462,60 @@ func Fault(host, op string, err error) error {
 		return &TimeoutError{Host: host, Op: op, Msg: msg}
 	}
 	return &ConnectionError{Host: host, Op: op, Msg: msg}
+}
+
+// traceConnection reports, through the returned flag, whether the request got a
+// connection. Only net/http's own transport calls the hook; with any other round
+// tripper the flag stays unset and only the error's own type can show nothing was sent.
+func (c *Client) traceConnection(req *http.Request) (*http.Request, func() bool) {
+	var got atomic.Bool
+	trace := &httptrace.ClientTrace{GotConn: func(httptrace.GotConnInfo) { got.Store(true) }}
+	req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
+	traced := c.hc.Transport == nil
+	if _, ok := c.hc.Transport.(*http.Transport); ok {
+		traced = true
+	}
+	return req, func() bool { return !traced || got.Load() }
+}
+
+// fault is Fault, marking the error not sent when the request never got a connection or
+// the error is a dial or name-resolution failure.
+func (c *Client) fault(op string, err error, connected func() bool) error {
+	out := Fault(c.Host(), op, err)
+	if !connected() || dialFailure(err) {
+		markNotSent(out)
+	}
+	return out
+}
+
+// dialFailure reports whether err is a failure to open the connection.
+func dialFailure(err error) bool {
+	var dns *net.DNSError
+	var op *net.OpError
+	return errors.As(err, &dns) || errors.As(err, &op) && (op.Op == "dial" || op.Op == "proxyconnect")
+}
+
+// NotSent reports whether err is a transport fault that shows the request was never sent:
+// its connection could not be opened.
+func NotSent(err error) bool {
+	var ce *ConnectionError
+	var te *TimeoutError
+	switch {
+	case errors.As(err, &ce):
+		return ce.notSent
+	case errors.As(err, &te):
+		return te.notSent
+	}
+	return false
+}
+
+func markNotSent(err error) {
+	var ce *ConnectionError
+	var te *TimeoutError
+	switch {
+	case errors.As(err, &ce):
+		ce.notSent = true
+	case errors.As(err, &te):
+		te.notSent = true
+	}
 }

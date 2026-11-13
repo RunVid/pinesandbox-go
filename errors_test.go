@@ -138,7 +138,7 @@ func TestControlSentinels_SlugsInTaxonomy(t *testing.T) {
 	for _, e := range f.Entries {
 		known[e.Type] = true
 	}
-	for _, s := range []*APIError{ErrControlNotHeld, ErrSessionNotFound, ErrTaskNotReady, ErrSessionBusy, ErrSessionLimit, ErrTaskNotFound, ErrNoActiveTurn, ErrNoActiveTask, ErrActionNotImplemented, ErrFeatureDisabled} {
+	for _, s := range []*APIError{ErrControlNotHeld, ErrSessionNotFound, ErrComputerStopped, ErrTaskNotReady, ErrSessionBusy, ErrSessionLimit, ErrTaskNotFound, ErrStaleTask, ErrHistoryExpired, ErrEventsUnavailable, ErrNoActiveTurn, ErrNoActiveTask, ErrActionNotImplemented, ErrFeatureDisabled, ErrSessionNameTaken, ErrStaleTurn, ErrNoPendingRequest, ErrTurnNotFound, ErrAuthorInFlight, ErrSecretInSkill, ErrSkillsUnavailable} {
 		for _, slug := range append([]string{s.ProblemType}, s.AltProblemTypes...) {
 			if !known[slug] {
 				t.Errorf("sentinel slug %q is not in error-taxonomy.json (typo or renamed server slug)", slug)
@@ -194,6 +194,86 @@ func TestErrFeatureDisabled_ArtifactMethodsWithoutTheFeature(t *testing.T) {
 	}
 }
 
+// TestAgentReadSentinels_EachAnswerItsOwn: an agent read's answers about its task and
+// history each surface as their own sentinel, never another's, and only the
+// unreadable history is retryable.
+func TestAgentReadSentinels_EachAnswerItsOwn(t *testing.T) {
+	answers := []struct {
+		sentinel  *APIError
+		status    int
+		retryable bool
+	}{
+		{ErrTaskNotFound, 404, false},
+		{ErrStaleTask, 409, false},
+		{ErrHistoryExpired, 410, false},
+		{ErrEventsUnavailable, 503, true},
+	}
+	for _, a := range answers {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/problem+json")
+			w.WriteHeader(a.status)
+			fmt.Fprintf(w, `{"type":%q,"status":%d,"retryable":%t}`, a.sentinel.ProblemType, a.status, a.retryable)
+		}))
+		comp := newComputer("c1", make([]byte, 32))
+		if err := comp.adopt(buildTestConnection(t, "http://unused", srv.URL), "sb-1", "ct_tok", "running"); err != nil {
+			t.Fatal(err)
+		}
+		sess, err := comp.AdoptSession("s1", "ps_tok")
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = sess.Agent().EventsPage(context.Background(), EventsPageOptions{})
+		srv.Close()
+		if !errors.Is(err, a.sentinel) || IsRetryable(err) != a.retryable {
+			t.Errorf("%s: err = %T (%v), want its sentinel, retryable %t", a.sentinel.ProblemType, err, err, a.retryable)
+		}
+		for _, other := range answers {
+			if other.sentinel != a.sentinel && errors.Is(err, other.sentinel) {
+				t.Errorf("%s also matches %s", a.sentinel.ProblemType, other.sentinel.ProblemType)
+			}
+		}
+	}
+}
+
+// TestErrComputerStopped_EveryCallOnceAStopBegins: once a Stop has begun the Computer
+// answers every call 409 /errors/computer-stopped; each call and stream surfaces it as
+// ErrComputerStopped, not retryable, with the wire detail still reachable.
+func TestErrComputerStopped_EveryCallOnceAStopBegins(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusConflict)
+		fmt.Fprint(w, `{"type":"/errors/computer-stopped","status":409,"detail":"A Stop has begun on this Computer; it accepts no calls until it is started again","request_id":"req-stopped","retryable":false}`)
+	}))
+	defer srv.Close()
+	comp := newComputer("c1", make([]byte, 32))
+	if err := comp.adopt(buildTestConnection(t, "http://unused", srv.URL), "sb-1", "ct_tok", "running"); err != nil {
+		t.Fatal(err)
+	}
+	sess, err := comp.AdoptSession("s1", "ps_tok")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	calls := map[string]func() error{
+		"Sessions":  func() error { _, e := comp.Sessions(ctx); return e },
+		"ListFiles": func() error { _, e := sess.ListFiles(ctx, ListFilesOptions{}); return e },
+		"Exec": func() error {
+			_, e := sess.Exec(ctx, "ls", ExecOptions{}, func(map[string]any) error { return nil })
+			return e
+		},
+	}
+	for name, call := range calls {
+		err := call()
+		var ae *APIError
+		if !errors.Is(err, ErrComputerStopped) || IsRetryable(err) || !errors.As(err, &ae) || ae.RequestID != "req-stopped" {
+			t.Errorf("%s err = %T (%v), want ErrComputerStopped, not retryable, with its request id", name, err, err)
+		}
+		if errors.Is(err, ErrSessionBusy) || errors.Is(err, ErrControlNotHeld) {
+			t.Errorf("%s: a computer-stopped answer must not match another 409 sentinel", name)
+		}
+	}
+}
+
 // TestErrCapacityExceeded_PublicSurface: the facade sentinel and error type are the
 // control-plane ones, so callers branch with errors.Is and reach detail with errors.As.
 func TestErrCapacityExceeded_PublicSurface(t *testing.T) {
@@ -235,5 +315,88 @@ func TestCreateComputer_CreateRateLimitedReachesCaller(t *testing.T) {
 	}
 	if got := requests.Load(); got != 1 {
 		t.Errorf("control plane saw %d requests, want the single create", got)
+	}
+}
+
+func TestStartErrorsCarryTheRuntimeStateAndReason(t *testing.T) {
+	started := time.Unix(1_700_000_000, 0)
+	release := &ReadyTimeoutError{SandboxID: "rt-old", LastState: "saving", LastReason: "STOP_ACCEPTED", Waited: 300 * time.Second,
+		wait: readyWait{target: targetReleased, started: started}}
+	if got, want := release.Error(), "pinesandbox: Computer runtime rt-old wasn't released after 300 s (last state saving, reason STOP_ACCEPTED); nothing was started"; got != want {
+		t.Errorf("release timeout = %q, want %q", got, want)
+	}
+	ready := &ReadyTimeoutError{SandboxID: "rt-1", LastState: "pending", Waited: 2500 * time.Millisecond,
+		wait: readyWait{target: statusRunning, newRuntime: true}}
+	if got, want := ready.Error(), "pinesandbox: New Computer runtime rt-1 wasn't running after 3 s (last state pending)"; got != want {
+		t.Errorf("ready timeout = %q, want %q", got, want)
+	}
+	var err error = release
+	if !errors.Is(err, context.DeadlineExceeded) || IsRetryable(err) {
+		t.Error("ReadyTimeoutError must be a deadline and never retryable")
+	}
+	failed := &SandboxFailedError{SandboxID: "rt-1", State: "failed", Reason: "STOPPED_UNEXPECTEDLY", wait: readyWait{target: statusRunning, newRuntime: true}}
+	if got, want := failed.Error(), "pinesandbox: New Computer runtime rt-1 reported state failed, reason STOPPED_UNEXPECTEDLY before it was running"; got != want {
+		t.Errorf("failed = %q, want %q", got, want)
+	}
+	retained := &SandboxRetainedError{SandboxID: "rt-old", State: "failed", Reason: "PAUSE_FAILED"}
+	if got, want := retained.Error(), "pinesandbox: Start refused: Computer runtime rt-old hasn't been released (state failed, reason PAUSE_FAILED); nothing was started; recover it with RecoverComputer, or Stop it and then Start"; got != want {
+		t.Errorf("retained = %q, want %q", got, want)
+	}
+}
+
+func TestComputerAlreadyStartedError(t *testing.T) {
+	var err error = &ComputerAlreadyStartedError{SandboxID: "rt-1", State: "running"}
+	var started *ComputerAlreadyStartedError
+	if !errors.As(err, &started) || started.SandboxID != "rt-1" || started.State != "running" || started.Reason != "" {
+		t.Fatalf("errors.As = %+v", started)
+	}
+	var retained *SandboxRetainedError
+	if errors.As(err, &retained) || IsRetryable(err) {
+		t.Error("ComputerAlreadyStartedError must not be a SandboxRetainedError, nor retryable")
+	}
+	if got, want := err.Error(), "pinesandbox: Start refused: Computer runtime rt-1 is already started (state running); nothing was started"; got != want {
+		t.Errorf("Start = %q, want %q", got, want)
+	}
+	refused := &ComputerAlreadyStartedError{SandboxID: "rt-1", State: "pending", Reason: "STARTING", column: admissionRecover}
+	if got, want := refused.Error(), "pinesandbox: Recover refused: Computer runtime rt-1 has no recorded failure (state pending, reason STARTING); nothing was released or started"; got != want {
+		t.Errorf("Recover = %q, want %q", got, want)
+	}
+}
+
+func TestPortalRequestsNameTheSDK(t *testing.T) {
+	var agent string
+	client, err := newClient(ClientOptions{Endpoint: "https://ua.pinesandbox.io", APIKey: "pk_test"}, clientHooks{httpClient: &http.Client{
+		Transport: roundTrip(func(r *http.Request) (*http.Response, error) {
+			agent = r.Header.Get("User-Agent")
+			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"application/json"}}, Request: r,
+				Body: io.NopCloser(strings.NewReader(`{"locations":[],"default_location":{"country":"US"}}`))}, nil
+		}),
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.AvailableLocations(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if agent != "pinesandbox-go/"+Version {
+		t.Errorf("User-Agent = %q, want pinesandbox-go/%s", agent, Version)
+	}
+}
+
+type roundTrip func(*http.Request) (*http.Response, error)
+
+func (f roundTrip) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestReadinessBudgetErrorPutsTheCallersDeadlineFirst(t *testing.T) {
+	handle := newSandboxHandle(&fakeCP{}, "rt-1", "pending")
+	w := readyWait{target: statusRunning, newRuntime: true, started: handle.clock()}
+	expired, cancel := context.WithDeadline(context.Background(), time.Unix(0, 0))
+	defer cancel()
+	var rt *ReadyTimeoutError
+	if err := readinessBudgetError(expired, expired, handle.readyTimeout(w), handle, w); errors.As(err, &rt) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("caller deadline = %T %v, want its context error", err, err)
+	}
+	if err := readinessBudgetError(context.Background(), expired, context.DeadlineExceeded, handle, w); !errors.As(err, &rt) || rt.SandboxID != "rt-1" {
+		t.Fatalf("SDK budget = %T %v, want *ReadyTimeoutError", err, err)
 	}
 }

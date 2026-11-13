@@ -26,14 +26,18 @@ type (
 // Observe captures the session's current perception (the ObservationSnapshot: screenshot +
 // the coordinate metadata to map bbox/pixel actions).
 func (d *DriveMode) Observe(ctx context.Context) (*Observation, error) {
-	return d.s.coord.Observe(ctx, d.s.readToken(), d.s.name)
+	return sessionCall(d.s, func(coord *coordinator.Client, ct string) (*Observation, error) {
+		return coord.Observe(ctx, d.s.readToken(ct), d.s.name)
+	})
 }
 
 // ComputerUse issues one low-level action; params are merged into the request body.
 // Returns the typed result: ComputerUseResult.Screenshot (base64 PNG) for
 // action=="screenshot", else .OK.
 func (d *DriveMode) ComputerUse(ctx context.Context, action string, params map[string]any) (*ComputerUseResult, error) {
-	return d.s.coord.ComputerUse(ctx, d.s.token, d.s.name, action, params)
+	return sessionCall(d.s, func(coord *coordinator.Client, _ string) (*ComputerUseResult, error) {
+		return coord.ComputerUse(ctx, d.s.token, d.s.name, action, params)
+	})
 }
 
 // ---- typed computer-use helpers ----
@@ -90,5 +94,7 @@ func coordParams(x, y int) map[string]any { return map[string]any{"coordinate": 
 
 // UploadFile stages a file into a selector's picker.
 func (d *DriveMode) UploadFile(ctx context.Context, selector, file string) (json.RawMessage, error) {
-	return d.s.coord.UploadFile(ctx, d.s.token, d.s.name, selector, file)
+	return sessionCall(d.s, func(coord *coordinator.Client, _ string) (json.RawMessage, error) {
+		return coord.UploadFile(ctx, d.s.token, d.s.name, selector, file)
+	})
 }

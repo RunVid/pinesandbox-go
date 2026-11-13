@@ -95,3 +95,53 @@ func TestDelegateDesktop_CreatesAndDelegates(t *testing.T) {
 		t.Errorf("wire missing dt_/session: %s", s)
 	}
 }
+
+// TestSession_DelegatePairsTheDesktopTokenWithItsHost: the dt_ and the host in one envelope
+// come from one binding, even when the Computer stops and attaches again while the dt_ is
+// minted.
+func TestSession_DelegatePairsTheDesktopTokenWithItsHost(t *testing.T) {
+	ctx := context.Background()
+	comp := newComputer("c1", make([]byte, 32))
+	var reattach func()
+	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" || r.URL.Path != "/v1/sessions/main/desktop-token" || bearerToken(r) != "ct_x" {
+			t.Errorf("first coordinator got %s %s %s", r.Method, r.URL.Path, bearerToken(r))
+			return
+		}
+		reattach()
+		fmt.Fprint(w, `{"token":"dt_first","expires_at":"2026-01-01T00:00:30Z"}`)
+	}))
+	defer first.Close()
+	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("second coordinator got %s %s", r.Method, r.URL.Path)
+	}))
+	defer second.Close()
+	controlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(404) // Stop finds the first sandbox gone
+	}))
+	defer controlSrv.Close()
+
+	if err := comp.adopt(buildTestConnection(t, controlSrv.URL, first.URL), "sb-1", "ct_x", "running"); err != nil {
+		t.Fatal(err)
+	}
+	secondConn := buildTestConnection(t, controlSrv.URL, second.URL)
+	reattach = func() {
+		if gone, err := comp.Stop(ctx); !gone || err != nil {
+			t.Errorf("Stop = %v, %v", gone, err)
+		}
+		if err := comp.adopt(secondConn, "sb-2", "ct_y", "running"); err != nil {
+			t.Errorf("adopt: %v", err)
+		}
+	}
+	sess, err := comp.AdoptSession("main", "ps_main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dc, err := sess.Delegate(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dc.DesktopToken != "dt_first" || dc.ComputerHost != first.URL {
+		t.Errorf("Delegate = host %q with %q, want the host that minted it, %q", dc.ComputerHost, dc.DesktopToken, first.URL)
+	}
+}

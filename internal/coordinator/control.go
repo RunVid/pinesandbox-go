@@ -133,8 +133,12 @@ func (c *Client) GetControl(ctx context.Context, token, name string) (*ControlSt
 // semantics — leave nil to keep the current value. ActorType is required by the
 // coord ("user_click" for normal transitions; "admin_override" pairs with Force).
 type ControlPatch struct {
-	Controller   *string    // "human" | "agent"
-	IdlePaused   *bool      // pin/unpin the idle timer
+	Controller *string // "human" | "agent"
+	// IdlePaused pins or unpins the idle timer.
+	//
+	// Deprecated: to give the person more time, set a later IdleDeadline or
+	// IdleDeadlineIn. A paused hold doesn't keep the Computer running.
+	IdlePaused   *bool
 	IdleDeadline *time.Time // set an ABSOLUTE idle deadline (RFC3339 on the wire)
 	// IdleDeadlineIn sets a RELATIVE idle deadline (spec: "+15m"); the coord always
 	// commits it. Wins over IdleDeadline if both are set. Sent as "+<seconds>s", so

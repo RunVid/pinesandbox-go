@@ -13,6 +13,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"go.pinesandbox.io/computer/internal/base/transport"
 	"go.pinesandbox.io/computer/internal/bindhpke"
@@ -36,7 +37,7 @@ func bearerToken(r *http.Request) string {
 func buildTestConnection(t *testing.T, controlURL, coordURL string) *Connection {
 	t.Helper()
 	controlT := transport.New("http", strings.TrimPrefix(controlURL, "http://"))
-	attach, err := tokens.NewAttachCredentialsSource(controlT, "pk_test")
+	attach, err := tokens.NewAttachCredentialsSource(controlT, "pk_test", userAgent)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -506,6 +507,24 @@ func TestNewClient_Validation(t *testing.T) {
 	if _, err := NewClient(ClientOptions{Endpoint: "https://staging.pinesandbox.io", APIKey: "pk_x"}); err != nil {
 		t.Errorf("valid options errored: %v", err)
 	}
+	for _, opts := range []ClientOptions{{ConnectTimeout: -time.Second}, {RequestTimeout: -time.Second}} {
+		opts.Endpoint, opts.APIKey = "https://staging.pinesandbox.io", "pk_x"
+		if _, err := NewClient(opts); err == nil {
+			t.Errorf("expected error for a negative timeout in %+v", opts)
+		}
+	}
+	tuned, err := NewClient(ClientOptions{Endpoint: "https://staging.pinesandbox.io", APIKey: "pk_x",
+		ConnectTimeout: 20 * time.Second, RequestTimeout: 45 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr, ok := tuned.portalTransport.HTTPClient().Transport.(*http.Transport)
+	if !ok || tr.TLSHandshakeTimeout != 20*time.Second {
+		t.Errorf("transport = %#v, want the connect timeout on the TLS handshake", tuned.portalTransport.HTTPClient().Transport)
+	}
+	if got := tuned.portalTransport.UnaryTimeout(); got != 45*time.Second {
+		t.Errorf("request timeout = %v, want 45s", got)
+	}
 }
 
 func TestValidateIdentity(t *testing.T) {
@@ -633,6 +652,69 @@ func TestSession_TokenRouting(t *testing.T) {
 		if auth[k] != ps {
 			t.Errorf("%s used %q, want ps_ (%q)", k, auth[k], ps)
 		}
+	}
+}
+
+func TestSession_FollowsItsComputerAfterStop(t *testing.T) {
+	var requests []string
+	coordServer := func(name string) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requests = append(requests, name+" "+r.Method+" "+r.URL.Path+" "+bearerToken(r))
+			if r.URL.Path == "/sessions" {
+				fmt.Fprint(w, `{"session":{"name":"s1","token":"ps_sess"}}`)
+				return
+			}
+			fmt.Fprint(w, `{}`)
+		}))
+	}
+	first, second := coordServer("first"), coordServer("second")
+	defer first.Close()
+	defer second.Close()
+	controlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "GET" || r.URL.Path != "/sandboxes/sb-1" {
+			t.Errorf("unexpected control request %s %s", r.Method, r.URL.Path)
+		}
+		w.WriteHeader(404)
+	}))
+	defer controlSrv.Close()
+
+	ctx := context.Background()
+	comp := newComputer("c1", make([]byte, 32))
+	if err := comp.adopt(buildTestConnection(t, controlSrv.URL, first.URL), "sb-1", "ct_x", "running"); err != nil {
+		t.Fatal(err)
+	}
+	sess, err := comp.CreateSession(ctx, CreateSessionOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gone, err := comp.Stop(ctx); !gone || err != nil {
+		t.Fatalf("Stop = %v, %v", gone, err)
+	}
+	sent := len(requests)
+	_, statusErr := sess.Agent().Status(ctx, TaskOptions{})
+	_, execErr := sess.Exec(ctx, "true", ExecOptions{}, nil)
+	var eventsErr error
+	for _, err := range sess.ControlEvents(ctx, "") {
+		eventsErr = err
+		break
+	}
+	want := "pinesandbox: Computer c1: this handle has no binding (Stop was called on this handle)"
+	for name, err := range map[string]error{"status": statusErr, "exec": execErr, "control events": eventsErr} {
+		var bindErr *BindError
+		if !errors.As(err, &bindErr) || !errors.Is(err, ErrNotBound) || err.Error() != want {
+			t.Errorf("%s after Stop = %T %v, want a *BindError %q matching ErrNotBound", name, err, err, want)
+		}
+	}
+	if len(requests) != sent {
+		t.Errorf("calls after Stop sent %v", requests[sent:])
+	}
+
+	if err := comp.adopt(buildTestConnection(t, controlSrv.URL, second.URL), "sb-2", "ct_y", "running"); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = sess.Agent().Cancel(ctx, "turn_t1_1")
+	if got, want := requests[len(requests)-1], "second POST /v2/sessions/s1/agent/cancel ct_y"; got != want {
+		t.Errorf("after a new attach the session sent %q, want %q", got, want)
 	}
 }
 

@@ -41,12 +41,17 @@ func (d DelegatedConnection) MarshalJSON() ([]byte, error) {
 // a server makes to hand a browser everything it needs — and nothing it shouldn't. Re-call
 // server-side to refresh the dt_ before each (re)connect.
 func (s *Session) Delegate(ctx context.Context) (*DelegatedConnection, error) {
-	dt, err := s.DesktopToken(ctx)
+	// One binding both mints the dt_ and names the host, so they always belong together.
+	coord, ct, err := s.client()
+	if err != nil {
+		return nil, err
+	}
+	dt, err := coord.MintDesktopToken(ctx, ct, s.name)
 	if err != nil {
 		return nil, err
 	}
 	return &DelegatedConnection{
-		ComputerHost:          s.coord.BaseURL(),
+		ComputerHost:          coord.BaseURL(),
 		SessionName:           s.name,
 		SpecVersion:           SpecVersion,
 		DesktopToken:          dt.Token,

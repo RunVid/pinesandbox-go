@@ -76,13 +76,17 @@ func (s *Session) DeclarePasskeyIntent(ctx context.Context, rpID string) error {
 	if rpID == "" {
 		return fmt.Errorf("pinesandbox: passkey RP ID is required")
 	}
-	return s.coord.DeclarePasskeyIntent(ctx, s.token, s.name, rpID)
+	return sessionDo(s, func(coord *coordinator.Client, _ string) error {
+		return coord.DeclarePasskeyIntent(ctx, s.token, s.name, rpID)
+	})
 }
 
 // PendingPasskeyCeremonies returns non-secret first-enrollment decisions
 // attributed to this agent session.
 func (s *Session) PendingPasskeyCeremonies(ctx context.Context) ([]PasskeyCeremony, error) {
-	return s.coord.ListSessionPasskeyCeremonies(ctx, s.token, s.name)
+	return sessionCall(s, func(coord *coordinator.Client, _ string) ([]PasskeyCeremony, error) {
+		return coord.ListSessionPasskeyCeremonies(ctx, s.token, s.name)
+	})
 }
 
 // ApprovePasskeyCeremony saves an enrollment attributed to this agent session.
@@ -99,5 +103,7 @@ func (s *Session) decidePasskeyCeremony(ctx context.Context, ceremonyID, decisio
 	if ceremonyID == "" {
 		return fmt.Errorf("pinesandbox: passkey ceremony ID is required")
 	}
-	return s.coord.DecideSessionPasskeyCeremony(ctx, s.token, s.name, ceremonyID, decision)
+	return sessionDo(s, func(coord *coordinator.Client, _ string) error {
+		return coord.DecideSessionPasskeyCeremony(ctx, s.token, s.name, ceremonyID, decision)
+	})
 }

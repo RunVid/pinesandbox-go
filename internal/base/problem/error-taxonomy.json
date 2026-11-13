@@ -117,6 +117,11 @@
       "retryable": false
     },
     {
+      "type": "/errors/session-name-taken",
+      "status": 409,
+      "retryable": false
+    },
+    {
       "type": "/errors/session-teardown-failed",
       "status": 503,
       "retryable": true
@@ -253,6 +258,16 @@
     },
     {
       "type": "/errors/stale-turn",
+      "status": 409,
+      "retryable": false
+    },
+    {
+      "type": "/errors/turn-not-found",
+      "status": 404,
+      "retryable": false
+    },
+    {
+      "type": "/errors/stale-task",
       "status": 409,
       "retryable": false
     },
@@ -413,6 +428,11 @@
       "type": "/errors/history-expired",
       "status": 410,
       "retryable": false
+    },
+    {
+      "type": "/errors/events-unavailable",
+      "status": 503,
+      "retryable": true
     },
     {
       "type": "/errors/storage-exhausted",

@@ -12,6 +12,7 @@ import (
 	"go.pinesandbox.io/computer/internal/base/wait"
 	"go.pinesandbox.io/computer/internal/bind"
 	"go.pinesandbox.io/computer/internal/binder"
+	"go.pinesandbox.io/computer/internal/controlplane"
 	"go.pinesandbox.io/computer/internal/coordinator"
 	"go.pinesandbox.io/computer/internal/tokens"
 )
@@ -20,7 +21,7 @@ import (
 const CurrentKeyVersion = binder.CurrentKeyVersion
 
 const (
-	defaultSandboxLifetime = 300 * time.Second
+	defaultSandboxLifetime = 30 * time.Minute
 	defaultReadyTimeout    = 300 * time.Second
 	attachCleanupTimeout   = 30 * time.Second
 )
@@ -38,8 +39,17 @@ type ComputerLocation struct {
 // StartOptions configures a Start from saved credentials. Identity, keys
 // and ephemeral mode belong to Credentials; Start reads the current binding.
 type StartOptions struct {
-	Timeout          time.Duration // how long the Computer keeps running without use, default 300s
-	ReadyTimeout     time.Duration // how long to wait for the Computer to start, default 300s
+	// Timeout is the idle timeout: how long the Computer keeps running after its
+	// last activity (default 30 minutes, at least one minute, at most the project's
+	// allowance). Activity is anything done on the Computer: a command, a browser
+	// action, a file write, a message to the agent, an agent turn while it runs, a
+	// person in control. Each one restarts the countdown. Only looking doesn't:
+	// reading status or results, and listening to events. After a whole Timeout
+	// with no activity the Computer stops; call Stop yourself to wait for its
+	// save. SetIdleTimeout changes the timeout while the Computer runs.
+	Timeout time.Duration
+	// ReadyTimeout bounds the whole Start (release wait, create, start), default 300s.
+	ReadyTimeout     time.Duration
 	Location         *ComputerLocation
 	Metadata         map[string]string
 	MaxBindAttempts  int
@@ -57,8 +67,17 @@ type AttachOptions struct {
 	CaptureKeypair       *CaptureKeypair
 	PriorCaptureKeypairs []*CaptureKeypair
 
-	Timeout      time.Duration // how long the Computer keeps running without use, default 300s
-	ReadyTimeout time.Duration // how long to wait for the Computer to start, default 300s
+	// Timeout is the idle timeout: how long the Computer keeps running after its
+	// last activity (default 30 minutes, at least one minute, at most the project's
+	// allowance). Activity is anything done on the Computer: a command, a browser
+	// action, a file write, a message to the agent, an agent turn while it runs, a
+	// person in control. Each one restarts the countdown. Only looking doesn't:
+	// reading status or results, and listening to events. After a whole Timeout
+	// with no activity the Computer stops; call Stop yourself to wait for its
+	// save. SetIdleTimeout changes the timeout while the Computer runs.
+	Timeout time.Duration
+	// ReadyTimeout bounds the start, default 300s (for AttachComputer, also the release wait).
+	ReadyTimeout time.Duration
 	// Deprecated: Computer attach does not support environment overrides.
 	// Nonempty maps are rejected before provisioning; leave nil or empty.
 	PodEnv   map[string]string
@@ -104,6 +123,7 @@ type Computer struct {
 	sandbox       *SandboxHandle
 	coord         *coordinator.Client
 	computerToken string // ct_
+	unboundBy     string
 	// ephemeral records that this Computer was bound access-lease-only; Stop
 	// reads it to skip the pre-terminate checkpoint.
 	ephemeral bool
@@ -391,13 +411,14 @@ func (c *Computer) AddPriorKey(version int, key []byte) error {
 // Attach starts the Computer, waits for it to run, and attaches to it,
 // leaving the Computer ready to create sessions. It refuses to attach a Computer that is
 // already attached (call Stop or Kill first).
+//
+// Deprecated: use Client.StartComputer or Client.RecoverComputer, which check the current runtime first.
 func (c *Computer) Attach(ctx context.Context, conn *Connection, opts AttachOptions) error {
-	c.mu.Lock()
-	if c.sandbox != nil {
-		c.mu.Unlock()
-		return bind.NewBindError(0, "Computer already attached — call Stop (graceful) or Kill first", nil)
-	}
-	c.mu.Unlock()
+	return c.attach(ctx, conn, opts, time.Time{})
+}
+
+// validate checks the options before anything is sent (Start runs it before its gate).
+func (opts AttachOptions) validate() error {
 	if opts.BindingRevision < 0 {
 		return fmt.Errorf("pinesandbox: BindingRevision must be non-negative")
 	}
@@ -407,7 +428,25 @@ func (c *Computer) Attach(ctx context.Context, conn *Connection, opts AttachOpti
 	if opts.ReadyTimeout < 0 {
 		return fmt.Errorf("pinesandbox: ReadyTimeout must be non-negative")
 	}
-	if err := validateLocation(opts.Location); err != nil {
+	return validateLocation(opts.Location)
+}
+
+func (opts AttachOptions) readyTimeout() time.Duration {
+	if opts.ReadyTimeout == 0 {
+		return defaultReadyTimeout
+	}
+	return opts.ReadyTimeout
+}
+
+// attach is Attach within a ReadyTimeout budget that began at started (zero: now).
+func (c *Computer) attach(ctx context.Context, conn *Connection, opts AttachOptions, started time.Time) error {
+	c.mu.Lock()
+	if c.sandbox != nil {
+		c.mu.Unlock()
+		return bind.NewBindError(0, "Computer already attached — call Stop (graceful) or Kill first", nil)
+	}
+	c.mu.Unlock()
+	if err := opts.validate(); err != nil {
 		return err
 	}
 	if err := c.configureCaptureKeypairs(opts.CaptureKeypair, opts.PriorCaptureKeypairs); err != nil {
@@ -431,13 +470,14 @@ func (c *Computer) Attach(ctx context.Context, conn *Connection, opts AttachOpti
 	if timeout <= 0 {
 		timeout = defaultSandboxLifetime
 	}
-	readyTimeout := opts.ReadyTimeout
-	if readyTimeout == 0 {
-		readyTimeout = defaultReadyTimeout
+	clock := wait.Or(conn.clock)
+	if started.IsZero() {
+		started = clock.Now()
 	}
+	deadline := started.Add(opts.readyTimeout())
 	// Allocation and readiness share a budget independent of sandbox lifetime.
 	// Bind has a separate budget, also bounded by the caller's context.
-	readyCtx, cancel := context.WithTimeout(ctx, readyTimeout)
+	readyCtx, cancel := context.WithTimeout(ctx, deadline.Sub(clock.Now()))
 	defer cancel()
 
 	createID, err := uuidV7()
@@ -447,10 +487,20 @@ func (c *Computer) Attach(ctx context.Context, conn *Connection, opts AttachOpti
 	body := buildComputerCreateBody(timeout, opts)
 	body["create_id"] = createID
 	info, err := conn.controlPlane.CreateComputer(readyCtx, body)
+	if controlplane.CreateMayHaveReached(err) && ctx.Err() == nil && errors.Is(readyCtx.Err(), context.DeadlineExceeded) {
+		// The budget cut the create off, so a runtime may exist that nothing would delete. Sent
+		// again with its create_id, the create names it; the spent budget below then deletes it.
+		resendCtx, resendCancel := context.WithTimeout(context.WithoutCancel(ctx), attachCleanupTimeout)
+		if resent, resendErr := conn.controlPlane.CreateComputer(resendCtx, body); resendErr == nil {
+			info, err = resent, nil
+		}
+		resendCancel()
+	}
 	if err != nil {
 		return err
 	}
 	sandbox := conn.sandboxHandle(info.ID, info.Status)
+	sandbox.reason = info.Reason // the create response's, until the first read
 	attached := false
 	defer func() {
 		if !attached {
@@ -460,8 +510,12 @@ func (c *Computer) Attach(ctx context.Context, conn *Connection, opts AttachOpti
 			_ = sandbox.Kill(cleanupCtx)
 		}
 	}()
-	if err := sandbox.WaitUntilRunning(readyCtx, readyTimeout, 0); err != nil {
-		return readinessBudgetError(ctx, readyCtx, err, sandbox)
+	ready := newRuntimeReady(started)
+	if readyCtx.Err() != nil { // the create took the budget: a runtime that already runs isn't bound either
+		return readinessBudgetError(ctx, readyCtx, readyCtx.Err(), sandbox, ready)
+	}
+	if err := sandbox.waitUntilRunning(readyCtx, ready, deadline.Sub(clock.Now()), 0); err != nil {
+		return readinessBudgetError(ctx, readyCtx, err, sandbox, ready)
 	}
 	cancel()
 
@@ -470,7 +524,6 @@ func (c *Computer) Attach(ctx context.Context, conn *Connection, opts AttachOpti
 		return err
 	}
 	captureKPs, captureGen := c.captureKeypairsCopy()
-	clock := wait.Or(conn.clock)
 	res, err := binder.Bind(ctx, binder.Config{
 		Clock:           clock.Now,
 		Sleeper:         clock.Sleep,
@@ -517,14 +570,21 @@ func (c *Computer) Attach(ctx context.Context, conn *Connection, opts AttachOpti
 // documented *ReadyTimeoutError. The readiness context and the poll loop's own
 // deadline expire together, and the sleep between polls observes the context
 // first, so without this translation callers would see context.DeadlineExceeded
-// or a transport timeout instead. Caller cancellation stays distinguishable.
-func readinessBudgetError(callerCtx, readyCtx context.Context, err error, sandbox *SandboxHandle) error {
+// or a transport timeout instead. The caller's own cancellation or deadline comes
+// first and stays its context error.
+func readinessBudgetError(callerCtx, readyCtx context.Context, err error, sandbox *SandboxHandle, w readyWait) error {
+	if err == nil {
+		return nil
+	}
+	if callerErr := callerCtx.Err(); callerErr != nil {
+		return callerErr
+	}
 	var rt *ReadyTimeoutError
 	if errors.As(err, &rt) {
 		return err
 	}
-	if callerCtx.Err() == nil && errors.Is(readyCtx.Err(), context.DeadlineExceeded) {
-		return &ReadyTimeoutError{SandboxID: sandbox.id, LastState: sandbox.status}
+	if errors.Is(readyCtx.Err(), context.DeadlineExceeded) {
+		return sandbox.readyTimeout(w)
 	}
 	return err
 }
@@ -557,10 +617,10 @@ func (c *Computer) adopt(conn *Connection, sandboxID, computerToken, status stri
 // or authorization error does not. It never resumes or restarts the Computer.
 func (c *Computer) Status(ctx context.Context) (string, error) {
 	c.mu.Lock()
-	sandbox := c.sandbox
+	sandbox, _, _, err := c.boundLocked()
 	c.mu.Unlock()
-	if sandbox == nil {
-		return "", fmt.Errorf("%w: %s", ErrNotBound, c.id)
+	if err != nil {
+		return "", err
 	}
 	info, err := sandbox.cp.Get(ctx, sandbox.id)
 	if err != nil {
@@ -583,17 +643,24 @@ func (c *Computer) Resume(ctx context.Context) error {
 
 func (c *Computer) transitionMemory(ctx context.Context, target string) error {
 	c.mu.Lock()
-	sandbox := c.sandbox
+	sandbox, _, _, err := c.boundLocked()
 	c.mu.Unlock()
-	if sandbox == nil {
-		return fmt.Errorf("%w: %s", ErrNotBound, c.id)
+	if err != nil {
+		return err
 	}
 	return sandbox.transitionMemory(ctx, target)
 }
 
-// Stop asks Pine to save the Computer's state and shut it down, then waits for the
-// shutdown. A timeout only ends this wait. Another backend can continue from a saved
-// handle. If the Computer was already gone, its final save outcome is unknown.
+// Stop stops the runtime this handle is bound to (its SandboxID); Pine tries a final save
+// first. It returns true when that runtime is no longer running, or when the handle has no
+// binding. true does not confirm that the final save succeeded: the save result cannot be read.
+// After true the handle has no binding, and calls that need one return a *BindError matching
+// ErrNotBound.
+//
+// It returns (false, nil) when the runtime did not stop within Stop's own 390 s wait; by
+// then the Stop was submitted or the runtime was already shutting down. When ctx is
+// cancelled or expires, Stop returns an error, and the Stop may already have been
+// submitted. After false, or any error, call Stop again on this handle.
 func (c *Computer) Stop(ctx context.Context) (bool, error) {
 	c.mu.Lock()
 	sandbox := c.sandbox
@@ -603,7 +670,7 @@ func (c *Computer) Stop(ctx context.Context) (bool, error) {
 	}
 	gone, err := sandbox.Stop(ctx)
 	if gone {
-		c.reset()
+		c.reset("Stop")
 	}
 	return gone, err
 }
@@ -618,7 +685,7 @@ func (c *Computer) Kill(ctx context.Context) bool {
 	}
 	ok := sandbox.Kill(ctx)
 	if ok {
-		c.reset()
+		c.reset("Kill")
 	}
 	return ok
 }
@@ -643,7 +710,7 @@ func (c *Computer) Delete(ctx context.Context) error {
 	if err := portal.DeleteComputer(ctx, c.id); err != nil {
 		return err
 	}
-	c.reset()
+	c.reset("Delete")
 	return nil
 }
 
@@ -655,10 +722,22 @@ func (c *Computer) Alive(ctx context.Context) bool {
 	return sandbox != nil && sandbox.Alive(ctx)
 }
 
-func (c *Computer) reset() {
+func (c *Computer) reset(by string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.unboundBy = by
 	c.sandbox, c.coord, c.computerToken = nil, nil, ""
+}
+
+func (c *Computer) boundLocked() (*SandboxHandle, *coordinator.Client, string, error) {
+	if c.sandbox == nil || c.computerToken == "" {
+		reason := "it was never attached"
+		if c.unboundBy != "" {
+			reason = c.unboundBy + " was called on this handle"
+		}
+		return nil, nil, "", bind.NewBindError(0, fmt.Sprintf("Computer %s: this handle has no binding (%s)", c.id, reason), ErrNotBound)
+	}
+	return c.sandbox, c.coord, c.computerToken, nil
 }
 
 func (c *Computer) priorKeysCopy() map[int][]byte {

@@ -261,7 +261,9 @@ func parseAuthorRun(raw json.RawMessage) (*AuthorRun, error) {
 // the accepted run at once; scaffold (optional) seeds the SKILL.md the author continues
 // from. A run takes minutes: follow it with AuthorEvents.
 func (s *Session) StartLearn(ctx context.Context, scaffold string) (*AuthorRun, error) {
-	raw, err := s.coord.LearnSkill(ctx, s.computerToken(), s.name, scaffold)
+	raw, err := sessionCall(s, func(coord *coordinator.Client, ct string) (json.RawMessage, error) {
+		return coord.LearnSkill(ctx, ct, s.name, scaffold)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -271,7 +273,9 @@ func (s *Session) StartLearn(ctx context.Context, scaffold string) (*AuthorRun, 
 // StartTeach starts authoring a draft from a human demonstration toward goal and returns
 // the accepted run at once.
 func (s *Session) StartTeach(ctx context.Context, goal string, opts TeachOptions) (*AuthorRun, error) {
-	raw, err := s.coord.TeachSkill(ctx, s.computerToken(), s.name, goal, opts)
+	raw, err := sessionCall(s, func(coord *coordinator.Client, ct string) (json.RawMessage, error) {
+		return coord.TeachSkill(ctx, ct, s.name, goal, opts)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -281,7 +285,9 @@ func (s *Session) StartTeach(ctx context.Context, goal string, opts TeachOptions
 // StartRefine starts revising an existing immutable skill version with your guidance and
 // returns the accepted run at once; the new draft arrives as the run's result.
 func (s *Session) StartRefine(ctx context.Context, skill string, version int, guidance string) (*AuthorRun, error) {
-	raw, err := s.coord.RefineSkill(ctx, s.computerToken(), s.name, skill, version, guidance)
+	raw, err := sessionCall(s, func(coord *coordinator.Client, ct string) (json.RawMessage, error) {
+		return coord.RefineSkill(ctx, ct, s.name, skill, version, guidance)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -295,7 +301,9 @@ func (s *Session) StartRefine(ctx context.Context, skill string, version int, gu
 // it blocks until the authoring result, as every other server SDK's learn does. Use
 // StartLearn for the asynchronous form.
 func (s *Session) Learn(ctx context.Context, scaffold string) (json.RawMessage, error) {
-	return s.coord.LearnSkill(ctx, s.computerToken(), s.name, scaffold)
+	return sessionCall(s, func(coord *coordinator.Client, ct string) (json.RawMessage, error) {
+		return coord.LearnSkill(ctx, ct, s.name, scaffold)
+	})
 }
 
 // Teach authors a draft from a human demonstration toward goal (raw 202 body).
@@ -304,7 +312,9 @@ func (s *Session) Learn(ctx context.Context, scaffold string) (json.RawMessage, 
 // it blocks until the authoring result, as every other server SDK's teach does. Use
 // StartTeach for the asynchronous form.
 func (s *Session) Teach(ctx context.Context, goal string, opts TeachOptions) (json.RawMessage, error) {
-	return s.coord.TeachSkill(ctx, s.computerToken(), s.name, goal, opts)
+	return sessionCall(s, func(coord *coordinator.Client, ct string) (json.RawMessage, error) {
+		return coord.TeachSkill(ctx, ct, s.name, goal, opts)
+	})
 }
 
 // Refine revises an existing immutable skill version with your guidance
@@ -314,12 +324,16 @@ func (s *Session) Teach(ctx context.Context, goal string, opts TeachOptions) (js
 // it blocks until the new draft, as every other server SDK's refine does. Use StartRefine
 // for the asynchronous form.
 func (s *Session) Refine(ctx context.Context, skill string, version int, guidance string) (json.RawMessage, error) {
-	return s.coord.RefineSkill(ctx, s.computerToken(), s.name, skill, version, guidance)
+	return sessionCall(s, func(coord *coordinator.Client, ct string) (json.RawMessage, error) {
+		return coord.RefineSkill(ctx, ct, s.name, skill, version, guidance)
+	})
 }
 
 // AuthorSkill registers a SKILL.md draft you wrote yourself (raw).
 func (s *Session) AuthorSkill(ctx context.Context, skillName, skillMD, reason string, opts AuthorSkillOptions) (json.RawMessage, error) {
-	return s.coord.AuthorSkillDraft(ctx, s.computerToken(), s.name, skillName, skillMD, reason, opts)
+	return sessionCall(s, func(coord *coordinator.Client, ct string) (json.RawMessage, error) {
+		return coord.AuthorSkillDraft(ctx, ct, s.name, skillName, skillMD, reason, opts)
+	})
 }
 
 // AuthorEvents streams an author run until its result event; fn receives each event's
@@ -327,10 +341,14 @@ func (s *Session) AuthorSkill(ctx context.Context, skillName, skillMD, reason st
 // (ErrStreamLost after the reconnect budget). Returns the resume cursor; fn returning
 // ErrStop stops cleanly, and the context's error ends it early.
 func (s *Session) AuthorEvents(ctx context.Context, authorID, lastEventID string, fn func(data []byte) error) (string, error) {
-	return s.coord.AuthorEvents(ctx, s.readToken(), s.name, authorID, lastEventID, fn)
+	return sessionCall(s, func(coord *coordinator.Client, ct string) (string, error) {
+		return coord.AuthorEvents(ctx, s.readToken(ct), s.name, authorID, lastEventID, fn)
+	})
 }
 
 // CancelAuthor cancels a running author task (raw 202 body).
 func (s *Session) CancelAuthor(ctx context.Context, authorID string) (json.RawMessage, error) {
-	return s.coord.CancelAuthor(ctx, s.computerToken(), s.name, authorID)
+	return sessionCall(s, func(coord *coordinator.Client, ct string) (json.RawMessage, error) {
+		return coord.CancelAuthor(ctx, ct, s.name, authorID)
+	})
 }

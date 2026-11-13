@@ -3,6 +3,7 @@ package controlplane
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"time"
@@ -58,11 +59,19 @@ const (
 	// createBusyCode is the lifecycle server's 503 for a create it would not queue during a
 	// burst of the project's creates: busy, not a refusal; nothing was created.
 	createBusyCode = "COMPUTER_CREATE_BUSY"
+	createPath     = "/computer-sandboxes"
 	// maxCreateBusyRepeats bounds the repeats of a keyed create the server answered busy.
 	maxCreateBusyRepeats = 10
 	// defaultCreateBusyWait is the wait when a busy answer has no usable Retry-After.
 	defaultCreateBusyWait = time.Second
 )
+
+// CreateMayHaveReached reports whether err is a create's own timeout on a send that may
+// have reached the server: not the project token's request, nor a send never made.
+func CreateMayHaveReached(err error) bool {
+	var timeout *transport.TimeoutError
+	return errors.As(err, &timeout) && timeout.Op == transport.Operation("POST", createPath) && !transport.NotSent(err)
+}
 
 // CreateComputer provisions a Computer sandbox. The body intentionally contains
 // only caller-owned settings; the lifecycle server expands the project's signed
@@ -72,7 +81,7 @@ func (c *Client) CreateComputer(ctx context.Context, body map[string]any) (*Sand
 	if err != nil {
 		return nil, fmt.Errorf("pinesandbox: marshal create payload: %w", err)
 	}
-	const path = "/computer-sandboxes"
+	const path = createPath
 	// A create ID permits identical retries without extending the Computer sandbox's expiry.
 	createID, _ := body["create_id"].(string)
 	keyed := createID != ""

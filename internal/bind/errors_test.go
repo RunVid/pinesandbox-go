@@ -47,6 +47,23 @@ func TestErrorVocabulary(t *testing.T) {
 		t.Error("NewTokenRejectedError broken")
 	}
 
+	// A local no-binding refusal prints its message without the "bind failed" label;
+	// a status or another cause keeps the label.
+	for _, c := range []struct {
+		err  *BindError
+		want string
+	}{
+		{NewBindError(0, "Computer c1: this handle has no binding (it was never attached)", ErrNotBound),
+			"pinesandbox: Computer c1: this handle has no binding (it was never attached)"},
+		{NewBindError(409, "m", ErrNotBound), "pinesandbox: bind failed (409): m"},
+		{NewBindError(0, "m", cause), "pinesandbox: bind failed: m"},
+		{NewBindError(0, "m", nil), "pinesandbox: bind failed: m"},
+	} {
+		if got := c.err.Error(); got != c.want {
+			t.Errorf("Error() = %q, want %q", got, c.want)
+		}
+	}
+
 	// Class.String.
 	for cls, want := range map[Class]string{ClassReadiness: "readiness", ClassTerminal: "terminal"} {
 		if cls.String() != want {

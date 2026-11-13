@@ -13,7 +13,9 @@ package pinesandbox
 
 // Version is this SDK's release version. SDK patches ship independently within
 // the shared compatibility minor.
-const Version = "0.3.20"
+const Version = "0.3.21"
+
+const userAgent = "pinesandbox-go/" + Version
 
 // specs/check-version-identity.py reads this constant (SpecVersion = <n>) and
 // checks it against the API spec and the other SDKs.

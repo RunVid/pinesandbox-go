@@ -31,10 +31,10 @@ type SandboxDetails struct {
 // while paused. Absence and transport errors never trigger replacement.
 func (c *Computer) SandboxDetails(ctx context.Context) (*SandboxDetails, error) {
 	c.mu.Lock()
-	sandbox := c.sandbox
+	sandbox, _, _, err := c.boundLocked()
 	c.mu.Unlock()
-	if sandbox == nil {
-		return nil, ErrNotBound
+	if err != nil {
+		return nil, err
 	}
 	info, err := sandbox.cp.Get(ctx, sandbox.id)
 	if err != nil {
@@ -54,10 +54,10 @@ func sandboxDetails(info *controlplane.SandboxInfo) *SandboxDetails {
 // If the outcome is uncertain, inspect SandboxDetails before another edit.
 func (c *Computer) SetIdleTimeout(ctx context.Context, timeout time.Duration) (*SandboxDetails, error) {
 	c.mu.Lock()
-	sandbox := c.sandbox
+	sandbox, _, _, err := c.boundLocked()
 	c.mu.Unlock()
-	if sandbox == nil {
-		return nil, ErrNotBound
+	if err != nil {
+		return nil, err
 	}
 	if timeout < time.Minute || timeout%time.Second != 0 {
 		return nil, fmt.Errorf("pinesandbox: idle timeout must be whole seconds and at least one minute")

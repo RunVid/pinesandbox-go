@@ -73,23 +73,6 @@ const (
 	ActorAdminOverride = "admin_override"
 )
 
-// Terminal reasons — AgentResult.TerminalReason (how a turn ended). Additive.
-const (
-	TerminalCompleted              = "completed"
-	TerminalNeedsInput             = "needs_input" // the agent asked a question; Summary is the question
-	TerminalBudget                 = "budget"
-	TerminalCanceled               = "canceled"
-	TerminalError                  = "error"
-	TerminalExecutorPanic          = "executor_panic"
-	TerminalCoordinatorRestarted   = "coordinator_restarted"
-	TerminalOutputInvalid          = "output_invalid"
-	TerminalDraftRegistered        = "draft_registered"        // learn/teach/refine authoring
-	TerminalClarificationRequested = "clarification_requested" // learn/teach authoring
-	TerminalNotReusable            = "not_reusable"
-	TerminalRegistrationFailed     = "registration_failed"
-	TerminalFailed                 = "failed"
-)
-
 // Control-plane event types — ControlEvent.Type.
 const (
 	ControlControllerChanged = "controller_changed"

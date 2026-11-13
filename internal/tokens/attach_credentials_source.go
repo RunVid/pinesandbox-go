@@ -17,8 +17,9 @@ import (
 // 5 minutes, scoped to one pod + boot). The pk_ never appears in String(). Mirrors the Ruby
 // AttachCredentialsSource. Reuses internal/base/transport (Authorization: Bearer pk_).
 type AttachCredentialsSource struct {
-	client *transport.Client
-	apiKey string
+	client    *transport.Client
+	apiKey    string
+	userAgent string
 }
 
 const (
@@ -27,14 +28,22 @@ const (
 )
 
 // NewAttachCredentialsSource builds a source posting to client (the portal/control host).
-func NewAttachCredentialsSource(client *transport.Client, apiKey string) (*AttachCredentialsSource, error) {
+func NewAttachCredentialsSource(client *transport.Client, apiKey, userAgent string) (*AttachCredentialsSource, error) {
 	if apiKey == "" {
 		return nil, fmt.Errorf("pinesandbox: api_key required (a pk_ client key)")
 	}
 	if client == nil {
 		return nil, fmt.Errorf("pinesandbox: attach-credentials transport client required")
 	}
-	return &AttachCredentialsSource{client: client, apiKey: apiKey}, nil
+	return &AttachCredentialsSource{client: client, apiKey: apiKey, userAgent: userAgent}, nil
+}
+
+func (s *AttachCredentialsSource) headers() map[string]string {
+	headers := map[string]string{"Authorization": "Bearer " + s.apiKey}
+	if s.userAgent != "" {
+		headers["User-Agent"] = s.userAgent
+	}
+	return headers
 }
 
 // AttachCredentials is the per-attach mint result. KeyAssertion is required
@@ -95,7 +104,7 @@ type BindingReference struct {
 
 func (s *AttachCredentialsSource) CurrentBinding(ctx context.Context, computerID string) (*BindingReference, error) {
 	resp, err := s.client.Do(ctx, http.MethodGet, registerPath+"/"+computerID, transport.Request{
-		Headers: map[string]string{"Authorization": "Bearer " + s.apiKey},
+		Headers: s.headers(),
 	})
 	if err != nil {
 		if ae, ok := asAPIError(err); ok {
@@ -148,7 +157,7 @@ func (s *AttachCredentialsSource) RegisterComputer(ctx context.Context, computer
 // qualified independently when the Computer binds.
 func (s *AttachCredentialsSource) AvailableLocations(ctx context.Context) (*AvailableLocations, error) {
 	resp, err := s.client.Do(ctx, http.MethodGet, locationsPath, transport.Request{
-		Headers: map[string]string{"Authorization": "Bearer " + s.apiKey},
+		Headers: s.headers(),
 	})
 	if err != nil {
 		ae, ok := asAPIError(err)
@@ -200,7 +209,7 @@ func (s *AttachCredentialsSource) DeleteComputer(ctx context.Context, computerID
 		return fmt.Errorf("pinesandbox: computer_id required")
 	}
 	_, err := s.client.Do(ctx, http.MethodDelete, registerPath+"/"+computerID, transport.Request{
-		Headers: map[string]string{"Authorization": "Bearer " + s.apiKey},
+		Headers: s.headers(),
 	})
 	if err == nil {
 		return nil
@@ -340,7 +349,7 @@ func (s *AttachCredentialsSource) postWithHeaders(ctx context.Context, path stri
 	if err != nil {
 		return nil, fmt.Errorf("pinesandbox: marshal request: %w", err)
 	}
-	headers := map[string]string{"Authorization": "Bearer " + s.apiKey}
+	headers := s.headers()
 	for key, value := range extra {
 		headers[key] = value
 	}
@@ -376,6 +385,10 @@ func (s *AttachCredentialsSource) genericForbidden(ae *problem.APIError, op, for
 		msg = "portal rate-limited the " + op
 	default:
 		msg = fmt.Sprintf("portal %s failed (%d)", op, ae.Status)
+		// Keep Portal's problem: a 409 then names, for example, idempotency-receipt-expired.
+		if ae.ProblemType != "" {
+			msg = ae.ProblemType + ": " + ae.Detail
+		}
 	}
 	return &AttachCredentialsError{tokenBaseFrom(msg, ae)}
 }

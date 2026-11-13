@@ -16,5 +16,7 @@ type (
 // and the exit code from the SSE stream. fn (optional) receives each parsed event as it
 // arrives. A 409 terminal_lost surfaces as *APIError — call RecreateTerminal then retry.
 func (s *Session) Exec(ctx context.Context, command string, opts ExecOptions, fn func(event map[string]any) error) (*ExecResult, error) {
-	return s.coord.Exec(ctx, s.token, s.name, command, opts, fn)
+	return sessionCall(s, func(coord *coordinator.Client, _ string) (*ExecResult, error) {
+		return coord.Exec(ctx, s.token, s.name, command, opts, fn)
+	})
 }

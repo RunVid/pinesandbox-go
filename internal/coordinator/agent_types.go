@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
+
+	"go.pinesandbox.io/computer/internal/terminalreason"
 )
 
 // Typed agent-track results, mirroring the coordinator-api.yaml schemas (PublicTask,
@@ -116,7 +118,7 @@ type AgentTurn struct {
 // Question returns the question that ended the turn — its result's summary — or ""
 // when the turn did not end with one.
 func (t *AgentTurn) Question() string {
-	if t == nil || t.Result == nil || t.Result.TerminalReason != "needs_input" {
+	if t == nil || t.Result == nil || t.Result.TerminalReason != terminalreason.NeedsInput {
 		return ""
 	}
 	return t.Result.Summary

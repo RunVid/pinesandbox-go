@@ -12,6 +12,7 @@ import (
 	"os"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -138,24 +139,93 @@ func TestReconnectPreservesCredentialsWithoutNetworkIO(t *testing.T) {
 }
 
 func TestBindingRequiresBoundSandbox(t *testing.T) {
-	comp := newComputer("0190aaaa-bbbb-7ccc-8ddd-eeeeffff0000", make([]byte, 32))
-	if _, err := comp.Binding(); !errors.Is(err, ErrNotBound) {
-		t.Fatalf("unattached Computer exported a binding: %v", err)
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/sandboxes/sb-1":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			fmt.Fprint(w, `{"code":"COMPUTER_NOT_FOUND","message":"gone"}`)
+		case r.Method == http.MethodDelete:
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+	client := &Client{conn: buildTestConnection(t, srv.URL, srv.URL)}
+	ctx := context.Background()
+	const id = "0190aaaa-bbbb-7ccc-8ddd-eeeeffff0000"
+	key := make([]byte, 32)
+	attached := func() *Computer {
+		comp, err := client.AdoptExisting(ctx, id, key, "sb-1", "ct_x")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return comp
 	}
-	if _, err := comp.SandboxDetails(context.Background()); !errors.Is(err, ErrNotBound) {
-		t.Fatalf("unattached Computer returned sandbox details: %v", err)
+	handles := []struct {
+		reason string
+		comp   func() *Computer
+	}{
+		{"it was never attached", func() *Computer { return newComputer(id, key) }},
+		{"Stop was called on this handle", func() *Computer {
+			comp := attached()
+			if gone, err := comp.Stop(ctx); !gone || err != nil {
+				t.Fatalf("Stop = %v, %v", gone, err)
+			}
+			return comp
+		}},
+		{"Kill was called on this handle", func() *Computer {
+			comp := attached()
+			if !comp.Kill(ctx) {
+				t.Fatal("Kill = false")
+			}
+			return comp
+		}},
+		{"Delete was called on this handle", func() *Computer {
+			comp := attached()
+			if err := comp.Delete(ctx); err != nil {
+				t.Fatal(err)
+			}
+			return comp
+		}},
 	}
-	if _, err := comp.SetIdleTimeout(context.Background(), time.Minute); !errors.Is(err, ErrNotBound) {
-		t.Fatalf("unattached Computer edited its idle timeout: %v", err)
+	calls := map[string]func(*Computer) error{
+		"Binding":        func(c *Computer) error { _, err := c.Binding(); return err },
+		"Status":         func(c *Computer) error { _, err := c.Status(ctx); return err },
+		"Pause":          func(c *Computer) error { return c.Pause(ctx) },
+		"Resume":         func(c *Computer) error { return c.Resume(ctx) },
+		"SandboxDetails": func(c *Computer) error { _, err := c.SandboxDetails(ctx); return err },
+		"SetIdleTimeout": func(c *Computer) error { _, err := c.SetIdleTimeout(ctx, time.Minute); return err },
+		"CreateSession":  func(c *Computer) error { _, err := c.CreateSession(ctx, CreateSessionOptions{}); return err },
+		"Session":        func(c *Computer) error { _, err := c.Session(ctx, "s"); return err },
+		"AdoptSession":   func(c *Computer) error { _, err := c.AdoptSession("s", "ps_x"); return err },
+		"Sessions":       func(c *Computer) error { _, err := c.Sessions(ctx); return err },
+		"DestroySession": func(c *Computer) error { return c.DestroySession(ctx, "s", false) },
+		"Snapshot":       func(c *Computer) error { _, err := c.Snapshot(ctx); return err },
+		"Checkpoint":     func(c *Computer) error { _, err := c.Checkpoint(ctx); return err },
+		"OrphanTabs":     func(c *Computer) error { _, err := c.OrphanTabs(ctx); return err },
+		"ListPasskeys":   func(c *Computer) error { _, err := c.ListPasskeys(ctx); return err },
+		"Capabilities":   func(c *Computer) error { _, err := c.Capabilities(ctx); return err },
+		"Skills.Drafts":  func(c *Computer) error { _, err := c.Skills().Drafts(ctx); return err },
+		"ArtifactLink":   func(c *Computer) error { _, err := c.ArtifactLink(ctx, "a.pdf", 0); return err },
 	}
-	if _, err := comp.Status(context.Background()); !errors.Is(err, ErrNotBound) {
-		t.Fatalf("unattached Computer read its status: %v", err)
-	}
-	if _, err := comp.CreateSession(context.Background(), CreateSessionOptions{}); !errors.Is(err, ErrNotBound) {
-		t.Fatalf("unattached Computer created a session: %v", err)
-	}
-	if err := comp.Pause(context.Background()); !errors.Is(err, ErrNotBound) {
-		t.Fatalf("unattached Computer paused: %v", err)
+	for _, h := range handles {
+		comp := h.comp()
+		sent := requests.Load()
+		want := "pinesandbox: Computer " + id + ": this handle has no binding (" + h.reason + ")"
+		for name, call := range calls {
+			err := call(comp)
+			var bindErr *BindError
+			if !errors.As(err, &bindErr) || !errors.Is(err, ErrNotBound) || err.Error() != want {
+				t.Errorf("%s (%s) = %T %v, want a *BindError %q matching ErrNotBound", name, h.reason, err, err, want)
+			}
+		}
+		if n := requests.Load() - sent; n != 0 {
+			t.Errorf("%s: calls without a binding sent %d requests", h.reason, n)
+		}
 	}
 }
 

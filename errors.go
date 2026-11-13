@@ -1,8 +1,13 @@
 package pinesandbox
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"math"
+	"strconv"
+	"strings"
+	"time"
 
 	"go.pinesandbox.io/computer/internal/artifacts"
 	"go.pinesandbox.io/computer/internal/base/problem"
@@ -31,6 +36,10 @@ var (
 	// ErrSessionNotFound (404): the named session does not exist on this live
 	// Computer. It is deliberately distinct from SandboxGoneError.
 	ErrSessionNotFound = &problem.APIError{Status: 404, ProblemType: "/errors/session-not-found"}
+	// ErrComputerStopped (409): a Stop has begun, whoever sent it, and the Computer
+	// refuses every call until it starts again. Not a conflict to retry: follow the
+	// Stop in Status, then Start.
+	ErrComputerStopped = &problem.APIError{Status: 409, ProblemType: "/errors/computer-stopped"}
 	// ErrTaskNotReady (409): a turn is in flight, the result isn't materialized — poll again.
 	ErrTaskNotReady = &problem.APIError{Status: 409, ProblemType: "/errors/task-not-ready"}
 	// ErrSessionBusy (409): the session already has an active task (one-active-per-session).
@@ -38,11 +47,38 @@ var (
 	// ErrSessionLimit (409): the Computer's concurrent-session cap is reached — close an
 	// idle/finished session (DestroySession) to free a slot, then retry CreateSession.
 	ErrSessionLimit = &problem.APIError{Status: 409, ProblemType: "/errors/session-limit"}
+	// ErrSessionNameTaken (409): CreateSession found a session with this name already.
+	// Choose another name.
+	ErrSessionNameTaken = &problem.APIError{Status: 409, ProblemType: "/errors/session-name-taken"}
 	// ErrTaskNotFound (404, /errors/task-not-found): a task READ on a session that has
 	// never run a turn. This is a VALID IDLE SESSION — start a turn on it; do not treat
 	// the session as stale and never re-create it (a duplicate CreateSession hits the
 	// name-conflict 409).
 	ErrTaskNotFound = &problem.APIError{Status: 404, ProblemType: "/errors/task-not-found"}
+	// ErrStaleTask (409): a read pinned to a task (ExpectedTaskID) found the session on
+	// another one. Its saved cursors belong to the old task; read the current task.
+	ErrStaleTask = &problem.APIError{Status: 409, ProblemType: "/errors/stale-task"}
+	// ErrStaleTurn (409): the action named a turn that is no longer the current one:
+	// newer work started, or the turn was already answered. Read the current turn.
+	ErrStaleTurn = &problem.APIError{Status: 409, ProblemType: "/errors/stale-turn"}
+	// ErrNoPendingRequest (409): an answer found the turn isn't waiting for one.
+	ErrNoPendingRequest = &problem.APIError{Status: 409, ProblemType: "/errors/no-pending-request"}
+	// ErrTurnNotFound (404): the session has no turn with this id.
+	ErrTurnNotFound = &problem.APIError{Status: 404, ProblemType: "/errors/turn-not-found"}
+	// ErrAuthorInFlight (409): a skill is already being written for this session; one
+	// authoring run at a time.
+	ErrAuthorInFlight = &problem.APIError{Status: 409, ProblemType: "/errors/author-in-flight"}
+	// ErrSecretInSkill (422): the skill wasn't saved because it contains something that
+	// looks like a secret.
+	ErrSecretInSkill = &problem.APIError{Status: 422, ProblemType: "/errors/secret-in-skill"}
+	// ErrSkillsUnavailable (503): skills aren't available on this Computer.
+	ErrSkillsUnavailable = &problem.APIError{Status: 503, ProblemType: "/errors/skills-unavailable"}
+	// ErrHistoryExpired (410): the cursor is older than the history the Computer keeps;
+	// the problem's pruned_through says where the kept history begins.
+	ErrHistoryExpired = &problem.APIError{Status: 410, ProblemType: "/errors/history-expired"}
+	// ErrEventsUnavailable (503, retryable): the Computer couldn't read its event history
+	// just now. Retry with the same cursor.
+	ErrEventsUnavailable = &problem.APIError{Status: 503, ProblemType: "/errors/events-unavailable"}
 	// ErrNoActiveTurn (409): a task MUTATION (answer/steer/…) with no active turn to
 	// act on. The API reports this as TWO slugs, both covered here:
 	// `/errors/no-active-task` when the session is idle, and `/errors/no-active-turn`
@@ -83,9 +119,11 @@ var (
 
 // Local refusals.
 var (
-	// ErrNotBound: the Computer handle has no binding, for example after Stop. Start it
-	// first.
-	ErrNotBound = errors.New("pinesandbox: Computer has no binding")
+	// ErrNotBound: the Computer handle has no binding. It was never attached, or Stop, Kill
+	// or Delete on this handle removed its binding. Calls that need a binding return a
+	// *BindError that matches errors.Is(err, ErrNotBound); the error is never ErrNotBound
+	// itself, so compare with errors.Is, not ==.
+	ErrNotBound = bind.ErrNotBound
 	// ErrIdleTimeoutUnsupported: the Computer was started without a lifetime policy, so
 	// SetIdleTimeout cannot change its idle timeout; choose it on the next Start.
 	ErrIdleTimeoutUnsupported = errors.New("pinesandbox: Computer was started without a lifetime policy; choose the idle timeout on the next Start")
@@ -111,8 +149,9 @@ type (
 	// AgentProtocolUnsupportedError is a local capability refusal, not an APIError.
 	AgentProtocolUnsupportedError = coordinator.AgentProtocolUnsupportedError
 	// RunUnconfirmedError is a run whose response never arrived; send it again
-	// with its IdempotencyKey. It wraps the last transport or gateway error, and
-	// the context's error when the context ended first.
+	// with its IdempotencyKey. It wraps the error that ended the run, the
+	// context's error when the context ended first. After a lost response that
+	// can be any error, a SandboxGoneError included.
 	RunUnconfirmedError = coordinator.RunUnconfirmedError
 )
 
@@ -156,7 +195,9 @@ func (e *AttachAuthorizationCommittedError) Unwrap() error { return e.Err }
 
 // Errors from attaching to a started Computer.
 type (
-	// BindError is an attach failure the other attach errors don't cover.
+	// BindError is an attach failure the other attach errors don't cover, or a call that
+	// needs a binding on a handle that has none (it matches
+	// errors.Is(err, ErrNotBound)).
 	BindError = bind.BindError
 	// BindAuthError means the Computer rejected the attach authorization (401/403).
 	BindAuthError = bind.BindAuthError
@@ -241,34 +282,123 @@ var ErrCapacityExceeded = controlplane.ErrCapacityExceeded
 // says how long to wait before starting another.
 var ErrCreateRateLimited = controlplane.ErrCreateRateLimited
 
-// SandboxFailedError: the Computer reported failed, terminated or unavailable
-// before completing the requested lifecycle operation. Unavailable may be retryable.
+// SandboxFailedError: the runtime reported failed, terminated or unavailable (with
+// Reason) before completing the lifecycle operation. Unavailable may be retryable.
 type SandboxFailedError struct {
 	SandboxID string
 	State     string
+	Reason    string
+	wait      readyWait
 }
 
 func (e *SandboxFailedError) Error() string {
-	return fmt.Sprintf("pinesandbox: Computer sandbox %s reported %q before completing the lifecycle operation", e.SandboxID, e.State)
+	return runtimeMessage(pickMessage(admissionMessageRuntimeFailed, e.Reason),
+		runtimeText{sandboxID: e.SandboxID, state: e.State, reason: e.Reason, wait: e.wait})
 }
 
-// ReadyTimeoutError: a start or a memory lifecycle operation exceeded its budget.
+// ReadyTimeoutError: the ReadyTimeout budget ran out before the current runtime was
+// released (nothing was started) or the new one ran; also Pause's and Resume's deadline.
+// Nothing was attached and the binding is unchanged; Waited is the time spent. It is
+// errors.Is context.DeadlineExceeded, but only the SDK's budget yields this type.
 type ReadyTimeoutError struct {
-	SandboxID string
-	LastState string
+	SandboxID  string
+	LastState  string
+	LastReason string
+	Waited     time.Duration
+	wait       readyWait
 }
 
 func (e *ReadyTimeoutError) Error() string {
-	return fmt.Sprintf("pinesandbox: Computer sandbox %s did not complete the lifecycle operation in time (last state %q)", e.SandboxID, e.LastState)
+	text := pickMessage(admissionMessageReadyTimedOut, e.LastReason)
+	switch e.wait.target {
+	case targetReleased:
+		text = decideAdmission(e.wait.column, e.LastState, e.LastReason).Message
+	case targetCurrent:
+		text = admissionMessageCurrentReadTimedOut.withoutReason
+	}
+	return runtimeMessage(text, runtimeText{sandboxID: e.SandboxID, state: e.LastState, reason: e.LastReason,
+		wait: e.wait, waited: e.Waited})
 }
 
-// SandboxRetainedError means Start found the Computer still running or paused. Inspect
-// State and explicitly Stop it or Resume its retained memory; Start started nothing.
+// Is reports the SDK's readiness budget as a deadline.
+func (e *ReadyTimeoutError) Is(target error) bool { return target == context.DeadlineExceeded }
+
+// SandboxRetainedError means Start or Recover refused the Computer's unreleased current
+// runtime and started nothing.
 type SandboxRetainedError struct {
 	SandboxID string
 	State     string
+	Reason    string
+	column    admissionColumn // whose refusal: Start's (the zero value) or Recover's
 }
 
 func (e *SandboxRetainedError) Error() string {
-	return fmt.Sprintf("pinesandbox: Computer hasn't stopped (Computer sandbox %s, state %s); Stop it or Resume retained memory before Start", e.SandboxID, e.State)
+	return runtimeMessage(decideAdmission(e.column, e.State, e.Reason).Message,
+		runtimeText{sandboxID: e.SandboxID, state: e.State, reason: e.Reason})
+}
+
+// ComputerAlreadyStartedError means Start or Recover found the Computer's current runtime
+// already started, and started nothing. It is not a *SandboxRetainedError.
+type ComputerAlreadyStartedError struct {
+	SandboxID string
+	State     string
+	Reason    string
+	column    admissionColumn
+}
+
+func (e *ComputerAlreadyStartedError) Error() string {
+	return runtimeMessage(decideAdmission(e.column, e.State, e.Reason).Message,
+		runtimeText{sandboxID: e.SandboxID, state: e.State, reason: e.Reason})
+}
+
+type runtimeText struct {
+	sandboxID, state, reason string
+	wait                     readyWait
+	waited                   time.Duration
+}
+
+// runtimeMessage fills an admission-table text with t; waited is in whole seconds, rounded half up.
+func runtimeMessage(text string, t runtimeText) string {
+	fresh := ""
+	if t.wait.newRuntime {
+		fresh = "New "
+	}
+	return "pinesandbox: " + strings.NewReplacer("{sandbox_id}", t.sandboxID, "{state}", t.state,
+		"{reason}", t.reason, "{new}", fresh, "{target}", t.wait.target,
+		"{waited}", strconv.FormatInt(int64(math.Round(t.waited.Seconds())), 10)).Replace(text)
+}
+
+func pickMessage(m admissionMessage, reason string) string {
+	if reason == "" {
+		return m.withoutReason
+	}
+	return m.withReason
+}
+
+// readyWait names what a readiness budget waits for, for its errors' messages.
+type readyWait struct {
+	target     string          // the state waited for, or targetReleased
+	newRuntime bool            // the runtime this call created, not one it waited on
+	column     admissionColumn // the release wait's: whose table text its timeout reports
+	started    time.Time
+}
+
+// targetReleased is the old runtime's release, which Start and Recover wait for.
+const targetReleased = "released"
+
+// targetCurrent is the read of the Computer's binding and current runtime, which Start and
+// Recover make first.
+const targetCurrent = "current"
+
+// currentReadError reports Start's budget running out inside a read of the current runtime as
+// *ReadyTimeoutError; any other failure, the caller's own deadline included, stays as it is.
+func currentReadError(callerCtx, readCtx context.Context, err error, sandboxID string, w readyWait, now time.Time) error {
+	if callerCtx.Err() == nil && errors.Is(readCtx.Err(), context.DeadlineExceeded) {
+		return &ReadyTimeoutError{SandboxID: sandboxID, Waited: now.Sub(w.started), wait: w}
+	}
+	return err
+}
+
+func newRuntimeReady(started time.Time) readyWait {
+	return readyWait{target: statusRunning, newRuntime: true, started: started}
 }

@@ -14,6 +14,7 @@ import (
 	"io"
 	"iter"
 	"math"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -22,6 +23,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"testing/iotest"
 	"time"
@@ -51,13 +53,16 @@ type scenario struct {
 		} `json:"session"`
 		Credentials json.RawMessage `json:"credentials"`
 	} `json:"given"`
-	Call struct {
-		Verb string         `json:"verb"`
-		Args map[string]any `json:"args"`
-	} `json:"call"`
+	Before    []scenarioCall             `json:"before"`
+	Call      scenarioCall               `json:"call"`
 	Exchanges []scenarioExchange         `json:"exchanges"`
 	Expect    map[string]json.RawMessage `json:"expect"`
 	SleepsMS  *[]int64                   `json:"sleeps_ms"`
+}
+
+type scenarioCall struct {
+	Verb string         `json:"verb"`
+	Args map[string]any `json:"args"`
 }
 
 type scenarioExchange struct {
@@ -76,7 +81,7 @@ type scenarioExchange struct {
 		JSON           json.RawMessage   `json:"json"`
 		Text           *string           `json:"text"`
 		SSE            *string           `json:"sse"`
-		TransportError bool              `json:"transport_error"`
+		TransportError any               `json:"transport_error"`
 		Cut            bool              `json:"cut"`
 	} `json:"response"`
 }
@@ -100,6 +105,12 @@ var scenarioErrorClasses = map[string]func(error) bool{
 	"CapacityExceededError":             isErrorType[*CapacityExceededError],
 	"BindingRevisionConflictError":      isErrorType[*BindingRevisionConflictError],
 	"AttachAuthorizationCommittedError": isErrorType[*AttachAuthorizationCommittedError],
+	"AttachCredentialsError":            isErrorType[*AttachCredentialsError],
+	"SandboxRetainedError":              isErrorType[*SandboxRetainedError],
+	"ComputerAlreadyStartedError":       isErrorType[*ComputerAlreadyStartedError],
+	"SandboxFailedError":                isErrorType[*SandboxFailedError],
+	"ReadyTimeoutError":                 isErrorType[*ReadyTimeoutError],
+	"BindError":                         isErrorType[*BindError],
 	"SandboxUnusableError":              isErrorType[*SandboxUnusableError],
 	"RateLimitedError":                  isErrorType[*RateLimited],
 	"ArtifactNotFoundError":             isErrorType[*ArtifactNotFoundError],
@@ -182,7 +193,9 @@ func runScenario(t *testing.T, s scenario) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if computer, err = client.AdoptExisting(ctx, g.ID, key, g.SandboxID, g.ComputerToken); err != nil {
+		if g.SandboxID == "" && g.ComputerToken == "" {
+			computer = newComputer(g.ID, key)
+		} else if computer, err = client.AdoptExisting(ctx, g.ID, key, g.SandboxID, g.ComputerToken); err != nil {
 			t.Fatal(err)
 		}
 		if g := s.Given.Session; g != nil {
@@ -198,6 +211,13 @@ func runScenario(t *testing.T, s scenario) {
 		}
 	}
 
+	for i, step := range s.Before {
+		before := s
+		before.Call = step
+		if _, _, err := callScenario(ctx, t, before, client, computer, session, credentials); err != nil {
+			t.Fatalf("before[%d] %s failed: %T %v", i, step.Verb, err, err)
+		}
+	}
 	value, events, callErr := callScenario(ctx, t, s, client, computer, session, credentials)
 
 	if raw, ok := s.Expect["error"]; ok {
@@ -312,6 +332,7 @@ func callScenario(ctx context.Context, t *testing.T, s scenario, client *Client,
 	case "Computer.status":
 		return value(needComputer().Status(ctx))
 	case "Computer.stop":
+		skipStopWait(t, s.Call)
 		return value(needComputer().Stop(ctx))
 	case "Computer.sessions":
 		return value(needComputer().Sessions(ctx))
@@ -323,7 +344,11 @@ func callScenario(ctx context.Context, t *testing.T, s scenario, client *Client,
 			return nil, nil, err
 		}
 		return map[string]any{"name": sess.Name(), "artifact_access": string(sess.Info().ArtifactAccess)}, nil, nil
+	case "Computer.delegateDesktop":
+		create, _ := s.Call.Args["create"].(bool)
+		return value(needComputer().DelegateDesktop(ctx, str("name"), create))
 	case "Client.stopComputer":
+		skipStopWait(t, s.Call)
 		return value(client.StopComputer(ctx, str("id")))
 	case "Artifacts.list":
 		return value(client.Artifacts(str("computer_id")).List(ctx, ArtifactListOptions{Prefix: str("prefix")}))
@@ -359,17 +384,34 @@ func callScenario(ctx context.Context, t *testing.T, s scenario, client *Client,
 		seconds, _ := s.Call.Args["expires_in_seconds"].(float64)
 		return value(needComputer().ArtifactLink(ctx, str("path"), time.Duration(seconds)*time.Second))
 	case "Client.createComputer":
-		c, err := client.CreateComputer(ctx, AttachOptions{Credentials: credentials})
-		if err != nil {
-			return nil, nil, err
+		ms, _ := s.Call.Args["ready_timeout_ms"].(float64)
+		return startedComputer(client.CreateComputer(ctx, AttachOptions{Credentials: credentials, ReadyTimeout: time.Duration(ms) * time.Millisecond}))
+	case "Client.startComputer", "Client.recoverComputer":
+		ms, _ := s.Call.Args["ready_timeout_ms"].(float64)
+		start := client.StartComputer
+		if s.Call.Verb == "Client.recoverComputer" {
+			start = client.RecoverComputer
 		}
-		return map[string]any{
-			"id": c.ID(), "sandbox_id": c.SandboxID(), "binding_revision": c.BindingRevision(),
-			"computer_token": c.ComputerToken(), "persistence_mode": c.PersistenceMode(),
-		}, nil, nil
+		return startedComputer(start(ctx, credentials, StartOptions{ReadyTimeout: time.Duration(ms) * time.Millisecond}))
 	default:
 		t.Fatalf("the runner has no Go mapping for %s", s.Call.Verb)
 		return nil, nil, nil
+	}
+}
+
+func startedComputer(c *Computer, err error) (any, []any, error) {
+	if err != nil {
+		return nil, nil, err
+	}
+	return map[string]any{
+		"id": c.ID(), "sandbox_id": c.SandboxID(), "binding_revision": c.BindingRevision(),
+		"computer_token": c.ComputerToken(), "persistence_mode": c.PersistenceMode(),
+	}, nil, nil
+}
+
+func skipStopWait(t *testing.T, call scenarioCall) {
+	if _, ok := call.Args["timeout_ms"]; ok {
+		t.Skip("Go's Stop has no wait; ctx bounds it")
 	}
 }
 
@@ -407,7 +449,23 @@ func checkScenarioError(t *testing.T, err error, want scenarioError) {
 		t.Fatalf("error = %T (%v), want %s", err, err, want.Class)
 	}
 	fields, _ := plain(err).(map[string]any)
+	// The fields Go derives (scenarios README, Outcome): the message without its
+	// "pinesandbox: " prefix, the retryable answer, and the time waited in milliseconds.
+	if fields == nil {
+		fields = map[string]any{}
+	}
+	fields["message"] = strings.TrimPrefix(err.Error(), "pinesandbox: ")
+	if _, ok := fields["retryable"]; !ok {
+		fields["retryable"] = IsRetryable(err)
+	}
+	var timeout *ReadyTimeoutError
+	if errors.As(err, &timeout) {
+		fields["waited_ms"] = float64(timeout.Waited.Milliseconds())
+	}
 	for name, v := range want.Fields {
+		if text, ok := v.(string); ok && name == "message" {
+			v = strings.ReplaceAll(text, "{recover}", "RecoverComputer")
+		}
 		if got := fields[name]; !reflect.DeepEqual(got, v) {
 			t.Errorf("%s.%s = %v, want %v", want.Class, name, mustJSON(got), mustJSON(v))
 		}
@@ -548,7 +606,10 @@ func (s *scriptedTransport) RoundTrip(req *http.Request) (*http.Response, error)
 			s.storageToken = issued.AccessToken
 		}
 	}
-	if resp.TransportError {
+	switch resp.TransportError {
+	case "connect":
+		return nil, errScenarioRefused
+	case true:
 		return nil, errScenarioReset
 	}
 	status := resp.Status
@@ -601,6 +662,9 @@ func (s *scriptedTransport) RoundTrip(req *http.Request) (*http.Response, error)
 // errScenarioReset is a scripted connection reset: a request that gets no response, or a
 // cut body.
 var errScenarioReset = errors.New("scenario: connection reset by peer")
+
+// errScenarioRefused is a scripted refused connection: the request was never sent.
+var errScenarioRefused = &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}
 
 // authClass names the credential a request carried, as the scenarios spell it;
 // storageToken is the artifact token's access token.

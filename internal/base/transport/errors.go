@@ -28,6 +28,7 @@ type TimeoutError struct {
 	Op        string // "<METHOD> <path>" (query-stripped)
 	RequestID string
 	Msg       string // the underlying cause / status detail
+	notSent   bool
 }
 
 func (e *TimeoutError) Error() string {
@@ -45,6 +46,7 @@ type ConnectionError struct {
 	Op        string
 	RequestID string
 	Msg       string
+	notSent   bool
 }
 
 func (e *ConnectionError) Error() string {

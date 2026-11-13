@@ -120,6 +120,8 @@ type (
 // arrives, or ctx ends while one is outstanding, Run returns a *RunUnconfirmedError naming
 // the key: send the run again with it. Any 503 counts as no response,
 // ErrLeaseRefreshUnavailable included, since it doesn't show whether the Computer acted.
+// Once one send's response was lost, any error from a later send is returned wrapped in
+// a *RunUnconfirmedError too, a *SandboxGoneError included: check for it first.
 func (a *AgentMode) Run(ctx context.Context, goal string, opts RunOptions) (*AgentTurn, error) {
 	if opts.IdempotencyKey == "" {
 		key, err := uuidV7()
@@ -128,7 +130,9 @@ func (a *AgentMode) Run(ctx context.Context, goal string, opts RunOptions) (*Age
 		}
 		opts.IdempotencyKey = key
 	}
-	return a.s.coord.AgentRun(ctx, a.s.computerToken(), a.s.name, goal, opts)
+	return sessionCall(a.s, func(coord *coordinator.Client, ct string) (*AgentTurn, error) {
+		return coord.AgentRun(ctx, ct, a.s.name, goal, opts)
+	})
 }
 
 // Wait returns the turn once it ends, with its result or its question, or after
@@ -137,26 +141,35 @@ func (a *AgentMode) Run(ctx context.Context, goal string, opts RunOptions) (*Age
 // for the turn to come back; with less than a second left it reads the turn once. A read
 // that comes back before its server-side hold is followed by a pause of up to a second. A read
 // whose response was lost (a network fault, a 408, or a gateway 502, 503 or 504), or
-// whose problem is marked retryable, is read again until the timeout; any other error
-// is returned. Wait never cancels the turn and never follows NextTurnID. An answered
+// whose problem is marked retryable, is read again until the timeout; then Wait returns
+// the turn as it last read it, or the last error when no read came back. Such an error
+// means this process lost the Computer, not that the turn failed: the turn keeps running,
+// so wait again rather than stopping the Computer. Any other error is returned. Wait
+// never cancels the turn and never follows NextTurnID. An answered
 // turn means someone already answered its question: continue with NextTurnID instead of
 // presenting it again.
 func (a *AgentMode) Wait(ctx context.Context, turnID string, timeout time.Duration) (*AgentTurn, error) {
-	return a.s.coord.AgentWait(ctx, a.s.readToken(), a.s.name, turnID, timeout)
+	return sessionCall(a.s, func(coord *coordinator.Client, ct string) (*AgentTurn, error) {
+		return coord.AgentWait(ctx, a.s.readToken(ct), a.s.name, turnID, timeout)
+	})
 }
 
 // Answer answers the question that ended turnID and returns the turn the answer opened,
 // which continues the same goal; save its TurnID. Only the session's latest turn can be
 // answered. Sending the same answer again returns that same turn. Put only $NAME
-// references in answer; opts.Secrets carries credentials outside model-visible text.
+// references in answer; opts.Secrets supplies sensitive values separately from answer text.
 func (a *AgentMode) Answer(ctx context.Context, turnID, answer string, opts AnswerOptions) (*AgentTurn, error) {
-	return a.s.coord.AgentAnswer(ctx, a.s.computerToken(), a.s.name, turnID, answer, opts)
+	return sessionCall(a.s, func(coord *coordinator.Client, ct string) (*AgentTurn, error) {
+		return coord.AgentAnswer(ctx, ct, a.s.name, turnID, answer, opts)
+	})
 }
 
 // Steer adds guidance to turnID while it is running and returns the turn. It is not
 // retried: a conflict at a completion boundary does not prove the text was not delivered.
 func (a *AgentMode) Steer(ctx context.Context, turnID, text string, opts SteerOptions) (*AgentTurn, error) {
-	return a.s.coord.AgentSteer(ctx, a.s.computerToken(), a.s.name, turnID, text, opts)
+	return sessionCall(a.s, func(coord *coordinator.Client, ct string) (*AgentTurn, error) {
+		return coord.AgentSteer(ctx, ct, a.s.name, turnID, text, opts)
+	})
 }
 
 // Cancel cancels turnID while it runs and returns it, canceling until the agent stops.
@@ -165,23 +178,31 @@ func (a *AgentMode) Steer(ctx context.Context, turnID, text string, opts SteerOp
 // answer opened instead. Any other ended turn is returned unchanged, so a lost response
 // is resent.
 func (a *AgentMode) Cancel(ctx context.Context, turnID string) (*AgentTurn, error) {
-	return a.s.coord.AgentCancel(ctx, a.s.computerToken(), a.s.name, turnID)
+	return sessionCall(a.s, func(coord *coordinator.Client, ct string) (*AgentTurn, error) {
+		return coord.AgentCancel(ctx, ct, a.s.name, turnID)
+	})
 }
 
 // Reset clears the session's persistent agent thread (memory); returns the Task.
 func (a *AgentMode) Reset(ctx context.Context, opts TaskOptions) (*AgentTask, error) {
-	return a.s.coord.AgentReset(ctx, a.s.computerToken(), a.s.name, opts)
+	return sessionCall(a.s, func(coord *coordinator.Client, ct string) (*AgentTask, error) {
+		return coord.AgentReset(ctx, ct, a.s.name, opts)
+	})
 }
 
 // Status returns the session's Task and its latest turn, for discovering work. Answer,
 // steer and cancel the turn you saved, not whichever turn is latest.
 func (a *AgentMode) Status(ctx context.Context, opts TaskOptions) (*AgentTask, error) {
-	return a.s.coord.AgentTask(ctx, a.s.readToken(), a.s.name, opts)
+	return sessionCall(a.s, func(coord *coordinator.Client, ct string) (*AgentTask, error) {
+		return coord.AgentTask(ctx, a.s.readToken(ct), a.s.name, opts)
+	})
 }
 
 // Turns lists the session's retained turns, oldest first, with the IDs events carry.
 func (a *AgentMode) Turns(ctx context.Context, opts TaskOptions) ([]AgentTurn, error) {
-	return a.s.coord.AgentTurns(ctx, a.s.readToken(), a.s.name, opts)
+	return sessionCall(a.s, func(coord *coordinator.Client, ct string) ([]AgentTurn, error) {
+		return coord.AgentTurns(ctx, a.s.readToken(ct), a.s.name, opts)
+	})
 }
 
 // Events streams the session's public activity as a typed, resuming iterator, for
@@ -197,7 +218,11 @@ func (a *AgentMode) Turns(ctx context.Context, opts TaskOptions) ([]AgentTurn, e
 // process restart ("" replays retained history). Save both TaskID and cursor.
 // Break to stop; cancel ctx to end cleanly.
 func (a *AgentMode) Events(ctx context.Context, lastEventID string, opts EventsOptions) iter.Seq2[AgentEvent, error] {
-	return a.s.coord.AgentEvents(ctx, a.s.readToken(), a.s.name, lastEventID, opts)
+	coord, ct, err := a.s.client()
+	if err != nil {
+		return failedSeq[AgentEvent](err)
+	}
+	return coord.AgentEvents(ctx, a.s.readToken(ct), a.s.name, lastEventID, opts)
 }
 
 // EventsPage reads one page of the session's retained public activity after
@@ -205,5 +230,7 @@ func (a *AgentMode) Events(ctx context.Context, lastEventID string, opts EventsO
 // holding a stream open. Advance with the page's NextAfter until it reaches
 // LatestEventID; an empty or short page does not mean history is exhausted.
 func (a *AgentMode) EventsPage(ctx context.Context, opts EventsPageOptions) (*AgentEventsPage, error) {
-	return a.s.coord.AgentEventsPage(ctx, a.s.readToken(), a.s.name, opts)
+	return sessionCall(a.s, func(coord *coordinator.Client, ct string) (*AgentEventsPage, error) {
+		return coord.AgentEventsPage(ctx, a.s.readToken(ct), a.s.name, opts)
+	})
 }
