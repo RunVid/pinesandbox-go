@@ -103,6 +103,7 @@ var scenarioErrorClasses = map[string]func(error) bool{
 	"SandboxGoneError":                  isErrorType[*SandboxGoneError],
 	"RunUnconfirmedError":               isErrorType[*RunUnconfirmedError],
 	"CapacityExceededError":             isErrorType[*CapacityExceededError],
+	"SpendLimitReachedError":            isErrorType[*SpendLimitReachedError],
 	"BindingRevisionConflictError":      isErrorType[*BindingRevisionConflictError],
 	"AttachAuthorizationCommittedError": isErrorType[*AttachAuthorizationCommittedError],
 	"AttachCredentialsError":            isErrorType[*AttachCredentialsError],

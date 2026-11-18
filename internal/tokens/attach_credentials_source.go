@@ -380,6 +380,10 @@ func (s *AttachCredentialsSource) genericForbidden(ae *problem.APIError, op, for
 	case 401:
 		msg = "invalid or unknown project client key"
 	case 403:
+		if ae.ProblemType == problem.SpendLimitReachedType {
+			return &problem.SpendLimitReachedError{Status: ae.Status, Code: problem.SpendLimitReachedCode, Msg: ae.Detail,
+				Host: ae.Host, Op: ae.Op, RequestID: ae.RequestID, Cause: ae}
+		}
 		return &ProjectAccessDenied{tokenBaseFrom(forbidden, ae)}
 	case 429:
 		msg = "portal rate-limited the " + op

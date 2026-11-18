@@ -11,6 +11,7 @@ package problem
 import (
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -198,3 +199,36 @@ func RetryableFallback(slug string, status int) bool {
 		return false
 	}
 }
+
+// ErrSpendLimitReached is the errors.Is target for a call refused because the project can't
+// pay: it reached its monthly spend limit, or its organization is out of credits.
+var ErrSpendLimitReached = errors.New("pinesandbox: project is at its spend limit or out of credits")
+
+const (
+	// SpendLimitReachedCode names that refusal.
+	SpendLimitReachedCode = "SPEND_LIMIT_REACHED"
+	// SpendLimitReachedType is its problem type, the same from every call.
+	SpendLimitReachedType = "urn:pinesandbox:problem:spend-limit-reached"
+)
+
+// SpendLimitReachedError is the one error for that refusal, whichever call met it (starting
+// or resuming a Computer, changing its idle timeout, attaching). Msg says which of the two
+// limits it is. errors.Is(err, ErrSpendLimitReached).
+type SpendLimitReachedError struct {
+	Status    int
+	Code      string // always SpendLimitReachedCode
+	Msg       string
+	Host      string
+	Op        string
+	RequestID string
+	Cause     error
+}
+
+func (e *SpendLimitReachedError) Error() string {
+	return fmt.Sprintf("pinesandbox: spend limit reached (%d): %s", e.Status, e.Msg) +
+		ContextSuffix(e.Host, e.Op, e.RequestID)
+}
+
+func (e *SpendLimitReachedError) Unwrap() error { return e.Cause }
+
+func (e *SpendLimitReachedError) Is(target error) bool { return target == ErrSpendLimitReached }

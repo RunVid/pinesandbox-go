@@ -271,6 +271,16 @@ type (
 	CreateRateLimitedError = controlplane.CreateRateLimitedError
 )
 
+// SpendLimitReachedError is the refusal behind ErrSpendLimitReached.
+type SpendLimitReachedError = problem.SpendLimitReachedError
+
+// ErrSpendLimitReached (403 SPEND_LIMIT_REACHED): starting, attaching or resuming a Computer, or
+// changing its idle timeout, was refused because the project reached its monthly spend limit
+// or its organization is out of credits. The same error whichever call was refused. Nothing
+// was started or changed; reading, stopping, pausing and deleting still work. Not retried by
+// the SDK. errors.As reaches SpendLimitReachedError, whose Msg says which limit it is.
+var ErrSpendLimitReached = problem.ErrSpendLimitReached
+
 // ErrCapacityExceeded (429 COMPUTER_CAPACITY_EXCEEDED): create/attach was refused because the
 // project is at its concurrent Computer limit, so nothing was provisioned. Not retried by the
 // SDK; stop another of the project's Computers first. errors.As reaches CapacityExceededError.

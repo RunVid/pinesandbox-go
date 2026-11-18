@@ -134,6 +134,9 @@ func statusError(method, path, host string, resp *transport.Response) error {
 		return &BadRequestError{b}
 	case status == 401:
 		return &UnauthorizedError{b}
+	case status == 403 && problemType(resp.Body) == problem.SpendLimitReachedType:
+		return &problem.SpendLimitReachedError{Status: status, Code: problem.SpendLimitReachedCode, Msg: b.Msg,
+			Host: b.Host, Op: b.Op, RequestID: b.RequestID}
 	case status == 403:
 		return &ForbiddenError{b}
 	case status == 404:
@@ -172,6 +175,17 @@ func statusCode(body []byte) string {
 		return ""
 	}
 	return m.Code
+}
+
+// problemType is the body's RFC 9457 type, which the gateway's own refusals carry.
+func problemType(body []byte) string {
+	var m struct {
+		Type string `json:"type"`
+	}
+	if json.Unmarshal(body, &m) != nil {
+		return ""
+	}
+	return m.Type
 }
 
 // statusMessage surfaces whichever message field is present: control-plane errors are

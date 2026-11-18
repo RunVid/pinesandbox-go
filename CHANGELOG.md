@@ -8,6 +8,26 @@ for the next minor version (`v0.3.17`, and the release after `v0.3.18` that
 renamed the Runtime names to Sandbox, were the exceptions). Review release notes
 before adopting a new minor version.
 
+## [0.3.22] — 2026-11-18
+
+### Added
+
+- `TerminalSpendLimitReached`: the `terminal_reason` of a turn Pine ended because the Computer's project can't pay for
+  more work (it reached its monthly spend limit, or its organization is out of credits) and the
+  access the Computer still held ran out. Read the turn's summary for what was done. It isn't a
+  fault, and new turns are refused with `ErrLeaseExpired` (403, `reason` `spend_limit_reached`) until credits
+  are added or the limit is raised.
+- `ErrSpendLimitReached` (`*SpendLimitReachedError`): the one error for a project that can't pay (it reached its monthly spend limit, or its
+  organization is out of credits). Start, Recover, resume and an idle-timeout change are refused with
+  it before anything is started or changed, and the SDK doesn't retry. Reading, stopping, pausing and
+  deleting a Computer still work.
+
+### Changed
+
+- An attach refused because the project can't pay raises `ErrSpendLimitReached`, no longer
+  `*ProjectAccessDenied` with `reason` `spend_limit_reached`. Rescue the new error where you handled that
+  reason.
+
 ## [0.3.21] — 2026-11-12
 
 ### Changed
